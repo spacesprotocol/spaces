@@ -16,6 +16,7 @@ use tokio::{
     sync::{broadcast, mpsc},
     task::{JoinHandle, JoinSet},
 };
+use spaced::rpc::WalletLoadRequest;
 
 #[tokio::main]
 async fn main() {
@@ -53,7 +54,7 @@ impl Composer {
         }
     }
 
-    async fn setup_rpc_wallet(&mut self, spaced: &Spaced, rx: mpsc::Receiver<LoadedWallet>) {
+    async fn setup_rpc_wallet(&mut self, spaced: &Spaced, rx: mpsc::Receiver<WalletLoadRequest>) {
         let wallet_service = RpcWallet::service(
             spaced.network,
             spaced.rpc.clone(),

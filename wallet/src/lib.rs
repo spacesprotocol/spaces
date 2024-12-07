@@ -7,26 +7,11 @@ use std::{
 };
 use std::collections::HashSet;
 use anyhow::{anyhow, Context};
-use bdk_wallet::{
-    chain::{BlockId, ConfirmationTime},
-    wallet::{
-        coin_selection::{CoinSelectionAlgorithm, CoinSelectionResult, Error, Excess},
-        tx_builder::TxOrdering,
-        ChangeSet, InsertTxError,
-    },
-    KeychainKind, LocalOutput, SignOptions, WeightedUtxo,
-};
+use bdk_wallet::{chain::{BlockId}, coin_selection::{CoinSelectionAlgorithm, CoinSelectionResult, InsufficientFunds, Excess}, tx_builder::TxOrdering, ChangeSet, KeychainKind, LocalOutput, PersistedWallet, SignOptions, Wallet, WeightedUtxo};
+use bdk_wallet::rusqlite::Connection;
 use bincode::config;
-use bitcoin::{
-    absolute::{Height, LockTime},
-    psbt::raw::ProprietaryKey,
-    script,
-    sighash::{Prevouts, SighashCache},
-    taproot,
-    taproot::LeafVersion,
-    Amount, Block, BlockHash, FeeRate, Network, OutPoint, Psbt, Sequence, TapLeafHash,
-    TapSighashType, Transaction, TxOut, Witness,
-};
+use bitcoin::{absolute::{Height, LockTime}, psbt::raw::ProprietaryKey, script, sighash::{Prevouts, SighashCache}, taproot, taproot::LeafVersion, Amount, Block, BlockHash, FeeRate, Network, OutPoint, Psbt, Sequence, TapLeafHash, TapSighashType, Transaction, TxOut, Weight, Witness};
+use bitcoin::key::rand::RngCore;
 use protocol::{
     bitcoin::{
         constants::genesis_block,
@@ -51,12 +36,10 @@ pub mod address;
 pub mod builder;
 pub mod export;
 
-const WALLET_SPACE_MAGIC: &[u8; 12] = b"WALLET_SPACE";
-
 pub struct SpacesWallet {
     pub config: WalletConfig,
-    pub spaces: bdk_wallet::wallet::Wallet,
-    pub spaces_db: bdk_file_store::Store<ChangeSet>,
+    pub spaces: PersistedWallet<Connection>,
+    pub connection: Connection,
     pub watch_bid_spends: HashSet<OutPoint>,
 }
 
@@ -98,6 +81,7 @@ pub struct FullTxOut {
     pub(crate) txout: TxOut,
 }
 
+#[derive(Clone, Debug)]
 pub struct WalletConfig {
     pub name: String,
     pub data_dir: PathBuf,
@@ -107,6 +91,7 @@ pub struct WalletConfig {
     pub space_descriptors: WalletDescriptors,
 }
 
+#[derive(Clone, Debug)]
 pub struct WalletDescriptors {
     pub external: String,
     pub internal: String,
@@ -122,29 +107,29 @@ impl SpacesWallet {
             fs::create_dir_all(config.data_dir.clone())?;
         }
 
-        let spaces_path = config.data_dir.join("spaces.db");
-        let mut spaces_db =
-            bdk_file_store::Store::<ChangeSet>::open_or_create_new(WALLET_SPACE_MAGIC, spaces_path)
-                .context("create store for spaces")?;
+        let wallet_path = config.data_dir.join("wallet.db");
+        use bdk_wallet::rusqlite::Connection;
+
+        let mut conn = Connection::open(wallet_path)?;
 
         let genesis_hash = match config.genesis_hash {
             None => genesis_block(config.network).block_hash(),
             Some(hash) => hash,
         };
 
-        let spaces_changeset = spaces_db.aggregate_changesets()?;
-        let spaces_wallet = bdk_wallet::wallet::Wallet::new_or_load_with_genesis_hash(
-            &config.space_descriptors.external,
-            &config.space_descriptors.internal,
-            spaces_changeset,
-            config.network,
-            genesis_hash,
-        )?;
+        // let spaces_changeset = spaces_db.aggregate_changesets()?;
+        let spaces_wallet = Wallet::create(
+            config.space_descriptors.external.clone(),
+            config.space_descriptors.internal.clone(),
+        )
+            .network(config.network)
+            .genesis_hash(genesis_hash)
+            .create_wallet(&mut conn)?;
 
         let wallet = Self {
             config,
             spaces: spaces_wallet,
-            spaces_db,
+            connection: conn,
             watch_bid_spends: HashSet::new(),
         };
 
@@ -158,9 +143,7 @@ impl SpacesWallet {
 
     pub fn rebuild(self) -> anyhow::Result<Self> {
         let config = self.config;
-        drop(self.spaces_db);
-        fs::remove_file(config.data_dir.join("spaces.db"))?;
-        fs::remove_file(config.data_dir.join("coins.db"))?;
+        fs::remove_file(config.data_dir.join("wallet.db"))?;
         Ok(SpacesWallet::new(config)?)
     }
 
@@ -209,19 +192,11 @@ impl SpacesWallet {
         Ok(())
     }
 
-    pub fn insert_tx(
-        &mut self,
-        tx: Transaction,
-        position: ConfirmationTime,
-    ) -> Result<bool, InsertTxError> {
-        self.spaces.insert_tx(tx.clone(), position)
+    pub fn apply_unconfirmed_tx(&mut self, tx: Transaction, seen: u64) {
+        self.spaces.apply_unconfirmed_txs(vec![(tx, seen)]);
     }
-
     pub fn commit(&mut self) -> anyhow::Result<()> {
-        if let Some(changeset) = self.spaces.take_staged() {
-            self.spaces_db.append_changeset(&changeset)?;
-        }
-
+        self.spaces.persist(&mut self.connection)?;
         Ok(())
     }
 
@@ -347,7 +322,7 @@ impl SpacesWallet {
                 .allow_dust(true)
                 .ordering(TxOrdering::Untouched)
                 .nlocktime(LockTime::Blocks(Height::ZERO))
-                .enable_rbf_with_sequence(Sequence::ENABLE_RBF_NO_LOCKTIME)
+                .set_exact_sequence(Sequence::ENABLE_RBF_NO_LOCKTIME)
                 .manually_selected_only()
                 .sighash(TapSighashType::SinglePlusAnyoneCanPay.into())
                 .add_utxo(placeholder.auction.outpoint)?
@@ -423,8 +398,7 @@ impl SpacesWallet {
                         .witness_utxo
                         .as_ref()
                         .unwrap()
-                        .script_pubkey
-                        .as_script(),
+                        .script_pubkey.clone(),
                 ) {
                     input
                         .proprietary
@@ -575,14 +549,15 @@ impl SpacesWallet {
 pub struct RequiredUtxosOnlyCoinSelectionAlgorithm;
 
 impl CoinSelectionAlgorithm for RequiredUtxosOnlyCoinSelectionAlgorithm {
-    fn coin_select(
+    fn coin_select<R: RngCore>(
         &self,
         required_utxos: Vec<WeightedUtxo>,
         _optional_utxos: Vec<WeightedUtxo>,
         _fee_rate: FeeRate,
         _target_amount: u64,
         _drain_script: &bitcoin::Script,
-    ) -> Result<CoinSelectionResult, Error> {
+        _rand: &mut R,
+    ) -> Result<CoinSelectionResult, InsufficientFunds> {
         let utxos = required_utxos.iter().map(|w| w.utxo.clone()).collect();
         Ok(CoinSelectionResult {
             selected: utxos,
@@ -625,13 +600,14 @@ impl SpaceScriptSigningInfo {
         })
     }
 
-    pub fn satisfaction_weight(&self) -> usize {
-        // 1-byte varint(control_block)
-        1 + self.control_block.size() +
-            // 1-byte varint(script)
-            1 + self.script.len() +
-            // 1-byte varint(sig+sighash) + <sig(64)+sigHash(1)>
-            1 + 65
+    pub fn satisfaction_weight(&self) -> Weight {
+        Weight::from_vb(( // 1-byte varint(control_block)
+            1 + self.control_block.size() +
+                // 1-byte varint(script)
+                1 + self.script.len() +
+                // 1-byte varint(sig+sighash) + <sig(64)+sigHash(1)>
+                1 + 65
+        ) as _).expect("valid weight")
     }
 
     pub(crate) fn to_vec(&self) -> Vec<u8> {

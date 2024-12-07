@@ -24,7 +24,7 @@ use wallet::{
     bdk_wallet,
     bdk_wallet::{
         chain::{local_chain::CheckPoint, BlockId},
-        wallet::tx_builder::TxOrdering,
+        tx_builder::TxOrdering,
         KeychainKind, LocalOutput,
     },
     bitcoin,
@@ -46,6 +46,7 @@ use crate::{
     store::{ChainState, LiveSnapshot, Sha256},
 };
 use crate::checker::TxChecker;
+use crate::rpc::WalletLoadRequest;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TxResponse {
@@ -137,7 +138,7 @@ pub struct Balance {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BalanceDetails {
     #[serde(flatten)]
-    pub balance: bdk_wallet::wallet::Balance,
+    pub balance: bdk_wallet::Balance,
     pub dust: Amount,
 }
 
@@ -216,7 +217,6 @@ impl RpcWallet {
             .coin_selection(coin_selection);
 
         builder
-            .enable_rbf()
             .ordering(TxOrdering::Untouched)
             .nlocktime(previous_tx_lock_time)
             .fee_rate(fee_rate);
@@ -231,8 +231,8 @@ impl RpcWallet {
         }
 
         let new_txid = tx.compute_txid();
-        let confirmation = source.rpc.broadcast_tx(&source.client, &tx)?;
-        wallet.insert_tx(tx, confirmation)?;
+        let last_seen = source.rpc.broadcast_tx(&source.client, &tx)?;
+        wallet.apply_unconfirmed_tx(tx, last_seen);
         wallet.commit()?;
 
         Ok(vec![TxResponse {
@@ -256,7 +256,6 @@ impl RpcWallet {
 
         builder.ordering(TxOrdering::Untouched);
         builder.fee_rate(fee_rate);
-        builder.enable_rbf();
         builder.add_utxo(output)?;
         builder.add_recipient(addre.script_pubkey(), Amount::from_sat(5000));
 
@@ -264,8 +263,8 @@ impl RpcWallet {
         let tx = wallet.sign(psbt, None)?;
 
         let txid = tx.compute_txid();
-        let confirmation = source.rpc.broadcast_tx(&source.client, &tx)?;
-        wallet.insert_tx(tx, confirmation)?;
+        let last_seen = source.rpc.broadcast_tx(&source.client, &tx)?;
+        wallet.apply_unconfirmed_tx(tx, last_seen);
         wallet.commit()?;
 
         Ok(TxResponse {
@@ -396,21 +395,21 @@ impl RpcWallet {
                             },
                         )?;
 
-                        // Temporary fix for https://github.com/bitcoindevkit/bdk/issues/1740
-                        for tx in block.txdata {
-                            for input in tx.input.iter() {
-                                if wallet.watch_bid_spends.contains(&input.previous_output) {
-                                    if wallet.spaces.get_tx(tx.compute_txid()).is_some() {
-                                        break;
-                                    }
-                                    wallet.insert_tx(tx, ConfirmationTime::Confirmed {
-                                        height: id.height,
-                                        time: block.header.time as _,
-                                    })?;
-                                    break;
-                                }
-                            }
-                        }
+                        // // Temporary fix for https://github.com/bitcoindevkit/bdk/issues/1740
+                        // for tx in block.txdata {
+                        //     for input in tx.input.iter() {
+                        //         if wallet.watch_bid_spends.contains(&input.previous_output) {
+                        //             if wallet.spaces.get_tx(tx.compute_txid()).is_some() {
+                        //                 break;
+                        //             }
+                        //             wallet.insert_tx(tx, ConfirmationTime::Confirmed {
+                        //                 height: id.height,
+                        //                 time: block.header.time as _,
+                        //             })?;
+                        //             break;
+                        //         }
+                        //     }
+                        // }
 
                         wallet_tip.height = id.height;
                         wallet_tip.hash = id.hash;
@@ -685,7 +684,7 @@ impl RpcWallet {
                                 || !full.spaceout.space.as_ref().unwrap().is_owned()
                                 || !wallet
                                 .spaces
-                                .is_mine(full.spaceout.script_pubkey.as_script()) =>
+                                .is_mine(full.spaceout.script_pubkey.clone()) =>
                                 {
                                     return Err(anyhow!("sendspaces: you don't own `{}`", space));
                                 }
@@ -735,7 +734,7 @@ impl RpcWallet {
                         return Err(anyhow!("register '{}': space does not exist", params.name));
                     }
                     let utxo = spaceout.unwrap();
-                    if !wallet.spaces.is_mine(&utxo.spaceout.script_pubkey) {
+                    if !wallet.spaces.is_mine(utxo.spaceout.script_pubkey.clone()) {
                         return Err(anyhow!(
                             "register '{}': you don't own this space",
                             params.name
@@ -788,7 +787,7 @@ impl RpcWallet {
                             return Err(anyhow!("execute on '{}': space does not exist", space));
                         }
                         let spaceout = spaceout.unwrap();
-                        if !wallet.spaces.is_mine(&spaceout.spaceout.script_pubkey) {
+                        if !wallet.spaces.is_mine(spaceout.spaceout.script_pubkey.clone()) {
                             return Err(anyhow!(
                                 "execute on '{}': you don't own this space",
                                 space
@@ -846,8 +845,8 @@ impl RpcWallet {
             let raw = bitcoin::consensus::encode::serialize_hex(&tagged.tx);
             let result = source.rpc.broadcast_tx(&source.client, &tagged.tx);
             match result {
-                Ok(confirmation) => {
-                    tx_iter.wallet.insert_tx(tagged.tx, confirmation)?;
+                Ok(last_seen) => {
+                    tx_iter.wallet.apply_unconfirmed_tx(tagged.tx, last_seen);
                     tx_iter.wallet.commit()?;
                 }
                 Err(e) => {
@@ -892,11 +891,27 @@ impl RpcWallet {
         Ok(WalletResponse { result: result_set })
     }
 
+    pub fn load_wallet(src: &BitcoinBlockSource, request: &WalletLoadRequest) -> anyhow::Result<SpacesWallet> {
+        let mut wallet = SpacesWallet::new(request.config.clone())?;
+        let wallet_tip = wallet.spaces.local_chain().tip().height();
+
+        if wallet_tip < request.export.blockheight {
+            let hash = src.get_block_hash(request.export.blockheight)?;
+            wallet.spaces.insert_checkpoint(BlockId {
+                height: request.export.blockheight,
+                hash,
+            })?;
+            wallet.commit()?;
+        }
+
+        Ok(wallet)
+    }
+
     pub async fn service(
         network: ExtendedNetwork,
         rpc: BitcoinRpc,
         store: LiveSnapshot,
-        mut channel: Receiver<LoadedWallet>,
+        mut channel: Receiver<WalletLoadRequest>,
         shutdown: broadcast::Sender<()>,
         num_workers: usize,
     ) -> anyhow::Result<()> {
@@ -911,9 +926,7 @@ impl RpcWallet {
                 }
                 wallet = channel.recv() => {
                     if let Some( loaded ) = wallet {
-                        let wallet_name = loaded.wallet.name().to_string();
-                        info!("Loaded wallet: {}", wallet_name);
-
+                        let wallet_name = loaded.export.label.clone();
                         let wallet_chain = store.clone();
                         let rpc = rpc.clone();
                         let wallet_shutdown = shutdown.subscribe();
@@ -921,15 +934,23 @@ impl RpcWallet {
 
                         std::thread::spawn(move || {
                             let source = BitcoinBlockSource::new(rpc);
-                            _ = tx.send(Self::wallet_sync(
+                            let wallet = Self::load_wallet(&source, &loaded);
+                            match wallet {
+                                Ok(wallet) => {
+                                    _ = tx.send(Self::wallet_sync(
                                 network,
                                 source,
                                 wallet_chain,
-                                loaded.wallet,
+                                wallet,
                                 loaded.rx,
                                 wallet_shutdown,
                                 num_workers
-                            ));
+                              ));
+                                }
+                                Err(err) => {
+                                    _ = tx.send(Err(err));
+                                }
+                            }
                         });
                         wallet_results.push(named_future(wallet_name, rx));
                     }

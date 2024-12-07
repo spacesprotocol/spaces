@@ -289,8 +289,14 @@ pub struct WalletManager {
     pub data_dir: PathBuf,
     pub network: ExtendedNetwork,
     pub rpc: BitcoinRpc,
-    pub wallet_loader: mpsc::Sender<LoadedWallet>,
+    pub wallet_loader: mpsc::Sender<WalletLoadRequest>,
     pub wallets: Arc<RwLock<BTreeMap<String, RpcWallet>>>,
+}
+
+pub struct WalletLoadRequest {
+    pub(crate) rx: mpsc::Receiver<WalletCommand>,
+    pub(crate) config: WalletConfig,
+    pub(crate) export: WalletExport,
 }
 
 pub struct LoadedWallet {
@@ -379,7 +385,8 @@ impl WalletManager {
         let xpriv = Self::descriptor_from_mnemonic(network, &mnemonic.to_string())?;
 
         let (external, internal) = Self::default_descriptors(xpriv);
-        let tmp = bdk::wallet::Wallet::new_or_load(external, internal, None, network)?;
+        let tmp = bdk::Wallet::create(external, internal)
+            .network(network).create_wallet_no_persist()?;
         let export =
             WalletExport::export_wallet(&tmp, &name, start_block.height).map_err(|e| anyhow!(e))?;
 
@@ -435,7 +442,7 @@ impl WalletManager {
         let (network, genesis_hash) = self.fallback_network();
         let export: WalletExport = serde_json::from_reader(file)?;
 
-        let mut wallet = SpacesWallet::new(WalletConfig {
+        let wallet_config = WalletConfig {
             start_block: export.blockheight,
             data_dir: wallet_dir,
             name: name.to_string(),
@@ -447,20 +454,16 @@ impl WalletManager {
                     .change_descriptor()
                     .expect("expected a change descriptor"),
             },
-        })?;
-
-        let wallet_tip = wallet.spaces.local_chain().tip().height();
-
-        if wallet_tip < export.blockheight {
-            let block_id = self.get_block_hash(client, export.blockheight).await?;
-            wallet.spaces.insert_checkpoint(block_id)?;
-            wallet.commit()?;
-        }
+        };
 
         let (rpc_wallet, rpc_wallet_rx) = RpcWallet::new();
-        let loaded_wallet = LoadedWallet::new(wallet, rpc_wallet_rx);
+        let request = WalletLoadRequest {
+            rx: rpc_wallet_rx,
+            config: wallet_config,
+            export,
+        };
 
-        self.wallet_loader.send(loaded_wallet).await?;
+        self.wallet_loader.send(request).await?;
         let mut wallets = self.wallets.write().await;
         wallets.insert(name.to_string(), rpc_wallet);
         Ok(())

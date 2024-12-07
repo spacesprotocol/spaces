@@ -8,19 +8,16 @@ use std::{
 
 use anyhow::{anyhow, Context};
 use bdk_wallet::{
-    wallet::{
-        coin_selection::{
-            CoinSelectionAlgorithm, CoinSelectionResult, DefaultCoinSelectionAlgorithm, Error,
-        },
-        error::CreateTxError,
-        tx_builder::TxOrdering,
+    coin_selection::{
+        CoinSelectionAlgorithm, CoinSelectionResult, DefaultCoinSelectionAlgorithm,
     },
+    error::CreateTxError,
+    tx_builder::TxOrdering,
     KeychainKind, TxBuilder, Utxo, WeightedUtxo,
 };
-use bitcoin::{
-    absolute::LockTime, psbt, psbt::Input, script, script::PushBytesBuf, Address, Amount, FeeRate,
-    Network, OutPoint, Psbt, Script, ScriptBuf, Sequence, Transaction, TxOut, Txid, Witness,
-};
+use bdk_wallet::coin_selection::InsufficientFunds;
+use bitcoin::{absolute::LockTime, psbt, psbt::Input, script, script::PushBytesBuf, Address, Amount, FeeRate, Network, OutPoint, Psbt, Script, ScriptBuf, Sequence, Transaction, TxOut, Txid, Weight, Witness};
+use bitcoin::key::rand::RngCore;
 use protocol::{
     bitcoin::absolute::Height,
     constants::{BID_PSBT_INPUT_SEQUENCE, BID_PSBT_TX_VERSION},
@@ -172,6 +169,11 @@ trait TxBuilderSpacesUtils<'a, Cs: CoinSelectionAlgorithm> {
     fn add_transfer(&mut self, request: TransferRequest) -> anyhow::Result<&mut Self>;
 }
 
+fn tap_key_spend_weight() -> Weight {
+    let tap_key_spend_weight : u64 = 66;
+     Weight::from_vb(tap_key_spend_weight).expect("valid weight")
+}
+
 impl<'a, Cs: CoinSelectionAlgorithm> TxBuilderSpacesUtils<'a, Cs> for TxBuilder<'a, Cs> {
     fn add_refund(&mut self, info: &FullSpaceOut) -> anyhow::Result<&mut Self> {
         let (input, txout) = match info.refund_psbt_data() {
@@ -179,12 +181,11 @@ impl<'a, Cs: CoinSelectionAlgorithm> TxBuilderSpacesUtils<'a, Cs> for TxBuilder<
             Some(out) => out,
         };
 
-        let tap_key_spend_weight = 66;
         self.version(BID_PSBT_TX_VERSION.0);
         self.add_foreign_utxo_with_sequence(
             info.outpoint(),
             input,
-            tap_key_spend_weight,
+            tap_key_spend_weight(),
             BID_PSBT_INPUT_SEQUENCE,
         )?;
         self.add_recipient(txout.script_pubkey, txout.value);
@@ -218,7 +219,7 @@ impl<'a, Cs: CoinSelectionAlgorithm> TxBuilderSpacesUtils<'a, Cs> for TxBuilder<
             },
         };
 
-        let mut spend_input = psbt::Input {
+        let mut spend_input = Input {
             witness_utxo: Some(placeholder.spend.txout.clone()),
             final_script_witness: Some(Witness::default()),
             final_script_sig: Some(ScriptBuf::new()),
@@ -233,14 +234,14 @@ impl<'a, Cs: CoinSelectionAlgorithm> TxBuilderSpacesUtils<'a, Cs> for TxBuilder<
             placeholder.auction.outpoint.vout as u8,
             &offer,
         )?)
-        .expect("compressed psbt script bytes");
+            .expect("compressed psbt script bytes");
 
         let carrier = ScriptBuf::new_op_return(&compressed_psbt);
 
         self.add_foreign_utxo_with_sequence(
             placeholder.spend.outpoint,
             spend_input,
-            66,
+            tap_key_spend_weight(),
             Sequence::ENABLE_RBF_NO_LOCKTIME,
         )?;
         self.add_recipient(carrier, burn_amount);
@@ -289,26 +290,11 @@ impl<'a, Cs: CoinSelectionAlgorithm> TxBuilderSpacesUtils<'a, Cs> for TxBuilder<
                         .mul(2),
                 );
 
-                let mut spend_input = psbt::Input {
-                    witness_utxo: Some(TxOut {
-                        value: request.space.spaceout.value,
-                        script_pubkey: request.space.spaceout.script_pubkey,
-                    }),
-                    final_script_witness: Some(Witness::default()),
-                    final_script_sig: Some(ScriptBuf::new()),
-                    proprietary: BTreeMap::new(),
-                    ..Default::default()
-                };
-                spend_input
-                    .proprietary
-                    .insert(SpacesWallet::spaces_signer("tbs"), Vec::new());
-                self.add_foreign_utxo(
+                self.add_utxo(
                     OutPoint {
                         txid: request.space.txid,
                         vout: request.space.spaceout.n as u32,
-                    },
-                    spend_input,
-                    66,
+                    }
                 )?;
 
                 self.add_recipient(
@@ -419,7 +405,7 @@ impl Builder {
                 }
             }
 
-            builder.enable_rbf().fee_rate(fee_rate);
+            builder.fee_rate(fee_rate);
             let r = builder.finish().map_err(|e| match e {
                 CreateTxError::CoinSelection(e) if coin_selection_confirmed_only => {
                     anyhow!("{} (replacements use confirmed balance only)", e)
@@ -816,7 +802,7 @@ impl Builder {
             builder
                 .ordering(TxOrdering::Untouched)
                 .nlocktime(LockTime::Blocks(Height::ZERO))
-                .enable_rbf_with_sequence(BID_PSBT_INPUT_SEQUENCE)
+                .set_exact_sequence(BID_PSBT_INPUT_SEQUENCE)
                 .add_bid(
                     Some(prev.spaceout.space.as_ref().unwrap()),
                     offer,
@@ -857,7 +843,7 @@ impl Builder {
                 extra_prevouts.insert(reveal.commitment.outpoint, reveal.commitment.txout);
             }
 
-            builder.enable_rbf().fee_rate(fee_rate);
+            builder.fee_rate(fee_rate);
             builder.finish()?
         };
 
@@ -897,7 +883,6 @@ impl Builder {
             builder
                 // add reveal last to not disrupt space inputs order
                 .add_reveal(params.reveal.commitment, params.reveal.signing)?
-                .enable_rbf()
                 .fee_rate(fee_rate);
             builder.finish()?
         };
@@ -952,14 +937,15 @@ impl SpacesAwareCoinSelection {
 }
 
 impl CoinSelectionAlgorithm for SpacesAwareCoinSelection {
-    fn coin_select(
+    fn coin_select<R: RngCore>(
         &self,
         required_utxos: Vec<WeightedUtxo>,
         mut optional_utxos: Vec<WeightedUtxo>,
         fee_rate: FeeRate,
         target_amount: u64,
         drain_script: &Script,
-    ) -> Result<CoinSelectionResult, Error> {
+        rand: &mut R,
+    ) -> Result<CoinSelectionResult, InsufficientFunds> {
         let required = required_utxos
             .iter()
             .map(|w| w.utxo.clone())
@@ -980,9 +966,9 @@ impl CoinSelectionAlgorithm for SpacesAwareCoinSelection {
 
             weighted_utxo.utxo.txout().value > SpacesAwareCoinSelection::DUST_THRESHOLD
                 && !self
-                    .exclude_outputs
-                    .iter()
-                    .any(|o| o.outpoint == weighted_utxo.utxo.outpoint())
+                .exclude_outputs
+                .iter()
+                .any(|o| o.outpoint == weighted_utxo.utxo.outpoint())
         });
 
         let mut result = self.default_algorithm.coin_select(
@@ -991,6 +977,7 @@ impl CoinSelectionAlgorithm for SpacesAwareCoinSelection {
             fee_rate,
             target_amount,
             drain_script,
+            rand
         )?;
 
         let mut optional = Vec::with_capacity(result.selected.len() - required.len());

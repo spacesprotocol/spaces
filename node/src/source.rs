@@ -206,7 +206,7 @@ impl BitcoinRpc {
         &self,
         client: &reqwest::blocking::Client,
         tx: &Transaction,
-    ) -> Result<ConfirmationTime, BitcoinRpcError> {
+    ) -> Result<u64, BitcoinRpcError> {
         let txid: String = self.send_json_blocking(client, &self.send_raw_transaction(tx))?;
 
         const MAX_RETRIES: usize = 10;
@@ -219,7 +219,7 @@ impl BitcoinRpc {
             match res {
                 Ok(mem) => {
                     if let Some(time) = mem.get("time").and_then(|t| t.as_u64()) {
-                        return Ok(ConfirmationTime::Unconfirmed { last_seen: time });
+                        return Ok(time);
                     }
                 }
                 Err(e) => last_error = Some(e),
