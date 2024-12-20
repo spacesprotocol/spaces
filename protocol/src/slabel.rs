@@ -188,6 +188,32 @@ impl<'a> TryFrom<&'a [u8]> for SLabelRef<'a> {
     }
 }
 
+impl SLabel {
+    pub fn as_str_unprefixed(&self) -> Result<&str, core::str::Utf8Error> {
+        let label_len = self.0[0] as usize;
+        let label = &self.0[1..=label_len];
+        core::str::from_utf8(label)
+    }
+
+    pub fn to_string_unprefixed(&self) -> Result<String, core::str::Utf8Error> {
+        self.as_str_unprefixed().map(|s| s.to_string())
+    }
+
+    pub fn from_str_unprefixed(label: &str) -> Result<Self, Error> {
+        if label.is_empty() {
+            return Err(Error::Name(NameErrorKind::ZeroLength));
+        }
+        if label.len() > MAX_LABEL_LEN {
+            return Err(Error::Name(NameErrorKind::TooLong));
+        }
+        let mut label_bytes = [0; MAX_LABEL_LEN + 1];
+        label_bytes[0] = label.len() as u8;
+        label_bytes[1..=label.len()].copy_from_slice(label.as_bytes());
+
+        SLabel::try_from(label_bytes.as_slice())
+    }
+}
+
 impl TryFrom<String> for SLabel {
     type Error = Error;
 
@@ -204,26 +230,13 @@ impl TryFrom<&str> for SLabel {
             return Err(Error::Name(NameErrorKind::NotCanonical));
         }
         let label = &value[1..];
-        if label.is_empty() {
-            return Err(Error::Name(NameErrorKind::ZeroLength));
-        }
-        if label.len() > MAX_LABEL_LEN {
-            return Err(Error::Name(NameErrorKind::TooLong));
-        }
-        let mut label_bytes = [0; MAX_LABEL_LEN + 1];
-        label_bytes[0] = label.len() as u8;
-        label_bytes[1..=label.len()].copy_from_slice(label.as_bytes());
-
-        SLabel::try_from(label_bytes.as_slice())
+        Self::from_str_unprefixed(label)
     }
 }
 
 impl Display for SLabel {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-        let label_len = self.0[0] as usize;
-        let label = &self.0[1..=label_len];
-
-        let label_str = core::str::from_utf8(label).map_err(|_| core::fmt::Error)?;
+        let label_str = self.as_str_unprefixed().map_err(|_| core::fmt::Error)?;
         write!(f, "@{}", label_str)
     }
 }
