@@ -153,6 +153,7 @@ impl SpacesWallet {
                 .check_network(config.network)
                 .descriptor(KeychainKind::External, Some(config.space_descriptors.external.clone()))
                 .descriptor(KeychainKind::Internal, Some(config.space_descriptors.internal.clone()))
+                .lookahead(50)
                 .extract_keys()
             .load_wallet(&mut conn).context("could not load wallet")? {
             wallet
@@ -161,6 +162,7 @@ impl SpacesWallet {
                 config.space_descriptors.external.clone(),
                 config.space_descriptors.internal.clone(),
             )
+                .lookahead(50)
                 .network(config.network)
                 .genesis_hash(genesis_hash)
                 .create_wallet(&mut conn).context("could not create wallet")?
