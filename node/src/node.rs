@@ -6,7 +6,7 @@ use std::{error::Error, fmt};
 use anyhow::{anyhow, Result};
 use bincode::{Decode, Encode};
 use protocol::{
-    bitcoin::{Amount, Block, BlockHash, OutPoint},
+    bitcoin::{Amount, Block, BlockHash, OutPoint, Txid},
     constants::{ChainAnchor, ROLLOUT_BATCH_SIZE, ROLLOUT_BLOCK_INTERVAL},
     hasher::{BidKey, KeyHasher, OutpointKey, SpaceKey},
     prepare::TxContext,
@@ -25,6 +25,7 @@ pub trait BlockSource {
     fn get_block_hash(&self, height: u32) -> Result<BlockHash, BitcoinRpcError>;
     fn get_block(&self, hash: &BlockHash) -> Result<Block, BitcoinRpcError>;
     fn get_median_time(&self) -> Result<u64, BitcoinRpcError>;
+    fn in_mempool(&self, txid: Txid) -> Result<bool, BitcoinRpcError>;
     fn get_block_count(&self) -> Result<u64, BitcoinRpcError>;
     fn get_best_chain(&self) -> Result<ChainAnchor, BitcoinRpcError>;
 }

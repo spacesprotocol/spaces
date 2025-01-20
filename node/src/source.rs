@@ -16,6 +16,7 @@ use log::{error, info};
 use protocol::constants::ChainAnchor;
 use reqwest::StatusCode;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde_json::Value;
 use threadpool::ThreadPool;
 use tokio::time::Instant;
 use wallet::{bitcoin, bitcoin::Transaction};
@@ -43,6 +44,7 @@ pub struct BlockFetcher {
 }
 
 pub enum BlockEvent {
+    Tip(ChainAnchor),
     Block(ChainAnchor, Block),
     Error(BlockFetchError),
 }
@@ -170,7 +172,6 @@ impl BitcoinRpc {
         let params = serde_json::json!([]);
         self.make_request("getblockchaininfo", params)
     }
-
     pub fn get_mempool_entry(&self, txid: Txid) -> BitcoinRpcRequest {
         let params = serde_json::json!([txid]);
 
@@ -474,6 +475,8 @@ impl BlockFetcher {
                             return;
                         }
                     }
+                } else {
+                    _ = task_sender.send(BlockEvent::Tip(checkpoint));
                 }
             }
         });
@@ -819,6 +822,25 @@ impl BlockSource for BitcoinBlockSource {
         Err(BitcoinRpcError::Other(
             "Could not fetch median time".to_string(),
         ))
+    }
+
+    fn in_mempool(&self, txid: Txid) -> Result<bool, BitcoinRpcError> {
+        let result: Result<Value, _> = self
+            .rpc
+            .send_json_blocking(&self.client, &self.rpc.get_mempool_entry(txid));
+
+        match result {
+            Ok(_) => Ok(true),
+            Err(error) => match error {
+                BitcoinRpcError::Rpc(rpc) => {
+                    if rpc.code == -5 && rpc.message.contains("not in mempool") {
+                        return Ok(false);
+                    }
+                    Err(BitcoinRpcError::Rpc(rpc))
+                }
+                _ => Err(error),
+            },
+        }
     }
 
     fn get_block_count(&self) -> Result<u64, BitcoinRpcError> {

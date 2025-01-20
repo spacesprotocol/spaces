@@ -165,6 +165,7 @@ impl Spaced {
             }
             match receiver.try_recv() {
                 Ok(event) => match event {
+                    BlockEvent::Tip(_) => {}
                     BlockEvent::Block(id, block) => {
                         self.handle_block(&mut node, id, block)?;
                         info!("block={} height={}", id.hash, id.height);
