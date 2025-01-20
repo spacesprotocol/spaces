@@ -7,7 +7,7 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-
+use std::collections::HashMap;
 use ::spaced::{
     jsonrpsee::tokio,
     node::protocol::{
@@ -32,7 +32,7 @@ use bitcoind::{
     tempfile::{tempdir, TempDir},
     BitcoinD,
 };
-
+use bitcoind::bitcoincore_rpc::json;
 use crate::spaced::SpaceD;
 
 // Path to the pre-created regtest testdata in build.rs
@@ -334,6 +334,25 @@ impl TestRig {
         let txid = txid.clone();
         Ok(
             tokio::task::spawn_blocking(move || c.client.get_raw_transaction(&txid, None))
+                .await
+                .expect("handle")?,
+        )
+    }
+
+    pub async fn get_raw_mempool(&self) -> Result<HashMap<Txid, json::GetMempoolEntryResult>> {
+        let c = self.bitcoind.clone();
+        Ok(
+            tokio::task::spawn_blocking(move || c.client.get_raw_mempool_verbose())
+                .await
+                .expect("handle")?,
+        )
+    }
+
+    pub async fn get_block(&self, hash: &BlockHash) -> Result<Block> {
+        let c = self.bitcoind.clone();
+        let hash = hash.clone();
+        Ok(
+            tokio::task::spawn_blocking(move || c.client.get_block(&hash))
                 .await
                 .expect("handle")?,
         )
