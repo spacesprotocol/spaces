@@ -148,13 +148,24 @@ impl SpacesWallet {
             Some(hash) => hash,
         };
 
-        let spaces_wallet = Wallet::create(
-            config.space_descriptors.external.clone(),
-            config.space_descriptors.internal.clone(),
-        )
-            .network(config.network)
-            .genesis_hash(genesis_hash)
-            .create_wallet(&mut conn)?;
+        let spaces_wallet = if let Some(wallet) =
+            Wallet::load()
+                .check_network(config.network)
+                .descriptor(KeychainKind::External, Some(config.space_descriptors.external.clone()))
+                .descriptor(KeychainKind::Internal, Some(config.space_descriptors.internal.clone()))
+                .extract_keys()
+            .load_wallet(&mut conn).context("could not load wallet")? {
+            wallet
+        } else {
+            Wallet::create(
+                config.space_descriptors.external.clone(),
+                config.space_descriptors.internal.clone(),
+            )
+                .network(config.network)
+                .genesis_hash(genesis_hash)
+                .create_wallet(&mut conn).context("could not create wallet")?
+        };
+
 
         let tx = conn.transaction().context("could not create wallet db transaction")?;
         Self::init_sqlite_tables(&tx).context("could not initialize wallet db tables")?;
