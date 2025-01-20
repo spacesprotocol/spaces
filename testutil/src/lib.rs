@@ -1,8 +1,13 @@
 pub extern crate bitcoind;
 pub mod spaced;
 
-use std::{fs, io, sync::Arc, time::Duration};
-use std::path::{Path, PathBuf};
+use std::{
+    fs, io,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
+
 use ::spaced::{
     jsonrpsee::tokio,
     node::protocol::{
@@ -19,15 +24,15 @@ use ::spaced::{
 use anyhow::Result;
 use bitcoind::{
     anyhow,
-    anyhow::anyhow,
+    anyhow::{anyhow, Context},
     bitcoincore_rpc::{
         bitcoincore_rpc_json::{GetBlockTemplateModes, GetBlockTemplateRules},
         RpcApi,
     },
+    tempfile::{tempdir, TempDir},
     BitcoinD,
 };
-use bitcoind::anyhow::Context;
-use bitcoind::tempfile::{tempdir, TempDir};
+
 use crate::spaced::SpaceD;
 
 // Path to the pre-created regtest testdata in build.rs
@@ -47,8 +52,8 @@ pub struct TestRig {
 
 impl TestRig {
     pub async fn new_with_regtest_preset() -> Result<TestRig> {
-        let original_test_data = bitcoin_regtest_data_path()
-            .context("could not get unpacked regtest testdata")?;
+        let original_test_data =
+            bitcoin_regtest_data_path().context("could not get unpacked regtest testdata")?;
         let test_data = tempdir()?;
         copy_dir_all(original_test_data, test_data.path())?;
 
@@ -66,8 +71,11 @@ impl TestRig {
     }
 
     pub async fn testdata_wallets_path(&self) -> PathBuf {
-        self.test_data.as_ref().expect("created with regtest preset")
-            .path().join("wallets")
+        self.test_data
+            .as_ref()
+            .expect("created with regtest preset")
+            .path()
+            .join("wallets")
     }
 
     pub async fn new() -> Result<TestRig> {
@@ -84,7 +92,10 @@ impl TestRig {
         Self::new_with_bitcoin_conf(conf, None).await
     }
 
-    pub async fn new_with_bitcoin_conf(conf: bitcoind::Conf<'static>, test_data: Option<TempDir>) -> Result<Self> {
+    pub async fn new_with_bitcoin_conf(
+        conf: bitcoind::Conf<'static>,
+        test_data: Option<TempDir>,
+    ) -> Result<Self> {
         let view_stdout = conf.view_stdout;
         let bitcoind =
             tokio::task::spawn_blocking(move || BitcoinD::from_downloaded_with_conf(&conf))
@@ -204,8 +215,8 @@ impl TestRig {
                 &[],
             )
         })
-            .await
-            .expect("handle")?;
+        .await
+        .expect("handle")?;
 
         let txdata = vec![Transaction {
             version: transaction::Version::ONE,
@@ -376,8 +387,8 @@ impl TestRig {
             c.client
                 .send_to_address(&addr, amount, None, None, None, None, None, None)
         })
-            .await
-            .expect("handle")?;
+        .await
+        .expect("handle")?;
         Ok(txid)
     }
 }

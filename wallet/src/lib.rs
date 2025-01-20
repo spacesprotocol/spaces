@@ -1,17 +1,31 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashSet},
     fmt::Debug,
     fs,
     path::PathBuf,
     time::{Duration, SystemTime},
 };
-use std::collections::HashSet;
+
 use anyhow::{anyhow, Context};
-use bdk_wallet::{chain::{BlockId}, coin_selection::{CoinSelectionAlgorithm, CoinSelectionResult, InsufficientFunds, Excess}, tx_builder::TxOrdering, ChangeSet, KeychainKind, LocalOutput, PersistedWallet, SignOptions, Wallet, WeightedUtxo};
-use bdk_wallet::rusqlite::Connection;
+use bdk_wallet::{
+    chain::BlockId,
+    coin_selection::{CoinSelectionAlgorithm, CoinSelectionResult, Excess, InsufficientFunds},
+    rusqlite::Connection,
+    tx_builder::TxOrdering,
+    KeychainKind, LocalOutput, PersistedWallet, SignOptions, Wallet, WeightedUtxo,
+};
 use bincode::config;
-use bitcoin::{absolute::{Height, LockTime}, psbt::raw::ProprietaryKey, script, sighash::{Prevouts, SighashCache}, taproot, taproot::LeafVersion, Amount, Block, BlockHash, FeeRate, Network, OutPoint, Psbt, Sequence, TapLeafHash, TapSighashType, Transaction, TxOut, Weight, Witness};
-use bitcoin::key::rand::RngCore;
+use bitcoin::{
+    absolute::{Height, LockTime},
+    key::rand::RngCore,
+    psbt::raw::ProprietaryKey,
+    script,
+    sighash::{Prevouts, SighashCache},
+    taproot,
+    taproot::LeafVersion,
+    Amount, Block, BlockHash, FeeRate, Network, OutPoint, Psbt, Sequence, TapLeafHash,
+    TapSighashType, Transaction, TxOut, Weight, Witness,
+};
 use protocol::{
     bitcoin::{
         constants::genesis_block,
@@ -20,10 +34,10 @@ use protocol::{
         taproot::{ControlBlock, TaprootBuilder},
         Address, ScriptBuf, XOnlyPublicKey,
     },
-    prepare::TrackableOutput,
+    prepare::{is_magic_lock_time, TrackableOutput},
 };
 use serde::{ser::SerializeSeq, Deserialize, Deserializer, Serialize, Serializer};
-use protocol::prepare::is_magic_lock_time;
+
 use crate::{
     address::SpaceAddress,
     builder::{is_connector_dust, is_space_dust, SpacesAwareCoinSelection},
@@ -122,9 +136,9 @@ impl SpacesWallet {
             config.space_descriptors.external.clone(),
             config.space_descriptors.internal.clone(),
         )
-            .network(config.network)
-            .genesis_hash(genesis_hash)
-            .create_wallet(&mut conn)?;
+        .network(config.network)
+        .genesis_hash(genesis_hash)
+        .create_wallet(&mut conn)?;
 
         let wallet = Self {
             config,
@@ -262,7 +276,7 @@ impl SpacesWallet {
                 // explicitly trackable outputs.
                 let locktime = match self.spaces.get_tx(utxo2.outpoint.txid) {
                     None => continue,
-                    Some(tx) => tx.tx_node.lock_time
+                    Some(tx) => tx.tx_node.lock_time,
                 };
                 if !is_magic_lock_time(&locktime) {
                     continue;
@@ -393,13 +407,10 @@ impl SpacesWallet {
             }
 
             if input.final_script_witness.is_none() && input.witness_utxo.is_some() {
-                if self.spaces.is_mine(
-                    input
-                        .witness_utxo
-                        .as_ref()
-                        .unwrap()
-                        .script_pubkey.clone(),
-                ) {
+                if self
+                    .spaces
+                    .is_mine(input.witness_utxo.as_ref().unwrap().script_pubkey.clone())
+                {
                     input
                         .proprietary
                         .insert(Self::spaces_signer("tbs"), Vec::new());
@@ -493,7 +504,7 @@ impl SpacesWallet {
                     signature,
                     sighash_type,
                 }
-                    .to_vec(),
+                .to_vec(),
             );
             witness.push(&signing_info.script);
             witness.push(&signing_info.control_block.serialize());
@@ -601,13 +612,17 @@ impl SpaceScriptSigningInfo {
     }
 
     pub fn satisfaction_weight(&self) -> Weight {
-        Weight::from_vb(( // 1-byte varint(control_block)
-            1 + self.control_block.size() +
+        Weight::from_vb(
+            (
+                // 1-byte varint(control_block)
+                1 + self.control_block.size() +
                 // 1-byte varint(script)
                 1 + self.script.len() +
                 // 1-byte varint(sig+sighash) + <sig(64)+sigHash(1)>
                 1 + 65
-        ) as _).expect("valid weight")
+            ) as _,
+        )
+        .expect("valid weight")
     }
 
     pub(crate) fn to_vec(&self) -> Vec<u8> {

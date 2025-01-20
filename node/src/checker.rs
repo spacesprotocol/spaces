@@ -1,10 +1,14 @@
-use std::collections::{BTreeMap};
+use std::collections::BTreeMap;
+
 use anyhow::anyhow;
-use protocol::bitcoin::{OutPoint, Transaction};
-use protocol::hasher::{KeyHasher, SpaceKey};
-use protocol::prepare::{DataSource, TxContext};
-use protocol::{Covenant, RevokeReason, SpaceOut};
-use protocol::validate::{TxChangeSet, UpdateKind, Validator};
+use protocol::{
+    bitcoin::{OutPoint, Transaction},
+    hasher::{KeyHasher, SpaceKey},
+    prepare::{DataSource, TxContext},
+    validate::{TxChangeSet, UpdateKind, Validator},
+    Covenant, RevokeReason, SpaceOut,
+};
+
 use crate::store::{LiveSnapshot, Sha256};
 
 pub struct TxChecker<'a> {
@@ -22,7 +26,11 @@ impl<'a> TxChecker<'a> {
         }
     }
 
-    pub fn apply_package(&mut self, height: u32, txs: Vec<Transaction>) -> anyhow::Result<Vec<Option<TxChangeSet>>> {
+    pub fn apply_package(
+        &mut self,
+        height: u32,
+        txs: Vec<Transaction>,
+    ) -> anyhow::Result<Vec<Option<TxChangeSet>>> {
         let mut sets = Vec::with_capacity(txs.len());
         for tx in txs {
             sets.push(self.apply_tx(height, &tx)?);
@@ -30,7 +38,11 @@ impl<'a> TxChecker<'a> {
         Ok(sets)
     }
 
-    pub fn check_apply_tx(&mut self, height: u32, tx: &Transaction) -> anyhow::Result<Option<TxChangeSet>>  {
+    pub fn check_apply_tx(
+        &mut self,
+        height: u32,
+        tx: &Transaction,
+    ) -> anyhow::Result<Option<TxChangeSet>> {
         let changeset = self.apply_tx(height, tx)?;
         if let Some(changeset) = changeset.as_ref() {
             Self::check(&changeset)?;
@@ -38,12 +50,15 @@ impl<'a> TxChecker<'a> {
         Ok(changeset)
     }
 
-    pub fn apply_tx(&mut self, height: u32, tx: &Transaction) -> anyhow::Result<Option<TxChangeSet>> {
-        let ctx =
-            match { TxContext::from_tx::<Self, Sha256>(self, tx)? } {
-                None => return Ok(None),
-                Some(ctx) => ctx,
-            };
+    pub fn apply_tx(
+        &mut self,
+        height: u32,
+        tx: &Transaction,
+    ) -> anyhow::Result<Option<TxChangeSet>> {
+        let ctx = match { TxContext::from_tx::<Self, Sha256>(self, tx)? } {
+            None => return Ok(None),
+            Some(ctx) => ctx,
+        };
         let validator = Validator::new();
         let changeset = validator.process(height, tx, ctx);
         let changeset2 = changeset.clone();
@@ -60,16 +75,23 @@ impl<'a> TxChecker<'a> {
             };
             if create.space.is_some() {
                 let space = SpaceKey::from(Sha256::hash(
-                    create.space.as_ref().expect("space").name.as_ref())
-                );
+                    create.space.as_ref().expect("space").name.as_ref(),
+                ));
                 self.spaces.insert(space, Some(outpoint));
             }
             self.spaceouts.insert(outpoint, Some(create));
         }
         for update in changeset.updates {
-            let space = SpaceKey::from(
-                Sha256::hash(update.output.spaceout.space.as_ref()
-                    .expect("space").name.as_ref()));
+            let space = SpaceKey::from(Sha256::hash(
+                update
+                    .output
+                    .spaceout
+                    .space
+                    .as_ref()
+                    .expect("space")
+                    .name
+                    .as_ref(),
+            ));
             match update.kind {
                 UpdateKind::Revoke(_) => {
                     self.spaces.insert(space, None);
@@ -78,7 +100,8 @@ impl<'a> TxChecker<'a> {
                 _ => {
                     let outpoint = update.output.outpoint();
                     self.spaces.insert(space, Some(outpoint));
-                    self.spaceouts.insert(outpoint, Some(update.output.spaceout));
+                    self.spaceouts
+                        .insert(outpoint, Some(update.output.spaceout));
                 }
             }
         }
@@ -86,7 +109,11 @@ impl<'a> TxChecker<'a> {
     }
 
     pub fn check(changset: &TxChangeSet) -> anyhow::Result<()> {
-        if changset.spends.iter().any(|spend| spend.script_error.is_some()) {
+        if changset
+            .spends
+            .iter()
+            .any(|spend| spend.script_error.is_some())
+        {
             return Err(anyhow!("tx-check: transaction not broadcasted as it may have an open that will be rejected"));
         }
         for create in changset.creates.iter() {
@@ -117,17 +144,20 @@ impl<'a> TxChecker<'a> {
 }
 
 impl DataSource for TxChecker<'_> {
-    fn get_space_outpoint(&mut self, space_hash: &SpaceKey) -> protocol::errors::Result<Option<OutPoint>> {
+    fn get_space_outpoint(
+        &mut self,
+        space_hash: &SpaceKey,
+    ) -> protocol::errors::Result<Option<OutPoint>> {
         match self.spaces.get(space_hash) {
             None => self.original.get_space_outpoint(space_hash.into()),
-            Some(res) => Ok(res.clone())
+            Some(res) => Ok(res.clone()),
         }
     }
 
     fn get_spaceout(&mut self, outpoint: &OutPoint) -> protocol::errors::Result<Option<SpaceOut>> {
         match self.spaceouts.get(outpoint) {
             None => self.original.get_spaceout(outpoint),
-            Some(space_out) => Ok(space_out.clone())
+            Some(space_out) => Ok(space_out.clone()),
         }
     }
 }

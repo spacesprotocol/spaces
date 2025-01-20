@@ -5,7 +5,7 @@ use env_logger::Env;
 use log::error;
 use spaced::{
     config::{safe_exit, Args},
-    rpc::{AsyncChainState, LoadedWallet, RpcServerImpl, WalletManager},
+    rpc::{AsyncChainState, RpcServerImpl, WalletLoadRequest, WalletManager},
     source::{BitcoinBlockSource, BitcoinRpc},
     store,
     sync::Spaced,
@@ -16,7 +16,6 @@ use tokio::{
     sync::{broadcast, mpsc},
     task::{JoinHandle, JoinSet},
 };
-use spaced::rpc::WalletLoadRequest;
 
 #[tokio::main]
 async fn main() {

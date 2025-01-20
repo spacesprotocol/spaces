@@ -35,18 +35,17 @@ use wallet::{
     },
     DoubleUtxo, SpacesWallet, WalletInfo,
 };
-use wallet::bdk_wallet::chain::ConfirmationTime;
+
 use crate::{
+    checker::TxChecker,
     config::ExtendedNetwork,
     node::BlockSource,
-    rpc::{LoadedWallet, RpcWalletRequest, RpcWalletTxBuilder},
+    rpc::{RpcWalletRequest, RpcWalletTxBuilder, WalletLoadRequest},
     source::{
         BitcoinBlockSource, BitcoinRpc, BitcoinRpcError, BlockEvent, BlockFetchError, BlockFetcher,
     },
     store::{ChainState, LiveSnapshot, Sha256},
 };
-use crate::checker::TxChecker;
-use crate::rpc::WalletLoadRequest;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TxResponse {
@@ -208,7 +207,7 @@ impl RpcWallet {
         )?;
         let previous_tx_lock_time = match wallet.spaces.get_tx(txid) {
             None => return Err(anyhow::anyhow!("No wallet tx {} found", txid)),
-            Some(tx) => tx.tx_node.lock_time
+            Some(tx) => tx.tx_node.lock_time,
         };
 
         let mut builder = wallet
@@ -227,7 +226,7 @@ impl RpcWallet {
         if !skip_tx_check {
             let tip = wallet.spaces.local_chain().tip().height();
             let mut checker = TxChecker::new(state);
-            checker.check_apply_tx(tip+1, &tx)?;
+            checker.check_apply_tx(tip + 1, &tx)?;
         }
 
         let new_txid = tx.compute_txid();
@@ -294,7 +293,14 @@ impl RpcWallet {
                 skip_tx_check,
                 resp,
             } => {
-                let result = Self::handle_fee_bump(source, &mut state, wallet, txid, skip_tx_check, fee_rate);
+                let result = Self::handle_fee_bump(
+                    source,
+                    &mut state,
+                    wallet,
+                    txid,
+                    skip_tx_check,
+                    fee_rate,
+                );
                 _ = resp.send(result);
             }
             WalletCommand::ForceSpendOutput {
@@ -489,9 +495,11 @@ impl RpcWallet {
         // so explicitly excluding spaceouts may be redundant.
         let excluded = Self::list_unspent(wallet, state)?
             .into_iter()
-            .filter(|out| out.space.is_some() ||
-                (out.is_spaceout && out.output.txout.value <= SpacesAwareCoinSelection::DUST_THRESHOLD)
-            )
+            .filter(|out| {
+                out.space.is_some()
+                    || (out.is_spaceout
+                        && out.output.txout.value <= SpacesAwareCoinSelection::DUST_THRESHOLD)
+            })
             .map(|out| SelectionOutput {
                 outpoint: out.output.outpoint,
                 is_space: out.space.is_some(),
@@ -615,7 +623,6 @@ impl RpcWallet {
     ) -> anyhow::Result<WalletResponse> {
         let tip_height = wallet.spaces.local_chain().tip().height();
 
-
         if let Some(dust) = tx.dust {
             if dust > SpacesAwareCoinSelection::DUST_THRESHOLD {
                 // Allowing higher dust may space outs to be accidentally
@@ -680,14 +687,14 @@ impl RpcWallet {
                         match store.get_space_info(&spacehash)? {
                             None => return Err(anyhow!("sendspaces: you don't own `{}`", space)),
                             Some(full)
-                            if full.spaceout.space.is_none()
-                                || !full.spaceout.space.as_ref().unwrap().is_owned()
-                                || !wallet
-                                .spaces
-                                .is_mine(full.spaceout.script_pubkey.clone()) =>
-                                {
-                                    return Err(anyhow!("sendspaces: you don't own `{}`", space));
-                                }
+                                if full.spaceout.space.is_none()
+                                    || !full.spaceout.space.as_ref().unwrap().is_owned()
+                                    || !wallet
+                                        .spaces
+                                        .is_mine(full.spaceout.script_pubkey.clone()) =>
+                            {
+                                return Err(anyhow!("sendspaces: you don't own `{}`", space));
+                            }
                             Some(full) => {
                                 builder =
                                     builder.add_transfer(TransferRequest::Space(SpaceTransfer {
@@ -787,7 +794,10 @@ impl RpcWallet {
                             return Err(anyhow!("execute on '{}': space does not exist", space));
                         }
                         let spaceout = spaceout.unwrap();
-                        if !wallet.spaces.is_mine(spaceout.spaceout.script_pubkey.clone()) {
+                        if !wallet
+                            .spaces
+                            .is_mine(spaceout.spaceout.script_pubkey.clone())
+                        {
                             return Err(anyhow!(
                                 "execute on '{}': you don't own this space",
                                 space
@@ -814,8 +824,8 @@ impl RpcWallet {
             let mut unconfirmed: Vec<_> = wallet
                 .spaces
                 .transactions()
-                .filter(|x|
-                    !x.chain_position.is_confirmed()).collect();
+                .filter(|x| !x.chain_position.is_confirmed())
+                .collect();
             unconfirmed.sort();
             // no tx checks for unconfirmed as they're already broadcasted,
             // but we need to build on their state still
@@ -891,7 +901,10 @@ impl RpcWallet {
         Ok(WalletResponse { result: result_set })
     }
 
-    pub fn load_wallet(src: &BitcoinBlockSource, request: &WalletLoadRequest) -> anyhow::Result<SpacesWallet> {
+    pub fn load_wallet(
+        src: &BitcoinBlockSource,
+        request: &WalletLoadRequest,
+    ) -> anyhow::Result<SpacesWallet> {
         let mut wallet = SpacesWallet::new(request.config.clone())?;
         let wallet_tip = wallet.spaces.local_chain().tip().height();
 
@@ -937,19 +950,19 @@ impl RpcWallet {
                             let wallet = Self::load_wallet(&source, &loaded);
                             match wallet {
                                 Ok(wallet) => {
-                                    _ = tx.send(Self::wallet_sync(
-                                network,
-                                source,
-                                wallet_chain,
-                                wallet,
-                                loaded.rx,
-                                wallet_shutdown,
-                                num_workers
-                              ));
-                                }
-                                Err(err) => {
-                                    _ = tx.send(Err(err));
-                                }
+                                  _ = tx.send(Self::wallet_sync(
+                                  network,
+                                  source,
+                                  wallet_chain,
+                                  wallet,
+                                  loaded.rx,
+                                  wallet_shutdown,
+                                  num_workers
+                                ));
+                              }
+                              Err(err) => {
+                                _ = tx.send(Err(err));
+                              }
                             }
                         });
                         wallet_results.push(named_future(wallet_name, rx));

@@ -1,12 +1,12 @@
-use std::env;
-use std::fs;
-use std::path::Path;
-use std::io;
+use std::{env, fs, io, path::Path};
 
 fn main() -> io::Result<()> {
     let zip_path = Path::new("testdata/regtest.zip");
     if !zip_path.exists() {
-        return Err(io::Error::new(io::ErrorKind::NotFound, "no regtest testdata found in testdata/regtest.zip"));
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "no regtest testdata found in testdata/regtest.zip",
+        ));
     }
     let out_dir = env::var("OUT_DIR").unwrap();
     let target_dir = Path::new(&out_dir).join("regtest_unpacked");

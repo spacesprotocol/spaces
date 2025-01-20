@@ -13,12 +13,12 @@ use base64::Engine;
 use bitcoin::{Block, BlockHash, Txid};
 use hex::FromHexError;
 use log::{error, info};
-use reqwest::StatusCode;
 use protocol::constants::ChainAnchor;
+use reqwest::StatusCode;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use threadpool::ThreadPool;
 use tokio::time::Instant;
-use wallet::{bdk_wallet::chain::ConfirmationTime, bitcoin, bitcoin::Transaction};
+use wallet::{bitcoin, bitcoin::Transaction};
 
 use crate::node::BlockSource;
 
@@ -190,7 +190,10 @@ impl BitcoinRpc {
         client: &reqwest::Client,
         request: &BitcoinRpcRequest,
     ) -> Result<T, BitcoinRpcError> {
-        self.send_request(client, request).await?.error_for_rpc().await
+        self.send_request(client, request)
+            .await?
+            .error_for_rpc()
+            .await
     }
 
     pub fn send_json_blocking<T: DeserializeOwned>(
@@ -246,7 +249,12 @@ impl BitcoinRpc {
                 builder = builder.header("Authorization", format!("Basic {}", auth));
             }
 
-            match builder.json(&request.body).send().await.map_err(BitcoinRpcError::from) {
+            match builder
+                .json(&request.body)
+                .send()
+                .await
+                .map_err(BitcoinRpcError::from)
+            {
                 Ok(res) => return Self::clean_rpc_response(res).await,
                 Err(e) if e.is_temporary() && attempt < max_retries - 1 => {
                     error!("Rpc: {} - retrying in {:?}...", e, delay);
@@ -276,7 +284,11 @@ impl BitcoinRpc {
                 builder = builder.header("Authorization", format!("Basic {}", auth));
             }
 
-            match builder.json(&request.body).send().map_err(BitcoinRpcError::from) {
+            match builder
+                .json(&request.body)
+                .send()
+                .map_err(BitcoinRpcError::from)
+            {
                 Ok(res) => return Self::clean_rpc_response_blocking(res),
                 Err(e) if e.is_temporary() && attempt < max_retries - 1 => {
                     error!("Rpc: {} - retrying in {:?}...", e, delay);
@@ -291,7 +303,9 @@ impl BitcoinRpc {
         Err(last_error.expect("an error"))
     }
 
-    pub async fn clean_rpc_response(res: reqwest::Response) -> Result<reqwest::Response, BitcoinRpcError> {
+    pub async fn clean_rpc_response(
+        res: reqwest::Response,
+    ) -> Result<reqwest::Response, BitcoinRpcError> {
         let status = res.status();
         if status.is_success() {
             return Ok(res);
@@ -305,7 +319,9 @@ impl BitcoinRpc {
         Err(Self::parse_error_bytes(status, response_bytes.as_ref()))
     }
 
-    pub fn clean_rpc_response_blocking(res: reqwest::blocking::Response) -> Result<reqwest::blocking::Response, BitcoinRpcError> {
+    pub fn clean_rpc_response_blocking(
+        res: reqwest::blocking::Response,
+    ) -> Result<reqwest::blocking::Response, BitcoinRpcError> {
         let status = res.status();
         if status.is_success() {
             return Ok(res);
