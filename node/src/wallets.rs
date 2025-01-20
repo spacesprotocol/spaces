@@ -7,14 +7,7 @@ use anyhow::anyhow;
 use clap::ValueEnum;
 use futures::{stream::FuturesUnordered, StreamExt};
 use log::{info, warn};
-use protocol::{
-    bitcoin::Txid,
-    constants::ChainAnchor,
-    hasher::{KeyHasher, SpaceKey},
-    script::SpaceScript,
-    slabel::SLabel,
-    FullSpaceOut,
-};
+use protocol::{bitcoin::Txid, constants::ChainAnchor, hasher::{KeyHasher, SpaceKey}, script::SpaceScript, slabel::SLabel, FullSpaceOut, SpaceOut};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::{
@@ -42,6 +35,13 @@ pub struct TxResponse {
     pub events: Vec<TxEvent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub raw: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListSpacesResponse {
+    pub winning: Vec<FullSpaceOut>,
+    pub outbid: Vec<FullSpaceOut>,
+    pub owned: Vec<FullSpaceOut>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,7 +83,7 @@ pub enum WalletCommand {
         resp: crate::rpc::Responder<anyhow::Result<Vec<TxInfo>>>,
     },
     ListSpaces {
-        resp: crate::rpc::Responder<anyhow::Result<Vec<WalletOutput>>>,
+        resp: crate::rpc::Responder<anyhow::Result<ListSpacesResponse>>,
     },
     ListBidouts {
         resp: crate::rpc::Responder<anyhow::Result<Vec<DoubleUtxo>>>,
@@ -285,18 +285,8 @@ impl RpcWallet {
                 _ = resp.send(transactions);
             }
             WalletCommand::ListSpaces { resp } => {
-                let result = wallet.list_unspent_with_details(state);
-                match result {
-                    Ok(unspent) => {
-                        _ = resp.send(Ok(unspent
-                            .into_iter()
-                            .filter(|s| s.space.is_some())
-                            .collect()));
-                    }
-                    Err(error) => {
-                        _ = resp.send(Err(error));
-                    }
-                }
+                let result = Self::list_spaces(wallet, state);
+                _ = resp.send(result);
             }
             WalletCommand::ListBidouts { resp } => {
                 let result = wallet.list_bidouts(false);
@@ -487,6 +477,54 @@ impl RpcWallet {
 
         fetcher.stop();
         Ok(())
+    }
+
+    fn list_spaces(
+        wallet: &mut SpacesWallet,
+        state: &mut LiveSnapshot
+    ) -> anyhow::Result<ListSpacesResponse> {
+        let unspent = wallet.list_unspent_with_details(state)?;
+        let watched_spaces = wallet.list_watched_spaces()?;
+
+        let mut res = ListSpacesResponse {
+            winning: vec![],
+            outbid: vec![],
+            owned: vec![],
+        };
+        for space in watched_spaces {
+            if unspent.iter()
+                .any(|out| out.space.as_ref().is_some_and(|s| s.name.to_string() == space)) {
+                continue;
+            }
+            let name = SLabel::from_str(&space).expect("valid space name");
+            let spacehash = SpaceKey::from(Sha256::hash(name.as_ref()));
+            let space = state.get_space_info(&spacehash)?;
+            if let Some(space) = space {
+                res.outbid.push(space);
+            }
+        }
+
+        for wallet_output in unspent.into_iter().filter(|output| output.space.is_some()) {
+            let entry = FullSpaceOut {
+                txid: wallet_output.output.outpoint.txid,
+                spaceout: SpaceOut {
+                    n: wallet_output.output.outpoint.vout as _,
+                    space: wallet_output.space,
+                    script_pubkey: wallet_output.output.txout.script_pubkey,
+                    value: wallet_output.output.txout.value,
+                },
+            };
+
+            let space = entry.spaceout.space.as_ref().expect("space");
+            if matches!(space.covenant, protocol::Covenant::Bid { .. }) {
+                res.winning.push(entry);
+            } else if matches!(space.covenant, protocol::Covenant::Transfer { .. }) {
+                res.owned.push(entry);
+            }
+        }
+
+
+        Ok(res)
     }
 
     fn list_transactions(
@@ -815,6 +853,7 @@ impl RpcWallet {
             }
         }
 
+
         let mut tx_iter = builder.build_iter(tx.dust, median_time, wallet, bid_replacement)?;
         let mut result_set = Vec::new();
 
@@ -1036,7 +1075,7 @@ impl RpcWallet {
         resp_rx.await?
     }
 
-    pub async fn send_list_spaces(&self) -> anyhow::Result<Vec<WalletOutput>> {
+    pub async fn send_list_spaces(&self) -> anyhow::Result<ListSpacesResponse> {
         let (resp, resp_rx) = oneshot::channel();
         self.sender.send(WalletCommand::ListSpaces { resp }).await?;
         resp_rx.await?

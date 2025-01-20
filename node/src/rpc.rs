@@ -48,6 +48,7 @@ use crate::{
         WalletResponse,
     },
 };
+use crate::wallets::ListSpacesResponse;
 
 pub(crate) type Responder<T> = oneshot::Sender<T>;
 
@@ -198,7 +199,7 @@ pub trait Rpc {
 
     #[method(name = "walletlistspaces")]
     async fn wallet_list_spaces(&self, wallet: &str)
-        -> Result<Vec<WalletOutput>, ErrorObjectOwned>;
+        -> Result<ListSpacesResponse, ErrorObjectOwned>;
 
     #[method(name = "walletlistunspent")]
     async fn wallet_list_unspent(
@@ -782,7 +783,7 @@ impl RpcServer for RpcServerImpl {
     async fn wallet_list_spaces(
         &self,
         wallet: &str,
-    ) -> Result<Vec<WalletOutput>, ErrorObjectOwned> {
+    ) -> Result<ListSpacesResponse, ErrorObjectOwned> {
         self.wallet(&wallet)
             .await?
             .send_list_spaces()
