@@ -862,7 +862,6 @@ async fn it_should_not_allow_register_or_transfer_to_same_space_multiple_times(r
     Ok(())
 }
 
-
 async fn it_can_batch_txs(rig: &TestRig) -> anyhow::Result<()> {
     rig.wait_until_wallet_synced(ALICE).await.expect("synced");
     let bob_address = rig
@@ -874,7 +873,7 @@ async fn it_can_batch_txs(rig: &TestRig) -> anyhow::Result<()> {
         rig,
         ALICE,
         vec![
-             RpcWalletRequest::Transfer(TransferSpacesParams {
+            RpcWalletRequest::Transfer(TransferSpacesParams {
                 spaces: vec!["@test9996".to_string()],
                 to: bob_address,
             }),
@@ -882,7 +881,6 @@ async fn it_can_batch_txs(rig: &TestRig) -> anyhow::Result<()> {
                 name: "@test100".to_string(),
                 amount: 201,
             }),
-
             RpcWalletRequest::Open(OpenParams {
                 name: "@batch2".to_string(),
                 amount: 1000,
@@ -891,14 +889,22 @@ async fn it_can_batch_txs(rig: &TestRig) -> anyhow::Result<()> {
                 name: "@batch1".to_string(),
                 amount: 1000,
             }),
-
+            RpcWalletRequest::Execute(ExecuteParams {
+                context: vec![
+                    "@test10000".to_string(),
+                    "@test9999".to_string(),
+                    "@test9998".to_string()
+                ],
+                // space_script: SpaceScript::create_set_fallback(&[0xEE, 0xEE, 0x22, 0x22]),
+                space_script: SpaceScript::create_set_fallback(&[0xEE, 0xEE, 0x22, 0x22]),
+            }),
         ],
         false,
     ).await.expect("send request");
 
     println!("batch request: {}", serde_json::to_string_pretty(&res).unwrap());
     assert!(res.result.iter().all(|tx| tx.error.is_none()), "batching should work");
-    assert_eq!(res.result.len(), 4, "expected 4 transactions");
+    assert_eq!(res.result.len(), 5, "expected 4 transactions");
 
     rig.mine_blocks(1, None).await.expect("mine");
     rig.wait_until_wallet_synced(ALICE).await.expect("synced");
@@ -907,11 +913,10 @@ async fn it_can_batch_txs(rig: &TestRig) -> anyhow::Result<()> {
     let bob_spaces = rig.spaced.client.wallet_list_spaces(BOB).await.expect("bob spaces");
     assert!(bob_spaces.iter().find(|output|
         output.space.as_ref().is_some_and(|s| s.name.to_string() == "@test9996")).is_some(),
-        "expected bob to own the space name"
+            "expected bob to own the space name"
     );
 
     let alice_spaces = rig.spaced.client.wallet_list_spaces(ALICE).await.expect("alice spaces");
-
     let batch1 = alice_spaces.iter().find(|output|
         output.space.as_ref().is_some_and(|s| s.name.to_string() == "@batch1"))
         .expect("exists").space.clone().expect("space exists");
@@ -931,8 +936,79 @@ async fn it_can_batch_txs(rig: &TestRig) -> anyhow::Result<()> {
         }
         _ => panic!("must be a bid")
     }
+
+    for space in vec![
+        "@test10000".to_string(),
+        "@test9999".to_string(),
+        "@test9998".to_string()
+    ] {
+        let space = alice_spaces.iter().find(|output|
+            output.space.as_ref().is_some_and(|s| s.name.to_string() == space))
+            .expect("exists").space.clone().expect("space exists");
+
+        match space.covenant {
+            Covenant::Transfer { data, .. } => {
+                assert_eq!(
+                    data.clone().unwrap().to_vec(),
+                    vec![0xEE, 0xEE, 0x22, 0x22],
+                    "must set correct data"
+                );
+            }
+            _ => panic!("must be a transfer")
+        }
+    }
+
     Ok(())
 }
+
+
+async fn it_can_use_reserved_op_codes(rig: &TestRig) -> anyhow::Result<()> {
+    rig.wait_until_wallet_synced(ALICE).await.expect("synced");
+    let alice_spaces = vec![
+        "@test10000".to_string(),
+        "@test9999".to_string(),
+        "@test9998".to_string()
+    ];
+
+    let res = rig
+        .spaced
+        .client
+        .wallet_send_request(
+            ALICE,
+            RpcWalletTxBuilder {
+                bidouts: None,
+                requests: vec![
+                    RpcWalletRequest::Execute(ExecuteParams {
+                        context: alice_spaces.clone(),
+                        space_script: SpaceScript::create_reserve()
+                    }),
+                ],
+                fee_rate: Some(FeeRate::from_sat_per_vb(1).expect("fee")),
+                dust: None,
+                force: true,
+                confirmed_only: false,
+                skip_tx_check: true,
+            },
+        )
+        .await.expect("response");
+
+    assert!(res.result.iter().all(|tx| tx.error.is_none()), "reserve should work");
+    assert_eq!(res.result.len(), 2, "expected 2 transactions");
+
+    rig.mine_blocks(1, None).await.expect("mine");
+    rig.wait_until_wallet_synced(ALICE).await.expect("synced");
+
+    for space in alice_spaces {
+        let space = rig.spaced.client.get_space(&space)
+            .await.expect("space").expect("space exists")
+            .spaceout.space.expect("space exists");
+
+        assert!(matches!(space.covenant, Covenant::Reserved), "expected a reserved space");
+    }
+
+    Ok(())
+}
+
 
 async fn it_should_handle_reorgs(rig: &TestRig) -> anyhow::Result<()> {
     rig.wait_until_wallet_synced(ALICE).await.expect("synced");
@@ -974,6 +1050,7 @@ async fn run_auction_tests() -> anyhow::Result<()> {
     it_should_not_allow_register_or_transfer_to_same_space_multiple_times(&rig).await
         .expect("should not allow register/transfer multiple times");
     it_can_batch_txs(&rig).await.expect("bump fee");
+    it_can_use_reserved_op_codes(&rig).await.expect("should use reserved opcodes");
 
     // keep reorgs last as it can drop some txs from mempool and mess up wallet state
     it_should_handle_reorgs(&rig).await.expect("should make wallet");
