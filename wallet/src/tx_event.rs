@@ -198,7 +198,9 @@ impl TxEvent {
         let query = format!(
             "SELECT DISTINCT space
          FROM {}
-         WHERE type = 'bid' AND space IS NOT NULL AND created_at >= strftime('%s', 'now', '-14 days')",
+         WHERE type IN ('bid', 'open')
+         AND space IS NOT NULL
+         AND created_at >= strftime('%s', 'now', '-14 days')",
             Self::TX_EVENTS_TABLE_NAME,
         );
 
