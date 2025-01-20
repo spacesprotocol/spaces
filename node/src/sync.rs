@@ -1,20 +1,15 @@
 use std::{net::SocketAddr, path::PathBuf, time::Duration};
 
 use anyhow::{anyhow, Context};
-use log::info;
+use log::{info, warn};
 use protocol::{
     bitcoin::{hashes::Hash, Block, BlockHash},
     constants::ChainAnchor,
     hasher::BaseHash,
 };
 use tokio::sync::broadcast;
-
-use crate::{
-    config::ExtendedNetwork,
-    node::{BlockMeta, BlockSource, Node},
-    source::{BitcoinBlockSource, BitcoinRpc, BlockEvent, BlockFetchError, BlockFetcher},
-    store::LiveStore,
-};
+use crate::{config::ExtendedNetwork, node::{BlockMeta, BlockSource, Node}, source::{BitcoinBlockSource, BitcoinRpc, BlockEvent, BlockFetchError, BlockFetcher}, std_wait, store::LiveStore};
+use crate::source::BitcoinRpcError;
 
 // https://internals.rust-lang.org/t/nicer-static-assertions/15986
 macro_rules! const_assert {
@@ -171,11 +166,24 @@ impl Spaced {
                         info!("block={} height={}", id.hash, id.height);
                     }
                     BlockEvent::Error(e) if matches!(e, BlockFetchError::BlockMismatch) => {
-                        self.restore(&source)?;
+                        if let Err(e) = self.restore(&source) {
+                            if e.downcast_ref::<BitcoinRpcError>().is_none() {
+                                return Err(e);
+                            }
+                            warn!("Restore: {} - retrying in 1s", e);
+                            std_wait(|| shutdown_signal.try_recv().is_ok(), Duration::from_secs(1));
+                        }
+                        // Even if we couldn't restore just attempt to re-sync
                         let new_tip = self.chain.state.tip.read().expect("read").clone();
-                        fetcher.start(new_tip);
+                        fetcher.restart(new_tip, &receiver);
                     }
-                    BlockEvent::Error(e) => return Err(e.into()),
+                    BlockEvent::Error(e) => {
+                        warn!("Fetcher: {} - retrying in 1s", e);
+                        std_wait(|| shutdown_signal.try_recv().is_ok(), Duration::from_secs(1));
+                        // Even if we couldn't restore just attempt to re-sync
+                        let new_tip = self.chain.state.tip.read().expect("read").clone();
+                        fetcher.restart(new_tip, &receiver);
+                    }
                 },
                 Err(e) if matches!(e, std::sync::mpsc::TryRecvError::Empty) => {
                     std::thread::sleep(Duration::from_millis(10));

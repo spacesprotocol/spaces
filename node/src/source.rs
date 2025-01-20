@@ -12,7 +12,7 @@ use std::{
 use base64::Engine;
 use bitcoin::{Block, BlockHash, Txid};
 use hex::FromHexError;
-use log::{error, info};
+use log::{error};
 use protocol::constants::ChainAnchor;
 use reqwest::StatusCode;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -22,6 +22,7 @@ use tokio::time::Instant;
 use wallet::{bitcoin, bitcoin::Transaction};
 
 use crate::node::BlockSource;
+use crate::std_wait;
 
 const BITCOIN_RPC_IN_WARMUP: i32 = -28; // Client still warming up
 const BITCOIN_RPC_CLIENT_NOT_CONNECTED: i32 = -9; // Bitcoin is not connected
@@ -240,8 +241,8 @@ impl BitcoinRpc {
         client: &reqwest::Client,
         request: &BitcoinRpcRequest,
     ) -> Result<reqwest::Response, BitcoinRpcError> {
-        let mut delay = Duration::from_millis(1000);
-        let max_retries = 10;
+        let mut delay = Duration::from_millis(100);
+        let max_retries = 5;
         let mut last_error = None;
 
         for attempt in 0..max_retries {
@@ -275,8 +276,8 @@ impl BitcoinRpc {
         client: &reqwest::blocking::Client,
         request: &BitcoinRpcRequest,
     ) -> Result<reqwest::blocking::Response, BitcoinRpcError> {
-        let mut delay = Duration::from_millis(1000);
-        let max_retries = 10;
+        let mut delay = Duration::from_millis(100);
+        let max_retries = 5;
         let mut last_error = None;
 
         for attempt in 0..max_retries {
@@ -423,6 +424,12 @@ impl BlockFetcher {
         Ok(Some(tip))
     }
 
+    pub fn restart(&self, checkpoint: ChainAnchor, drain_receiver: &Receiver<BlockEvent>) {
+        self.stop();
+        while drain_receiver.try_recv().is_ok() {}
+        self.start(checkpoint)
+    }
+
     pub fn start(&self, mut checkpoint: ChainAnchor) {
         self.stop();
 
@@ -437,7 +444,6 @@ impl BlockFetcher {
 
             loop {
                 if current_task.load(Ordering::SeqCst) != job_id {
-                    info!("Shutting down block fetcher");
                     return;
                 }
                 if last_check.elapsed() < Duration::from_secs(1) {
@@ -450,7 +456,9 @@ impl BlockFetcher {
                     Ok(t) => t,
                     Err(e) => {
                         _ = task_sender.send(BlockEvent::Error(e));
-                        return;
+                        std_wait(|| current_task.load(Ordering::SeqCst) != job_id,
+                                 Duration::from_secs(1));
+                        continue;
                     }
                 };
 
@@ -468,6 +476,12 @@ impl BlockFetcher {
                     match res {
                         Ok(new_tip) => {
                             checkpoint = new_tip;
+                        }
+                        Err(e) if matches!(e, BlockFetchError::RpcError(_)) => {
+                            _ = task_sender.send(BlockEvent::Error(e));
+                            std_wait(|| current_task.load(Ordering::SeqCst) != job_id,
+                                     Duration::from_secs(1));
+                            continue;
                         }
                         Err(e) => {
                             _ = task_sender.send(BlockEvent::Error(e));
@@ -824,7 +838,7 @@ impl BlockSource for BitcoinBlockSource {
         ))
     }
 
-    fn in_mempool(&self, txid: &Txid) -> Result<bool, BitcoinRpcError> {
+    fn in_mempool(&self, txid: &Txid, height: u32) -> Result<bool, BitcoinRpcError> {
         let result: Result<Value, _> = self
             .rpc
             .send_json_blocking(&self.client, &self.rpc.get_mempool_entry(txid));
@@ -833,6 +847,12 @@ impl BlockSource for BitcoinBlockSource {
             Ok(_) => Ok(true),
             Err(error) => match error {
                 BitcoinRpcError::Rpc(rpc) => {
+                    let current_count = self.get_block_count()?;
+                    if current_count != height as u64 {
+                        // Report it as still in mempool since height changed during the check
+                        return Ok(true);
+                    }
+
                     if rpc.code == -5 && rpc.message.contains("not in mempool") {
                         return Ok(false);
                     }

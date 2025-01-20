@@ -6,7 +6,7 @@ use std::{
 use anyhow::anyhow;
 use clap::ValueEnum;
 use futures::{stream::FuturesUnordered, StreamExt};
-use log::{info, warn};
+use log::{error, info, warn};
 use protocol::{
     bitcoin::Txid,
     constants::ChainAnchor,
@@ -22,20 +22,14 @@ use tokio::{
     sync::{broadcast, mpsc, mpsc::Receiver, oneshot},
 };
 use tokio::time::Instant;
+use protocol::bitcoin::BlockHash;
 use wallet::{address::SpaceAddress, bdk_wallet::{
     chain::{local_chain::CheckPoint, BlockId},
     KeychainKind,
 }, bitcoin, bitcoin::{Address, Amount, FeeRate, OutPoint}, builder::{CoinTransfer, SpaceTransfer, SpacesAwareCoinSelection}, tx_event::{TxRecord, TxEvent, TxEventKind}, Balance, DoubleUtxo, SpacesWallet, WalletInfo, WalletOutput};
-use crate::{
-    checker::TxChecker,
-    config::ExtendedNetwork,
-    node::BlockSource,
-    rpc::{RpcWalletRequest, RpcWalletTxBuilder, WalletLoadRequest},
-    source::{
-        BitcoinBlockSource, BitcoinRpc, BitcoinRpcError, BlockEvent, BlockFetchError, BlockFetcher,
-    },
-    store::{ChainState, LiveSnapshot, Sha256},
-};
+use crate::{checker::TxChecker, config::ExtendedNetwork, node::BlockSource, rpc::{RpcWalletRequest, RpcWalletTxBuilder, WalletLoadRequest}, source::{
+    BitcoinBlockSource, BitcoinRpc, BitcoinRpcError, BlockEvent, BlockFetchError, BlockFetcher,
+}, std_wait, store::{ChainState, LiveSnapshot, Sha256}};
 
 const MEMPOOL_CHECK_INTERVAL: Duration = Duration::from_millis(
     if cfg!(debug_assertions) { 500 } else { 10_000 }
@@ -123,8 +117,8 @@ pub struct RpcWallet {
 pub struct MempoolChecker<'a>(&'a BitcoinBlockSource);
 
 impl wallet::Mempool for MempoolChecker<'_> {
-    fn in_mempool(&self, txid: &Txid) -> anyhow::Result<bool> {
-        Ok(self.0.in_mempool(txid)?)
+    fn in_mempool(&self, txid: &Txid, height: u32) -> anyhow::Result<bool> {
+        Ok(self.0.in_mempool(txid, height)?)
     }
 }
 
@@ -165,23 +159,25 @@ impl RpcWallet {
             wallet.build_fee_bump(txid, fee_rate)?;
 
         let psbt = builder.finish()?;
-        let tx = wallet.sign(psbt, None)?;
+        let replacement = wallet.sign(psbt, None)?;
 
         if !skip_tx_check {
             let tip = wallet.local_chain().tip().height();
             let mut checker = TxChecker::new(state);
-            checker.check_apply_tx(tip + 1, &tx)?;
+            checker.check_apply_tx(tip + 1, &replacement)?;
         }
 
-        let new_txid = tx.compute_txid();
-        let last_seen = source.rpc.broadcast_tx(&source.client, &tx)?;
+        let new_txid = replacement.compute_txid();
+        let last_seen = source.rpc.broadcast_tx(&source.client, &replacement)?;
 
-        let mut tx_record = TxRecord::new_with_events(tx, tx_events);
+        let mut tx_record = TxRecord::new_with_events(replacement, tx_events);
         tx_record.add_fee_bump();
 
         let new_events = tx_record.events.clone();
 
-        wallet.apply_unconfirmed_tx_record(tx_record, last_seen)?;
+        // Incrementing last_seen by 1 ensures eviction of older tx
+        // in cases with same-second/last seen replacement.
+        wallet.apply_unconfirmed_tx_record(tx_record, last_seen+1)?;
         wallet.commit()?;
 
         Ok(vec![TxResponse {
@@ -323,12 +319,12 @@ impl RpcWallet {
     }
 
     /// Returns true if Bitcoin, protocol, and wallet tips match.
-    fn all_synced(bitcoin: &BitcoinBlockSource, protocol: &mut LiveSnapshot, wallet: &SpacesWallet) -> bool {
+    fn all_synced(bitcoin: &BitcoinBlockSource, protocol: &mut LiveSnapshot, wallet: &SpacesWallet) -> Option<ChainAnchor> {
         let bitcoin_tip = match bitcoin.get_best_chain() {
             Ok(tip) => tip,
             Err(e) => {
                 warn!("Sync check failed: {}", e);
-                return false;
+                return None;
             }
         };
         let wallet_tip = wallet.local_chain().tip();
@@ -336,10 +332,14 @@ impl RpcWallet {
             Ok(tip) => tip.clone(),
             Err(e) => {
                 warn!("Failed to read protocol tip: {}", e);
-                return false;
+                return None;
             }
         };
-        protocol_tip.hash == wallet_tip.hash() && protocol_tip.hash == bitcoin_tip.hash
+        if protocol_tip.hash == wallet_tip.hash() && protocol_tip.hash == bitcoin_tip.hash {
+            Some(bitcoin_tip)
+        } else {
+            None
+        }
     }
 
     fn wallet_sync(
@@ -369,9 +369,8 @@ impl RpcWallet {
                 info!("Shutting down wallet sync");
                 break;
             }
-
             if let Ok(command) = commands.try_recv() {
-                let synced = Self::all_synced(&source, &mut state, &wallet);
+                let synced = Self::all_synced(&source, &mut state, &wallet).is_some();
                 Self::wallet_handle_commands(network, &source, &mut state, &mut wallet, command, synced)?;
             }
             if let Ok(event) = receiver.try_recv() {
@@ -398,25 +397,46 @@ impl RpcWallet {
                     }
                     BlockEvent::Error(e) if matches!(e, BlockFetchError::BlockMismatch) => {
                         let mut checkpoint_in_chain = None;
-                        let best_chain = source.get_best_chain()?;
+                        let best_chain = match source.get_best_chain() {
+                            Ok(best) => best,
+                            Err(error) => {
+                                warn!("Wallet error: {}", error);
+                                fetcher.restart(wallet_tip, &receiver);
+                                continue;
+                            }
+                        };
+
                         for cp in wallet.local_chain().iter_checkpoints() {
                             if cp.height() > best_chain.height {
                                 continue;
                             }
-
-                            let hash = source.get_block_hash(cp.height())?;
+                            let hash = match source.get_block_hash(cp.height()) {
+                                Ok(hash) => hash,
+                                Err(err) => {
+                                    warn!("Wallet error: {}", err);
+                                    fetcher.restart(wallet_tip, &receiver);
+                                    continue;
+                                }
+                            };
                             if cp.height() != 0 && hash == cp.hash() {
                                 checkpoint_in_chain = Some(cp);
                                 break;
                             }
                         }
-
                         let restore_point = match checkpoint_in_chain {
                             None => {
                                 // We couldn't find a restore point
                                 warn!("Rebuilding wallet `{}`", wallet.config.name);
                                 let birthday = wallet.config.start_block;
-                                let hash = source.get_block_hash(birthday)?;
+                                let hash = match source.get_block_hash(birthday) {
+                                    Ok(hash) => hash,
+                                    Err(error) => {
+                                        warn!("Wallet error: {}", error);
+                                        fetcher.restart(wallet_tip, &receiver);
+                                        continue;
+                                    }
+                                };
+
                                 let cp = CheckPoint::new(BlockId {
                                     height: birthday,
                                     hash,
@@ -437,27 +457,32 @@ impl RpcWallet {
                             wallet_tip.hash,
                             wallet_tip.height
                         );
-                        fetcher.start(wallet_tip);
+                        fetcher.restart(wallet_tip, &receiver);
                     }
-                    BlockEvent::Error(e) => return Err(e.into()),
+                    BlockEvent::Error(e) => {
+                        warn!("Fetcher: {} - retrying in 1s", e);
+                        std_wait(|| shutdown.try_recv().is_ok(), Duration::from_secs(1));
+                        fetcher.restart(wallet_tip, &receiver);
+                    }
                 }
 
                 continue;
             }
 
-            if synced_at_least_once &&
-                last_mempool_check.elapsed() > MEMPOOL_CHECK_INTERVAL &&
-                Self::all_synced(&source, &mut state, &wallet) {
-                let mem = MempoolChecker(&source);
-                match wallet.update_unconfirmed_bids(mem, &mut state) {
-                    Ok(txids) => for txid in txids {
-                        info!("Dropped {} unconfirmed bid due to potential replacement", txid);
+            if synced_at_least_once && last_mempool_check.elapsed() > MEMPOOL_CHECK_INTERVAL {
+                if let Some(common_tip) = Self::all_synced(&source, &mut state, &wallet) {
+                    let mem = MempoolChecker(&source);
+                    match wallet.update_unconfirmed_bids(mem, common_tip.height, &mut state) {
+                        Ok(txids) => for txid in txids {
+                            info!("Dropped {} - no longer in the mempool", txid);
+                        }
+                        Err(err) =>
+                            warn!("Could not check for unconfirmed bids in mempool: {}", err),
                     }
-                    Err(err) =>
-                        warn!("Could not check for unconfirmed bids in mempool: {}", err),
+                    last_mempool_check = Instant::now();
                 }
-                last_mempool_check = Instant::now();
             }
+
             std::thread::sleep(Duration::from_millis(10));
         }
 
