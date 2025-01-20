@@ -41,7 +41,7 @@ pub mod tx_event;
 pub struct SpacesWallet {
     pub config: WalletConfig,
     internal: PersistedWallet<Connection>,
-    connection: Connection,
+    pub connection: Connection,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

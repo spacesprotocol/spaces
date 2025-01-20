@@ -58,6 +58,7 @@ pub struct TxInfo {
     pub sent: Amount,
     pub received: Amount,
     pub fee: Option<Amount>,
+    pub events: Vec<TxEvent>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -472,7 +473,7 @@ impl RpcWallet {
         let mut transactions: Vec<_> = wallet.transactions().collect();
         transactions.sort();
 
-        Ok(transactions
+        let mut txs : Vec<_> = transactions
             .iter()
             .rev()
             .skip(skip)
@@ -489,9 +490,19 @@ impl RpcWallet {
                     sent,
                     received,
                     fee,
+                    events: vec![]
                 }
             })
-            .collect())
+            .collect();
+
+        // TODO: use a single query?
+        for tx in txs.iter_mut() {
+            tx.events = {
+                let conn = wallet.connection.transaction()?;
+                TxEvent::all(&conn, tx.txid).expect("tx event")
+            };
+        }
+        Ok(txs)
     }
 
     fn resolve(
