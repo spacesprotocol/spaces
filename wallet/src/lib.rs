@@ -7,14 +7,10 @@ use std::{
 };
 
 use anyhow::{anyhow, Context};
-use bdk_wallet::{
-    chain,
-    chain::BlockId,
-    coin_selection::{CoinSelectionAlgorithm, CoinSelectionResult, Excess, InsufficientFunds},
-    rusqlite::Connection,
-    tx_builder::TxOrdering,
-    KeychainKind, LocalOutput, PersistedWallet, SignOptions, Wallet, WeightedUtxo,
-};
+use bdk_wallet::{chain, chain::BlockId, coin_selection::{CoinSelectionAlgorithm, CoinSelectionResult, Excess, InsufficientFunds}, rusqlite::Connection, tx_builder::TxOrdering, AddressInfo, KeychainKind, LocalOutput, PersistedWallet, SignOptions, TxBuilder, Wallet, WalletTx, WeightedUtxo};
+use bdk_wallet::chain::{local_chain};
+use bdk_wallet::chain::local_chain::LocalChain;
+use bdk_wallet::chain::tx_graph::CalculateFeeError;
 use bincode::config;
 use bitcoin::{
     absolute::{Height, LockTime},
@@ -27,18 +23,15 @@ use bitcoin::{
     Amount, Block, BlockHash, FeeRate, Network, OutPoint, Psbt, Sequence, TapLeafHash,
     TapSighashType, Transaction, TxOut, Txid, Weight, Witness,
 };
-use protocol::{
-    bitcoin::{
-        constants::genesis_block,
-        key::{rand, UntweakedKeypair},
-        opcodes,
-        taproot::{ControlBlock, TaprootBuilder},
-        Address, ScriptBuf, XOnlyPublicKey,
-    },
-    prepare::{is_magic_lock_time, TrackableOutput},
-};
+use protocol::{bitcoin::{
+    constants::genesis_block,
+    key::{rand, UntweakedKeypair},
+    opcodes,
+    taproot::{ControlBlock, TaprootBuilder},
+    Address, ScriptBuf, XOnlyPublicKey,
+}, prepare::{is_magic_lock_time, TrackableOutput}, Space};
 use serde::{ser::SerializeSeq, Deserialize, Deserializer, Serialize, Serializer};
-
+use protocol::prepare::DataSource;
 use crate::{
     address::SpaceAddress,
     builder::{is_connector_dust, is_space_dust, SpacesAwareCoinSelection},
@@ -57,8 +50,21 @@ pub mod tx_event;
 
 pub struct SpacesWallet {
     pub config: WalletConfig,
-    pub spaces: PersistedWallet<Connection>,
-    pub connection: Connection,
+    internal: PersistedWallet<Connection>,
+    connection: Connection,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Balance {
+    pub balance: Amount,
+    pub details: BalanceDetails,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BalanceDetails {
+    #[serde(flatten)]
+    pub balance: bdk_wallet::Balance,
+    pub dust: Amount,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -91,6 +97,14 @@ pub struct DoubleUtxo {
     pub spend: FullTxOut,
     pub auction: FullTxOut,
     pub confirmed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WalletOutput {
+    #[serde(flatten)]
+    pub output: LocalOutput,
+    pub space: Option<Space>,
+    pub is_spaceout: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -144,9 +158,9 @@ impl SpacesWallet {
             config.space_descriptors.external.clone(),
             config.space_descriptors.internal.clone(),
         )
-        .network(config.network)
-        .genesis_hash(genesis_hash)
-        .create_wallet(&mut conn)?;
+            .network(config.network)
+            .genesis_hash(genesis_hash)
+            .create_wallet(&mut conn)?;
 
         let tx = conn.transaction().context("could not create wallet db transaction")?;
         Self::init_sqlite_tables(&tx).context("could not initialize wallet db tables")?;
@@ -154,12 +168,125 @@ impl SpacesWallet {
 
         let wallet = Self {
             config,
-            spaces: spaces_wallet,
+            internal: spaces_wallet,
             connection: conn,
         };
 
         wallet.clear_unused_signing_info();
         Ok(wallet)
+    }
+
+    pub fn balance(&mut self) -> anyhow::Result<Balance> {
+        let unspent = self.list_unspent();
+        let balance = self.internal.balance();
+        let details = BalanceDetails {
+            balance,
+            dust: unspent
+                .filter(|output|
+                    // confirmed or trusted pending only
+                    (output.confirmation_time.is_confirmed() || output.keychain == KeychainKind::Internal) &&
+                        (output.txout.value <= SpacesAwareCoinSelection::DUST_THRESHOLD)
+                )
+                .map(|output| output.txout.value)
+                .sum(),
+        };
+        Ok(Balance {
+            balance: (details.balance.confirmed + details.balance.trusted_pending) - details.dust,
+            details,
+        })
+    }
+
+    pub fn get_tx(&mut self, txid: Txid) -> Option<WalletTx> {
+        self.internal.get_tx(txid)
+    }
+
+    pub fn build_tx<'a>(&'a mut self, confirmed_only: bool)
+                        -> anyhow::Result<TxBuilder<'a, SpacesAwareCoinSelection>> {
+        self.configure_builder(None, confirmed_only)
+    }
+
+    pub fn next_unused_address(&mut self, keychain_kind: KeychainKind) -> AddressInfo {
+        self.internal.next_unused_address(keychain_kind)
+    }
+
+    pub fn local_chain(&self) -> &LocalChain {
+        self.internal.local_chain()
+    }
+
+    pub fn insert_checkpoint(&mut self, checkpoint: BlockId) -> Result<bool, local_chain::AlterCheckPointError> {
+        self.internal.insert_checkpoint(checkpoint)
+    }
+
+    pub fn transactions(&self) -> impl Iterator<Item=WalletTx> + '_ {
+        self.internal.transactions()
+    }
+
+    pub fn sent_and_received(&self, tx: &Transaction) -> (Amount, Amount) {
+        self.internal.sent_and_received(tx)
+    }
+
+    pub fn calculate_fee(&self, tx: &Transaction) -> Result<Amount, CalculateFeeError> {
+        self.internal.calculate_fee(tx)
+    }
+
+    pub fn build_fee_bump(&mut self, txid: Txid, fee_rate: FeeRate) -> anyhow::Result<TxBuilder<'_, SpacesAwareCoinSelection>> {
+        self.configure_builder(Some((txid, fee_rate)), false)
+    }
+
+    fn configure_builder(
+        &mut self,
+        replace: Option<(Txid, FeeRate)>,
+        confirmed_only: bool,
+    ) -> anyhow::Result<TxBuilder<'_, SpacesAwareCoinSelection>> {
+        let selection = SpacesAwareCoinSelection::new(vec![], confirmed_only);
+
+        let mut builder = match replace {
+            None => {
+                self.internal.build_tx().coin_selection(selection)
+            }
+            Some((txid, fee_rate)) => {
+                let previous_tx_lock_time = match self.get_tx(txid) {
+                    None => return Err(anyhow::anyhow!("No wallet tx {} found", txid)),
+                    Some(tx) => tx.tx_node.lock_time,
+                };
+                let mut builder = self.internal.build_fee_bump(txid)?
+                    .coin_selection(selection);
+                builder
+                    .nlocktime(previous_tx_lock_time)
+                    .fee_rate(fee_rate);
+                builder
+            }
+        };
+
+        builder.ordering(TxOrdering::Untouched);
+        Ok(builder)
+    }
+
+    pub fn is_mine(&self, script: ScriptBuf) -> bool {
+        self.internal.is_mine(script)
+    }
+
+    pub fn list_unspent(&self) -> impl Iterator<Item=LocalOutput> + '_ {
+        self.internal.list_unspent()
+    }
+
+    pub fn list_unspent_with_details(&mut self, store: &mut impl DataSource) -> anyhow::Result<Vec<WalletOutput>> {
+        let mut wallet_outputs = Vec::new();
+        for output in self.internal.list_unspent() {
+            let mut details = WalletOutput {
+                output,
+                space: None,
+                is_spaceout: false,
+            };
+
+            let result = store.get_spaceout(&details.output.outpoint)?;
+            if let Some(spaceout) = result {
+                details.is_spaceout = true;
+                details.space = spaceout.space;
+            }
+            wallet_outputs.push(details)
+        }
+        Ok(wallet_outputs)
     }
 
     pub fn get_tx_events(&mut self, txid: Txid) -> anyhow::Result<Vec<TxEvent>> {
@@ -181,7 +308,7 @@ impl SpacesWallet {
 
         descriptors.push(DescriptorInfo {
             descriptor: self
-                .spaces
+                .internal
                 .public_descriptor(KeychainKind::External)
                 .to_string(),
             internal: false,
@@ -189,7 +316,7 @@ impl SpacesWallet {
         });
         descriptors.push(DescriptorInfo {
             descriptor: self
-                .spaces
+                .internal
                 .public_descriptor(KeychainKind::Internal)
                 .to_string(),
             internal: true,
@@ -199,13 +326,13 @@ impl SpacesWallet {
         WalletInfo {
             label: self.config.name.clone(),
             start_block: self.config.start_block,
-            tip: self.spaces.local_chain().tip().height(),
+            tip: self.internal.local_chain().tip().height(),
             descriptors,
         }
     }
 
     pub fn next_unused_space_address(&mut self) -> SpaceAddress {
-        let info = self.spaces.next_unused_address(KeychainKind::External);
+        let info = self.internal.next_unused_address(KeychainKind::External);
         SpaceAddress(info.address)
     }
 
@@ -215,14 +342,14 @@ impl SpacesWallet {
         block: &Block,
         block_id: BlockId,
     ) -> anyhow::Result<()> {
-        self.spaces
+        self.internal
             .apply_block_connected_to(&block, height, block_id)?;
 
         Ok(())
     }
 
     pub fn apply_unconfirmed_tx(&mut self, tx: Transaction, seen: u64) {
-        self.spaces.apply_unconfirmed_txs(vec![(tx, seen)]);
+        self.internal.apply_unconfirmed_txs(vec![(tx, seen)]);
     }
 
     pub fn apply_unconfirmed_tx_record(&mut self, tx_record: TxRecord, seen: u64) -> anyhow::Result<()> {
@@ -239,25 +366,24 @@ impl SpacesWallet {
                 event.space,
                 event.bid_spends,
                 event.replaced,
-                event.details
+                event.details,
             ).context("could not insert tx event into wallet db")?;
         }
         db_tx.commit().context("could not commit tx events to wallet db")?;
         Ok(())
-
     }
 
     pub fn commit(&mut self) -> anyhow::Result<()> {
-        self.spaces.persist(&mut self.connection)?;
+        self.internal.persist(&mut self.connection)?;
         Ok(())
     }
 
     /// List outputs that can be safely auctioned off
     pub fn list_bidouts(
         &mut self,
-        selection: &SpacesAwareCoinSelection,
+        confirmed_only: bool,
     ) -> anyhow::Result<Vec<DoubleUtxo>> {
-        let mut unspent: Vec<LocalOutput> = self.spaces.list_unspent().collect();
+        let mut unspent: Vec<LocalOutput> = self.list_unspent().collect();
         let mut not_auctioned = vec![];
 
         if unspent.is_empty() {
@@ -299,20 +425,13 @@ impl SpacesWallet {
                 && is_connector_dust(utxo1.txout.value)
                 && !is_space_dust(utxo2.txout.value)
                 && utxo2.txout.is_magic_output()
-
-                // Exclude any outputs that we know to be spaces
-                && !selection.exclude_outputs.iter()
-                .any(|sel|
-                    sel.is_space &&
-                        (sel.outpoint == utxo1.outpoint || sel.outpoint == utxo2.outpoint)
-                )
                 // Check if confirmed only are required
-                && (!selection.confirmed_only || utxo1.confirmation_time.is_confirmed())
+                && (!confirmed_only || utxo1.confirmation_time.is_confirmed())
             {
                 // While it's possible to create outputs within space transactions
                 // that don't use a special locktime, for now it's safer to require
                 // explicitly trackable outputs.
-                let locktime = match self.spaces.get_tx(utxo2.outpoint.txid) {
+                let locktime = match self.internal.get_tx(utxo2.outpoint.txid) {
                     None => continue,
                     Some(tx) => tx.tx_node.lock_time,
                 };
@@ -340,11 +459,11 @@ impl SpacesWallet {
     pub fn new_bid_psbt(
         &mut self,
         total_burned: Amount,
-        selection: &SpacesAwareCoinSelection,
+        confirmed_only: bool,
     ) -> anyhow::Result<(Psbt, DoubleUtxo)> {
-        let all: Vec<_> = self.list_bidouts(selection)?;
+        let all: Vec<_> = self.list_bidouts(confirmed_only)?;
 
-        let msg = if selection.confirmed_only {
+        let msg = if confirmed_only {
             "The wallet already has an unconfirmed bid for this space in the mempool, but no \
             confirmed bid utxos are available to replace it with a different amount."
         } else {
@@ -365,7 +484,7 @@ impl SpacesWallet {
 
         let mut bid_psbt = {
             let mut builder = self
-                .spaces
+                .internal
                 .build_tx()
                 .coin_selection(RequiredUtxosOnlyCoinSelectionAlgorithm);
 
@@ -385,7 +504,7 @@ impl SpacesWallet {
             builder.finish()?
         };
 
-        let finalized = self.spaces.sign(
+        let finalized = self.internal.sign(
             &mut bid_psbt,
             SignOptions {
                 allow_all_sighashes: true,
@@ -446,7 +565,7 @@ impl SpacesWallet {
 
             if input.final_script_witness.is_none() && input.witness_utxo.is_some() {
                 if self
-                    .spaces
+                    .internal
                     .is_mine(input.witness_utxo.as_ref().unwrap().script_pubkey.clone())
                 {
                     input
@@ -474,7 +593,7 @@ impl SpacesWallet {
                 input.final_script_sig = None;
             }
         }
-        if !self.spaces.sign(&mut psbt, SignOptions::default())? {
+        if !self.internal.sign(&mut psbt, SignOptions::default())? {
             return Err(anyhow!("could not finalize psbt using spaces signer"));
         }
 
@@ -508,7 +627,7 @@ impl SpacesWallet {
                 continue;
             }
 
-            let space_utxo = self.spaces.get_utxo(input.previous_output);
+            let space_utxo = self.internal.get_utxo(input.previous_output);
             if let Some(space_utxo) = space_utxo {
                 prevouts.push(space_utxo.txout);
                 continue;
@@ -542,7 +661,7 @@ impl SpacesWallet {
                     signature,
                     sighash_type,
                 }
-                .to_vec(),
+                    .to_vec(),
             );
             witness.push(&signing_info.script);
             witness.push(&signing_info.control_block.serialize());
@@ -654,13 +773,13 @@ impl SpaceScriptSigningInfo {
             (
                 // 1-byte varint(control_block)
                 1 + self.control_block.size() +
-                // 1-byte varint(script)
-                1 + self.script.len() +
-                // 1-byte varint(sig+sighash) + <sig(64)+sigHash(1)>
-                1 + 65
+                    // 1-byte varint(script)
+                    1 + self.script.len() +
+                    // 1-byte varint(sig+sighash) + <sig(64)+sigHash(1)>
+                    1 + 65
             ) as _,
         )
-        .expect("valid weight")
+            .expect("valid weight")
     }
 
     pub(crate) fn to_vec(&self) -> Vec<u8> {

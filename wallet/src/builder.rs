@@ -27,7 +27,6 @@ use protocol::{
     script::SpaceScript,
     Covenant, FullSpaceOut, Space,
 };
-
 use crate::{
     address::SpaceAddress,
     DoubleUtxo, FullTxOut, SpaceScriptSigningInfo, SpacesWallet,
@@ -60,7 +59,7 @@ pub struct BuilderIterator<'a> {
     pub wallet: &'a mut SpacesWallet,
     force: bool,
     median_time: u64,
-    coin_selection: SpacesAwareCoinSelection,
+    confirmed_only: bool,
 }
 
 pub enum BuilderStack {
@@ -319,7 +318,6 @@ impl<'a, Cs: CoinSelectionAlgorithm> TxBuilderSpacesUtils<'a, Cs> for TxBuilder<
 
 impl Builder {
     fn prepare_all(
-        coin_selection: SpacesAwareCoinSelection,
         median_time: u64,
         w: &mut SpacesWallet,
         auction_outputs: Option<u8>,
@@ -328,12 +326,12 @@ impl Builder {
         coin_transfers: Vec<CoinTransfer>,
         fee_rate: FeeRate,
         dust: Option<Amount>,
+        confirmed_only: bool,
     ) -> anyhow::Result<(Transaction, Vec<FullTxOut>)> {
-        let coin_selection_confirmed_only = coin_selection.confirmed_only;
         let mut vout: u32 = 0;
         let mut tap_outputs = Vec::new();
         let change_address = w
-            .spaces
+            .internal
             .next_unused_address(KeychainKind::Internal)
             .script_pubkey();
 
@@ -344,7 +342,7 @@ impl Builder {
                 // one is spent in an auction.
                 // pointer/spend output
                 let addr1 = w
-                    .spaces
+                    .internal
                     .next_unused_address(KeychainKind::Internal)
                     .script_pubkey();
                 let dust = match dust {
@@ -355,16 +353,15 @@ impl Builder {
                 let magic_dust = magic_dust(dust);
 
                 placeholder_outputs.push((addr1, connector_dust));
-                let addr2 = w.spaces.next_unused_address(KeychainKind::External);
+                let addr2 = w.internal.next_unused_address(KeychainKind::External);
                 placeholder_outputs.push((addr2.script_pubkey(), magic_dust));
             }
         }
 
         let commit_psbt = {
-            let mut builder = w.spaces.build_tx().coin_selection(coin_selection);
+            let mut builder = w.build_tx(confirmed_only)?;
             builder.nlocktime(magic_lock_time(median_time));
 
-            builder.ordering(TxOrdering::Untouched);
             for (addr, amount) in placeholder_outputs {
                 builder.add_recipient(addr, amount);
                 vout += 1;
@@ -410,7 +407,7 @@ impl Builder {
 
             builder.fee_rate(fee_rate);
             let r = builder.finish().map_err(|e| match e {
-                CreateTxError::CoinSelection(e) if coin_selection_confirmed_only => {
+                CreateTxError::CoinSelection(e) if confirmed_only => {
                     anyhow!("{} (replacements use confirmed balance only)", e)
                 }
                 _ => {
@@ -471,7 +468,6 @@ impl Iterator for BuilderIterator<'_> {
                 }
 
                 let (tx, commitments) = match Builder::prepare_all(
-                    self.coin_selection.clone(),
                     self.median_time,
                     self.wallet,
                     params.bidouts.clone(),
@@ -480,6 +476,7 @@ impl Iterator for BuilderIterator<'_> {
                     params.sends.clone(),
                     self.fee_rate,
                     self.dust,
+                    self.confirmed_only
                 ) {
                     Ok(prep) => prep,
                     Err(err) => return Some(Err(err)),
@@ -567,10 +564,10 @@ impl Iterator for BuilderIterator<'_> {
             }
             StackOp::Open(params) => {
                 let tx = Builder::open_tx(
-                    self.coin_selection.clone(),
                     self.wallet,
                     params.clone(),
                     self.fee_rate,
+                    self.confirmed_only,
                     self.force,
                 );
                 Some(tx.map(|tx| {
@@ -582,10 +579,10 @@ impl Iterator for BuilderIterator<'_> {
             StackOp::Execute(params) => {
                 let spaces = params.context.clone();
                 let res = Builder::execute_tx(
-                    self.coin_selection.clone(),
                     self.wallet,
                     params,
                     self.fee_rate,
+                    self.confirmed_only,
                     self.force,
                 );
 
@@ -602,11 +599,11 @@ impl Iterator for BuilderIterator<'_> {
             }
             StackOp::Bid(bid) => {
                 let tx = Builder::bid_tx(
-                    self.coin_selection.clone(),
                     self.wallet,
                     bid.space.clone(),
                     bid.amount,
                     self.fee_rate,
+                    self.confirmed_only,
                     self.force,
                 );
                 Some(tx.map(|tx| {
@@ -686,13 +683,13 @@ impl Builder {
         self
     }
 
-    pub fn build_iter(
+    pub fn build_iter<'a>(
         self,
         dust: Option<Amount>,
         median_time: u64,
-        wallet: &mut SpacesWallet,
-        coin_selection: SpacesAwareCoinSelection,
-    ) -> anyhow::Result<BuilderIterator> {
+        wallet: &'a mut SpacesWallet,
+        confirmed_only: bool,
+    ) -> anyhow::Result<BuilderIterator<'a>> {
         let fee_rate = self
             .fee_rate
             .as_ref()
@@ -716,9 +713,7 @@ impl Builder {
 
         let required_auction_outputs = open_count + bid_count as u8;
         let available = if required_auction_outputs > 0 {
-            let mut selection = coin_selection.clone();
-            selection.confirmed_only = false;
-            wallet.list_bidouts(&selection)?
+            wallet.list_bidouts(false)?
         } else {
             Vec::new()
         };
@@ -798,24 +793,23 @@ impl Builder {
             fee_rate,
             wallet,
             force: self.force,
+            confirmed_only,
             median_time,
-            coin_selection,
         })
     }
 
     fn bid_tx(
-        coin_selection: SpacesAwareCoinSelection,
         w: &mut SpacesWallet,
         prev: FullSpaceOut,
         bid: Amount,
         fee_rate: FeeRate,
+        confirmed_only: bool,
         force: bool,
     ) -> anyhow::Result<Transaction> {
-        let (offer, placeholder) = w.new_bid_psbt(bid, &coin_selection)?;
+        let (offer, placeholder) = w.new_bid_psbt(bid, confirmed_only)?;
         let bid_psbt = {
-            let mut builder = w.spaces.build_tx().coin_selection(coin_selection);
+            let mut builder = w.build_tx(confirmed_only)?;
             builder
-                .ordering(TxOrdering::Untouched)
                 .nlocktime(LockTime::Blocks(Height::ZERO))
                 .set_exact_sequence(BID_PSBT_INPUT_SEQUENCE)
                 .add_bid(
@@ -835,16 +829,16 @@ impl Builder {
     }
 
     fn open_tx(
-        coin_selection: SpacesAwareCoinSelection,
         w: &mut SpacesWallet,
         params: OpenRevealParams,
         fee_rate: FeeRate,
+        confirmed_only: bool,
         force: bool,
     ) -> anyhow::Result<Transaction> {
-        let (offer, placeholder) = w.new_bid_psbt(params.initial_bid, &coin_selection)?;
+        let (offer, placeholder) = w.new_bid_psbt(params.initial_bid, confirmed_only)?;
         let mut extra_prevouts = BTreeMap::new();
         let open_psbt = {
-            let mut builder = w.spaces.build_tx().coin_selection(coin_selection);
+            let mut builder = w.build_tx(confirmed_only)?;
             builder.ordering(TxOrdering::Untouched).add_bid(
                 None,
                 offer,
@@ -868,23 +862,22 @@ impl Builder {
     }
 
     fn execute_tx(
-        coin_selection: SpacesAwareCoinSelection,
         w: &mut SpacesWallet,
         params: ExecuteParams,
         fee_rate: FeeRate,
+        confirmed_only: bool,
         _force: bool,
     ) -> anyhow::Result<(Transaction, usize)> {
         let mut extra_prevouts = BTreeMap::new();
         let reveal_input_index;
         let reveal_psbt = {
             let change_address = w
-                .spaces
+                .internal
                 .next_unused_address(KeychainKind::Internal)
                 .script_pubkey();
-            let mut builder = w.spaces.build_tx().coin_selection(coin_selection);
+            let mut builder = w.build_tx(confirmed_only)?;
 
             builder
-                .ordering(TxOrdering::Untouched)
                 // Added first to keep an odd number of outputs before adding transfers
                 .add_recipient(change_address, Amount::from_sat(1000));
 

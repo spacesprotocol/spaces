@@ -35,10 +35,7 @@ use tokio::{
     sync::{broadcast, mpsc, oneshot, RwLock},
     task::JoinSet,
 };
-use wallet::{
-    bdk_wallet as bdk, bdk_wallet::template::Bip86, bitcoin::hashes::Hash, export::WalletExport,
-    DoubleUtxo, WalletConfig, WalletDescriptors, WalletInfo,
-};
+use wallet::{bdk_wallet as bdk, bdk_wallet::template::Bip86, bitcoin::hashes::Hash, export::WalletExport, Balance, DoubleUtxo, WalletConfig, WalletDescriptors, WalletInfo, WalletOutput};
 
 use crate::{
     checker::TxChecker,
@@ -47,7 +44,7 @@ use crate::{
     source::BitcoinRpc,
     store::{ChainState, LiveSnapshot, RolloutEntry, Sha256},
     wallets::{
-        AddressKind, Balance, RpcWallet, TxInfo, TxResponse, WalletCommand, WalletOutput,
+        AddressKind, RpcWallet, TxInfo, TxResponse, WalletCommand,
         WalletResponse,
     },
 };
