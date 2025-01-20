@@ -99,7 +99,8 @@ impl TxEvent {
                 type TEXT NOT NULL, \
                 space TEXT, \
                 foreign_input TEXT, \
-                details TEXT \
+                details TEXT, \
+                created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
             ) STRICT;",
             Self::TX_EVENTS_TABLE_NAME,
         )];
@@ -192,11 +193,12 @@ impl TxEvent {
         Ok(None)
     }
 
-    pub fn spaces(db_tx: &rusqlite::Transaction) -> rusqlite::Result<Vec<String>> {
+    /// Retrieve all spaces the wallet has bid on in the last 2 weeks
+    pub fn watched_spaces(db_tx: &rusqlite::Transaction) -> rusqlite::Result<Vec<String>> {
         let query = format!(
             "SELECT DISTINCT space
          FROM {}
-         WHERE type = 'bid' AND space IS NOT NULL",
+         WHERE type = 'bid' AND space IS NOT NULL AND created_at >= strftime('%s', 'now', '-14 days')",
             Self::TX_EVENTS_TABLE_NAME,
         );
 
@@ -459,7 +461,7 @@ mod tests {
         let mut conn = Connection::open(&db_path)?;
         let tx = conn.transaction()?;
 
-        let spaces = TxEvent::spaces(&tx)?;
+        let spaces = TxEvent::watched_spaces(&tx)?;
         assert_eq!(spaces.len(), 1);
         assert_eq!(spaces[0], "test_space");
 

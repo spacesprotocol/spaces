@@ -273,6 +273,11 @@ impl SpacesWallet {
         self.internal.list_output()
     }
 
+    pub fn list_watched_spaces(&mut self) -> anyhow::Result<Vec<String>> {
+        let db_tx = self.connection.transaction().context("no db transaction")?;
+        TxEvent::watched_spaces(&db_tx).context("could not read watched spaces")
+    }
+
     pub fn list_unspent_with_details(&mut self, store: &mut impl DataSource) -> anyhow::Result<Vec<WalletOutput>> {
         let mut wallet_outputs = Vec::new();
         for output in self.internal.list_unspent() {
