@@ -3,7 +3,7 @@ use std::{
     str::FromStr,
     time::{Duration},
 };
-use anyhow::anyhow;
+use anyhow::{anyhow};
 use clap::ValueEnum;
 use futures::{stream::FuturesUnordered, StreamExt};
 use log::{info, warn};
@@ -484,23 +484,36 @@ impl RpcWallet {
         state: &mut LiveSnapshot
     ) -> anyhow::Result<ListSpacesResponse> {
         let unspent = wallet.list_unspent_with_details(state)?;
-        let watched_spaces = wallet.list_watched_spaces()?;
+        let recent_events = wallet.list_recent_events()?;
 
         let mut res = ListSpacesResponse {
             winning: vec![],
             outbid: vec![],
             owned: vec![],
         };
-        for space in watched_spaces {
+        for (txid, event) in recent_events {
             if unspent.iter()
-                .any(|out| out.space.as_ref().is_some_and(|s| s.name.to_string() == space)) {
+                .any(|out| out.space.as_ref()
+                    .is_some_and(|s| &s.name.to_string() == event.space.as_ref().unwrap())) {
                 continue;
             }
-            let name = SLabel::from_str(&space).expect("valid space name");
+            let name = SLabel::from_str(event.space.as_ref().unwrap()).expect("valid space name");
             let spacehash = SpaceKey::from(Sha256::hash(name.as_ref()));
             let space = state.get_space_info(&spacehash)?;
             if let Some(space) = space {
-                res.outbid.push(space);
+                let tx = wallet.get_tx(txid);
+                if tx.is_none() {
+                    res.outbid.push(space);
+                    continue;
+                }
+
+                let foreign_input = match event.foreign_input {
+                    None => continue,
+                    Some(outpoint) => outpoint
+                };
+                if foreign_input != space.outpoint() {
+                    res.outbid.push(space);
+                }
             }
         }
 
@@ -561,7 +574,16 @@ impl RpcWallet {
         for tx in txs.iter_mut() {
             tx.events = {
                 let conn = wallet.connection.transaction()?;
-                TxEvent::all(&conn, tx.txid).expect("tx event")
+                let mut events = TxEvent::all(&conn, tx.txid).expect("tx event");
+                for event in events.iter_mut() {
+                    match event.kind {
+                        TxEventKind::Commit => {
+                            event.details = None
+                        }
+                        _ => {}
+                    }
+                }
+                events
             };
         }
         Ok(txs)

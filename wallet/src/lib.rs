@@ -7,7 +7,7 @@ use std::{
 
 use anyhow::{anyhow, Context};
 use bdk_wallet::{chain, chain::BlockId, coin_selection::{CoinSelectionAlgorithm, CoinSelectionResult, Excess, InsufficientFunds}, rusqlite::Connection, tx_builder::TxOrdering, AddressInfo, KeychainKind, LocalOutput, PersistedWallet, SignOptions, TxBuilder, Update, Wallet, WalletTx, WeightedUtxo};
-use bdk_wallet::chain::{local_chain, ChainPosition, Indexer};
+use bdk_wallet::chain::{ChainPosition, Indexer};
 use bdk_wallet::chain::local_chain::{CannotConnectError, LocalChain};
 use bdk_wallet::chain::tx_graph::CalculateFeeError;
 use bincode::config;
@@ -26,7 +26,7 @@ use crate::{
     builder::{is_connector_dust, is_space_dust, SpacesAwareCoinSelection},
     tx_event::TxEvent,
 };
-use crate::tx_event::TxRecord;
+use crate::tx_event::{TxEventKind, TxRecord};
 
 pub extern crate bdk_wallet;
 pub extern crate bitcoin;
@@ -246,6 +246,21 @@ impl SpacesWallet {
     }
 
     pub fn build_fee_bump(&mut self, txid: Txid, fee_rate: FeeRate) -> anyhow::Result<TxBuilder<'_, SpacesAwareCoinSelection>> {
+        let events = self.get_tx_events(txid)?;
+        for event in events {
+            match event.kind {
+                TxEventKind::Bid => {
+                    match self.get_tx(txid) {
+                        Some(tx) => if !tx.chain_position.is_confirmed() {
+                            return Err(anyhow!("Bid with a higher fee on `{}` to replace this tx", event.space.expect("space")))
+                        }
+                        _ => continue,
+                    }
+                }
+                _ => {}
+            }
+        }
+
         self.create_builder(Some((txid, fee_rate)), false)
     }
 
@@ -291,9 +306,9 @@ impl SpacesWallet {
         self.internal.list_output()
     }
 
-    pub fn list_watched_spaces(&mut self) -> anyhow::Result<Vec<String>> {
+    pub fn list_recent_events(&mut self) -> anyhow::Result<Vec<(Txid, TxEvent)>> {
         let db_tx = self.connection.transaction().context("no db transaction")?;
-        TxEvent::watched_spaces(&db_tx).context("could not read watched spaces")
+        TxEvent::get_latest_events(&db_tx).context("could not read latest events")
     }
 
     pub fn list_unspent_with_details(&mut self, store: &mut impl DataSource) -> anyhow::Result<Vec<WalletOutput>> {

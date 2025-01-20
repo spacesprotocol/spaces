@@ -194,24 +194,43 @@ impl TxEvent {
     }
 
     /// Retrieve all spaces the wallet has bid on in the last 2 weeks
-    pub fn watched_spaces(db_tx: &rusqlite::Transaction) -> rusqlite::Result<Vec<String>> {
+    pub fn get_latest_events(
+        db_tx: &rusqlite::Transaction,
+    ) -> rusqlite::Result<Vec<(Txid, TxEvent)>> {
         let query = format!(
-            "SELECT DISTINCT space
-         FROM {}
-         WHERE type IN ('bid', 'open')
-         AND space IS NOT NULL
-         AND created_at >= strftime('%s', 'now', '-14 days')",
-            Self::TX_EVENTS_TABLE_NAME,
+            "SELECT txid, type, space, foreign_input, details
+         FROM {table}
+         WHERE id IN (
+             SELECT MAX(id)
+             FROM {table}
+             WHERE type IN ('bid', 'open')
+               AND created_at >= strftime('%s', 'now', '-14 days')
+             GROUP BY space
+         )
+         ORDER BY id DESC",
+            table = Self::TX_EVENTS_TABLE_NAME,
         );
 
         let mut stmt = db_tx.prepare(&query)?;
-        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
 
-        let mut spaces = Vec::new();
-        for space in rows {
-            spaces.push(space?);
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, Impl<Txid>>("txid")?.0,
+                TxEvent {
+                    kind: row.get("type")?,
+                    space: row.get("space")?,
+                    foreign_input: row.get::<_, Option<Impl<OutPoint>>>("foreign_input")?.map(|x| x.0),
+                    details: row.get::<_, Option<Impl<serde_json::Value>>>("details")?.map(|x| x.0),
+                },
+            ))
+        })?;
+
+        let mut results = Vec::new();
+        for row in rows {
+            results.push(row?);
         }
-        Ok(spaces)
+
+        Ok(results)
     }
 
     fn from_sqlite_statement<P: rusqlite::Params>(
@@ -463,9 +482,9 @@ mod tests {
         let mut conn = Connection::open(&db_path)?;
         let tx = conn.transaction()?;
 
-        let spaces = TxEvent::watched_spaces(&tx)?;
+        let spaces = TxEvent::get_latest_events(&tx)?;
         assert_eq!(spaces.len(), 1);
-        assert_eq!(spaces[0], "test_space");
+        assert_eq!(spaces[0].1.space.as_ref().expect("space"), "test_space");
 
         let bids = TxEvent::bids(&tx, "test_space".to_string())?;
         assert_eq!(bids.len(), 1);
