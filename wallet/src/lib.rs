@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap},
     fmt::Debug,
     fs,
     path::PathBuf,
@@ -8,6 +8,7 @@ use std::{
 
 use anyhow::{anyhow, Context};
 use bdk_wallet::{
+    chain,
     chain::BlockId,
     coin_selection::{CoinSelectionAlgorithm, CoinSelectionResult, Excess, InsufficientFunds},
     rusqlite::Connection,
@@ -24,7 +25,7 @@ use bitcoin::{
     taproot,
     taproot::LeafVersion,
     Amount, Block, BlockHash, FeeRate, Network, OutPoint, Psbt, Sequence, TapLeafHash,
-    TapSighashType, Transaction, TxOut, Weight, Witness,
+    TapSighashType, Transaction, TxOut, Txid, Weight, Witness,
 };
 use protocol::{
     bitcoin::{
@@ -41,7 +42,9 @@ use serde::{ser::SerializeSeq, Deserialize, Deserializer, Serialize, Serializer}
 use crate::{
     address::SpaceAddress,
     builder::{is_connector_dust, is_space_dust, SpacesAwareCoinSelection},
+    tx_event::TxEvent,
 };
+use crate::tx_event::TxRecord;
 
 pub extern crate bdk_wallet;
 pub extern crate bitcoin;
@@ -49,12 +52,13 @@ pub extern crate bitcoin;
 pub mod address;
 pub mod builder;
 pub mod export;
+mod rusqlite_impl;
+pub mod tx_event;
 
 pub struct SpacesWallet {
     pub config: WalletConfig,
     pub spaces: PersistedWallet<Connection>,
     pub connection: Connection,
-    pub watch_bid_spends: HashSet<OutPoint>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -116,6 +120,11 @@ impl SpacesWallet {
         &self.config.name
     }
 
+    pub fn init_sqlite_tables(db_tx: &chain::rusqlite::Transaction) -> chain::rusqlite::Result<()> {
+        TxEvent::init_sqlite_tables(db_tx)?;
+        Ok(())
+    }
+
     pub fn new(config: WalletConfig) -> anyhow::Result<Self> {
         if !config.data_dir.exists() {
             fs::create_dir_all(config.data_dir.clone())?;
@@ -131,7 +140,6 @@ impl SpacesWallet {
             Some(hash) => hash,
         };
 
-        // let spaces_changeset = spaces_db.aggregate_changesets()?;
         let spaces_wallet = Wallet::create(
             config.space_descriptors.external.clone(),
             config.space_descriptors.internal.clone(),
@@ -140,19 +148,26 @@ impl SpacesWallet {
         .genesis_hash(genesis_hash)
         .create_wallet(&mut conn)?;
 
+        let tx = conn.transaction().context("could not create wallet db transaction")?;
+        Self::init_sqlite_tables(&tx).context("could not initialize wallet db tables")?;
+        tx.commit().context("could not commit wallet db transaction")?;
+
         let wallet = Self {
             config,
             spaces: spaces_wallet,
             connection: conn,
-            watch_bid_spends: HashSet::new(),
         };
 
         wallet.clear_unused_signing_info();
         Ok(wallet)
     }
 
-    pub fn watch_bid_spend(&mut self, outpoint: OutPoint) {
-        self.watch_bid_spends.insert(outpoint);
+    pub fn get_tx_events(&mut self, txid: Txid) -> anyhow::Result<Vec<TxEvent>> {
+        let db_tx = self.connection.transaction()
+            .context("could not get wallet db transaction")?;
+        let result = TxEvent::all(&db_tx, txid)
+            .context("could not get wallet db tx events")?;
+        Ok(result)
     }
 
     pub fn rebuild(self) -> anyhow::Result<Self> {
@@ -209,6 +224,29 @@ impl SpacesWallet {
     pub fn apply_unconfirmed_tx(&mut self, tx: Transaction, seen: u64) {
         self.spaces.apply_unconfirmed_txs(vec![(tx, seen)]);
     }
+
+    pub fn apply_unconfirmed_tx_record(&mut self, tx_record: TxRecord, seen: u64) -> anyhow::Result<()> {
+        let txid = tx_record.tx.compute_txid();
+        self.apply_unconfirmed_tx(tx_record.tx, seen);
+
+        let db_tx = self.connection.transaction()
+            .context("could not create wallet db transaction")?;
+        for event in tx_record.events {
+            TxEvent::insert(
+                &db_tx,
+                txid,
+                event.kind,
+                event.space,
+                event.bid_spends,
+                event.replaced,
+                event.details
+            ).context("could not insert tx event into wallet db")?;
+        }
+        db_tx.commit().context("could not commit tx events to wallet db")?;
+        Ok(())
+
+    }
+
     pub fn commit(&mut self) -> anyhow::Result<()> {
         self.spaces.persist(&mut self.connection)?;
         Ok(())

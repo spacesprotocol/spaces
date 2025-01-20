@@ -27,9 +27,12 @@ use protocol::{
     script::SpaceScript,
     Covenant, FullSpaceOut, Space,
 };
-use serde::{Deserialize, Serialize};
 
-use crate::{address::SpaceAddress, DoubleUtxo, FullTxOut, SpaceScriptSigningInfo, SpacesWallet};
+use crate::{
+    address::SpaceAddress,
+    DoubleUtxo, FullTxOut, SpaceScriptSigningInfo, SpacesWallet,
+};
+use crate::tx_event::TxRecord;
 
 #[derive(Debug, Clone)]
 pub struct Builder {
@@ -77,42 +80,40 @@ pub enum StackRequest {
     Open(OpenRequest),
     Bid(BidRequest),
     Register(RegisterRequest),
-    Transfer(TransferRequest),
+    Transfer(SpaceTransfer),
+    Send(CoinTransfer),
     Execute(ExecuteRequest),
 }
 
 pub enum StackOp {
     Prepare(CreateParams),
-    Open(OpenParams),
+    Open(OpenRevealParams),
     Bid(BidRequest),
     Execute(ExecuteParams),
 }
 
+#[derive(Clone)]
 pub struct SpaceScriptRevealParams {
     signing: SpaceScriptSigningInfo,
     commitment: FullTxOut,
 }
 
-pub struct OpenParams {
-    reveals: Vec<SpaceScriptRevealParams>,
-    amount: Amount,
+#[derive(Clone)]
+pub struct OpenRevealParams {
+    space: String,
+    initial_bid: Amount,
+    script: SpaceScriptRevealParams,
 }
 
 pub struct ExecuteParams {
-    reveal: SpaceScriptRevealParams,
     context: Vec<SpaceTransfer>,
+    reveal: SpaceScriptRevealParams,
 }
 
 #[derive(Debug, Clone)]
 pub struct RegisterRequest {
     pub space: FullSpaceOut,
     pub to: Option<SpaceAddress>,
-}
-
-#[derive(Debug, Clone)]
-pub enum TransferRequest {
-    Space(SpaceTransfer),
-    Coin(CoinTransfer),
 }
 
 #[derive(Debug, Clone)]
@@ -136,8 +137,9 @@ pub struct ExecuteRequest {
 pub struct CreateParams {
     opens: Vec<OpenRequest>,
     executes: Vec<ExecuteRequest>,
-    transfers: Vec<TransferRequest>,
-    auction_outputs: Option<u8>,
+    transfers: Vec<SpaceTransfer>,
+    sends: Vec<CoinTransfer>,
+    bidouts: Option<u8>,
 }
 
 #[derive(Clone, Debug)]
@@ -169,7 +171,9 @@ trait TxBuilderSpacesUtils<'a, Cs: CoinSelectionAlgorithm> {
         signing: SpaceScriptSigningInfo,
     ) -> anyhow::Result<&mut Self>;
 
-    fn add_transfer(&mut self, request: TransferRequest) -> anyhow::Result<&mut Self>;
+    fn add_transfer(&mut self, request: SpaceTransfer) -> anyhow::Result<&mut Self>;
+
+    fn add_send(&mut self, request: CoinTransfer) -> anyhow::Result<&mut Self>;
 }
 
 fn tap_key_spend_weight() -> Weight {
@@ -281,36 +285,34 @@ impl<'a, Cs: CoinSelectionAlgorithm> TxBuilderSpacesUtils<'a, Cs> for TxBuilder<
         Ok(self)
     }
 
-    fn add_transfer(&mut self, request: TransferRequest) -> anyhow::Result<&mut Self> {
-        match request {
-            TransferRequest::Space(request) => {
-                let output_value = space_dust(
-                    request
-                        .space
-                        .spaceout
-                        .script_pubkey
-                        .minimal_non_dust()
-                        .mul(2),
-                );
+    fn add_transfer(&mut self, request: SpaceTransfer) -> anyhow::Result<&mut Self> {
+        let output_value = space_dust(
+            request
+                .space
+                .spaceout
+                .script_pubkey
+                .minimal_non_dust()
+                .mul(2),
+        );
 
-                self.add_utxo(OutPoint {
-                    txid: request.space.txid,
-                    vout: request.space.spaceout.n as u32,
-                })?;
+        self.add_utxo(OutPoint {
+            txid: request.space.txid,
+            vout: request.space.spaceout.n as u32,
+        })?;
 
-                self.add_recipient(
-                    request.recipient.script_pubkey(),
-                    // TODO: another reason we need to keep more metadata
-                    // we use a special dust value here so that list auction
-                    // outputs won't accidentally auction off this output
-                    output_value,
-                );
-            }
-            TransferRequest::Coin(request) => {
-                self.add_recipient(request.recipient.script_pubkey(), request.amount);
-            }
-        }
+        self.add_recipient(
+            request.recipient.script_pubkey(),
+            // TODO: another reason we need to keep more metadata
+            // we use a special dust value here so that list auction
+            // outputs won't accidentally auction off this output
+            output_value,
+        );
 
+        Ok(self)
+    }
+
+    fn add_send(&mut self, request: CoinTransfer) -> anyhow::Result<&mut Self> {
+        self.add_recipient(request.recipient.script_pubkey(), request.amount);
         Ok(self)
     }
 }
@@ -384,7 +386,7 @@ impl Builder {
 
             if !coin_transfers.is_empty() {
                 for coin in coin_transfers {
-                    builder.add_transfer(TransferRequest::Coin(coin))?;
+                    builder.add_send(coin)?;
                     vout += 1;
                 }
             }
@@ -402,7 +404,7 @@ impl Builder {
                     builder.add_recipient(change_address, dust);
                 }
                 for transfer in space_transfers {
-                    builder.add_transfer(TransferRequest::Space(transfer))?;
+                    builder.add_transfer(transfer)?;
                 }
             }
 
@@ -432,26 +434,8 @@ impl Builder {
     }
 }
 
-pub struct TaggedTransaction {
-    pub tx: Transaction,
-    pub tags: Vec<TransactionTag>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "kebab-case")]
-pub enum TransactionTag {
-    FeeBump,
-    Bidouts,
-    Commitment,
-    Transfers,
-    Open,
-    Bid,
-    Script,
-    ForceSpendTestOnly,
-}
-
 impl Iterator for BuilderIterator<'_> {
-    type Item = anyhow::Result<TaggedTransaction>;
+    type Item = anyhow::Result<TxRecord>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let op = match self.stack.pop() {
@@ -460,29 +444,19 @@ impl Iterator for BuilderIterator<'_> {
         };
 
         match op {
+            // A Prepare tx could bundle all P2TR commitments for open and other scripts
+            // it can also bundle all transfers, and it can create bid outputs
             StackOp::Prepare(params) => {
-                let mut tags = Vec::new();
-                if !params.transfers.is_empty() {
-                    tags.push(TransactionTag::Transfers);
-                }
-                if params.auction_outputs.is_some() {
-                    tags.push(TransactionTag::Bidouts);
-                }
-                if !params.opens.is_empty() || !params.executes.is_empty() {
-                    tags.push(TransactionTag::Commitment);
-                }
-
                 let mut reveals = Vec::with_capacity(params.opens.len() + params.executes.len());
-                let mut amounts = Vec::with_capacity(params.opens.len());
 
-                for req in params.opens {
+                // Push all open script commitments
+                for req in params.opens.iter() {
                     let tap = Builder::create_open_tap_data(self.wallet.config.network, &req.name)
                         .context("could not initialize tap data for name");
                     if tap.is_err() {
                         return Some(Err(tap.unwrap_err()));
                     }
                     reveals.push(tap.unwrap());
-                    amounts.push(req.initial_amount);
                 }
 
                 let mut contexts = Vec::with_capacity(params.executes.len());
@@ -493,118 +467,152 @@ impl Iterator for BuilderIterator<'_> {
                         return Some(Err(signing_info.unwrap_err()));
                     }
                     reveals.push(signing_info.unwrap());
-                    contexts.push(execute.context);
+                    contexts.push( execute.context);
                 }
 
-                let prep = Builder::prepare_all(
+                let (tx, commitments) = match Builder::prepare_all(
                     self.coin_selection.clone(),
                     self.median_time,
                     self.wallet,
-                    params.auction_outputs,
+                    params.bidouts.clone(),
                     Some(&reveals),
-                    params
-                        .transfers
-                        .iter()
-                        .filter_map(|req| match req {
-                            TransferRequest::Space(transfer) => Some(transfer.clone()),
-                            _ => None,
-                        })
-                        .collect(),
-                    params
-                        .transfers
-                        .iter()
-                        .filter_map(|req| match req {
-                            TransferRequest::Coin(transfer) => Some(transfer.clone()),
-                            _ => None,
-                        })
-                        .collect(),
+                    params.transfers.clone(),
+                    params.sends.clone(),
                     self.fee_rate,
                     self.dust,
-                );
-                if prep.is_err() {
-                    return Some(Err(prep.unwrap_err()));
-                }
+                ) {
+                    Ok(prep) => prep,
+                    Err(err) => return Some(Err(err)),
+                };
 
-                let (tx, commitments) = prep.unwrap();
+                let mut detailed_tx = TxRecord::new(tx);
+                if let Some(count) = params.bidouts {
+                    detailed_tx.add_bidout(count as _);
+                }
 
                 let mut reveals_iter = reveals.into_iter();
                 let mut commitments_iter = commitments.into_iter();
 
                 let open_reveals = reveals_iter
                     .by_ref()
-                    .take(amounts.len())
+                    .take(params.opens.len())
                     .collect::<Vec<SpaceScriptSigningInfo>>()
                     .into_iter();
                 let open_commitments = commitments_iter
                     .by_ref()
-                    .take(amounts.len())
+                    .take(params.opens.len())
                     .collect::<Vec<FullTxOut>>()
                     .into_iter();
 
-                for ((signing, commitment), amount) in
-                    open_reveals.zip(open_commitments).zip(amounts)
+                for ((signing, commitment), open) in
+                    open_reveals.zip(open_commitments).zip(params.opens)
                 {
-                    self.stack.push(StackOp::Open(OpenParams {
-                        reveals: vec![SpaceScriptRevealParams {
+                    detailed_tx.add_commitment(
+                        open.name.clone(),
+                        commitment.txout.script_pubkey.clone(),
+                        signing.to_vec(),
+                    );
+                    self.stack.push(StackOp::Open(OpenRevealParams {
+                        space: open.name,
+                        initial_bid: open.initial_amount,
+                        script: SpaceScriptRevealParams {
                             signing: signing.clone(),
                             commitment,
-                        }],
-                        amount,
-                    }))
+                        },
+                    }));
                 }
 
-                for ((signing, commitment), context) in
-                    reveals_iter.zip(commitments_iter).zip(contexts)
-                {
+                for ((signing, commitment), context) in reveals_iter.zip(commitments_iter).zip(contexts) {
+                    // script applies to every space in context
+                    for transfer in context.iter() {
+                        detailed_tx.add_commitment(
+                            transfer
+                                .space
+                                .spaceout
+                                .space
+                                .as_ref()
+                                .expect("space")
+                                .name
+                                .to_string(),
+                            commitment.txout.script_pubkey.clone(),
+                            signing.to_vec(),
+                        );
+                    }
                     self.stack.push(StackOp::Execute(ExecuteParams {
                         reveal: SpaceScriptRevealParams {
                             signing,
                             commitment,
                         },
-                        context,
+                        context
                     }))
                 }
 
-                Some(Ok(TaggedTransaction { tx, tags }))
+                if !params.transfers.is_empty() {
+                    // TODO: resolved address recipient
+                    for transfer in &params.transfers {
+                        detailed_tx.add_transfer(
+                            transfer
+                                .space
+                                .spaceout
+                                .space
+                                .as_ref()
+                                .expect("space")
+                                .name
+                                .to_string(),
+                            transfer.recipient.script_pubkey(),
+                        );
+                    }
+                }
+                Some(Ok(detailed_tx))
             }
             StackOp::Open(params) => {
                 let tx = Builder::open_tx(
                     self.coin_selection.clone(),
                     self.wallet,
-                    params,
+                    params.clone(),
                     self.fee_rate,
                     self.force,
                 );
-                Some(tx.map(|tx| TaggedTransaction {
-                    tx,
-                    tags: vec![TransactionTag::Open],
+                Some(tx.map(|tx| {
+                    let mut detailed = TxRecord::new(tx);
+                    detailed.add_open(params.space, params.initial_bid);
+                    detailed
                 }))
             }
             StackOp::Execute(params) => {
-                let tx = Builder::execute_tx(
+                let spaces = params.context.clone();
+                let res = Builder::execute_tx(
                     self.coin_selection.clone(),
                     self.wallet,
                     params,
                     self.fee_rate,
                     self.force,
                 );
-                Some(tx.map(|tx| TaggedTransaction {
-                    tx,
-                    tags: vec![TransactionTag::Script],
+
+                Some(res.map(|(tx, reveal_input_index)| {
+                    let mut detailed = TxRecord::new(tx);
+                    for space in spaces {
+                        detailed.add_execute(
+                            space.space.spaceout.space.expect("space").name.to_string(),
+                            reveal_input_index
+                        );
+                    }
+                    detailed
                 }))
             }
             StackOp::Bid(bid) => {
                 let tx = Builder::bid_tx(
                     self.coin_selection.clone(),
                     self.wallet,
-                    bid.space,
+                    bid.space.clone(),
                     bid.amount,
                     self.fee_rate,
                     self.force,
                 );
-                Some(tx.map(|tx| TaggedTransaction {
-                    tx,
-                    tags: vec![TransactionTag::Bid],
+                Some(tx.map(|tx| {
+                    let mut detailed = TxRecord::new(tx);
+                    detailed.add_bid(&bid.space, bid.amount);
+                    detailed
                 }))
             }
         }
@@ -656,8 +664,13 @@ impl Builder {
         self
     }
 
-    pub fn add_transfer(mut self, request: TransferRequest) -> Self {
+    pub fn add_transfer(mut self, request: SpaceTransfer) -> Self {
         self.requests.push(StackRequest::Transfer(request));
+        self
+    }
+
+    pub fn add_send(mut self, request: CoinTransfer) -> Self {
+        self.requests.push(StackRequest::Send(request));
         self
     }
 
@@ -738,6 +751,7 @@ impl Builder {
         let mut opens = Vec::new();
         let mut bids = Vec::new();
         let mut transfers = Vec::new();
+        let mut sends = Vec::new();
         let mut executes = Vec::new();
         for req in self.requests {
             match req {
@@ -748,11 +762,12 @@ impl Builder {
                         None => wallet.next_unused_space_address(),
                         Some(address) => address,
                     };
-                    transfers.push(TransferRequest::Space(SpaceTransfer {
+                    transfers.push(SpaceTransfer {
                         space: params.space,
                         recipient: to.0,
-                    }))
+                    })
                 }
+                StackRequest::Send(send) => sends.push(send),
                 StackRequest::Transfer(params) => transfers.push(params),
                 StackRequest::Execute(params) => executes.push(params),
             }
@@ -772,7 +787,8 @@ impl Builder {
                 opens,
                 executes,
                 transfers,
-                auction_outputs,
+                sends: vec![],
+                bidouts: auction_outputs,
             }));
         }
 
@@ -795,8 +811,6 @@ impl Builder {
         fee_rate: FeeRate,
         force: bool,
     ) -> anyhow::Result<Transaction> {
-        w.watch_bid_spend(prev.outpoint());
-
         let (offer, placeholder) = w.new_bid_psbt(bid, &coin_selection)?;
         let bid_psbt = {
             let mut builder = w.spaces.build_tx().coin_selection(coin_selection);
@@ -823,11 +837,11 @@ impl Builder {
     fn open_tx(
         coin_selection: SpacesAwareCoinSelection,
         w: &mut SpacesWallet,
-        params: OpenParams,
+        params: OpenRevealParams,
         fee_rate: FeeRate,
         force: bool,
     ) -> anyhow::Result<Transaction> {
-        let (offer, placeholder) = w.new_bid_psbt(params.amount, &coin_selection)?;
+        let (offer, placeholder) = w.new_bid_psbt(params.initial_bid, &coin_selection)?;
         let mut extra_prevouts = BTreeMap::new();
         let open_psbt = {
             let mut builder = w.spaces.build_tx().coin_selection(coin_selection);
@@ -835,14 +849,15 @@ impl Builder {
                 None,
                 offer,
                 placeholder,
-                params.amount,
+                params.initial_bid,
                 force,
             )?;
 
-            for reveal in params.reveals {
-                builder.add_reveal(reveal.commitment.clone(), reveal.signing)?;
-                extra_prevouts.insert(reveal.commitment.outpoint, reveal.commitment.txout);
-            }
+            builder.add_reveal(params.script.commitment.clone(), params.script.signing)?;
+            extra_prevouts.insert(
+                params.script.commitment.outpoint,
+                params.script.commitment.txout,
+            );
 
             builder.fee_rate(fee_rate);
             builder.finish()?
@@ -858,8 +873,9 @@ impl Builder {
         params: ExecuteParams,
         fee_rate: FeeRate,
         _force: bool,
-    ) -> anyhow::Result<Transaction> {
+    ) -> anyhow::Result<(Transaction, usize)> {
         let mut extra_prevouts = BTreeMap::new();
+        let reveal_input_index;
         let reveal_psbt = {
             let change_address = w
                 .spaces
@@ -877,10 +893,12 @@ impl Builder {
                 params.reveal.commitment.txout.clone(),
             );
 
+            let input_count = params.context.len();
             for transfer in params.context {
-                builder.add_transfer(TransferRequest::Space(transfer))?;
+                builder.add_transfer(transfer)?;
             }
 
+            reveal_input_index = input_count + 1;
             builder
                 // add reveal last to not disrupt space inputs order
                 .add_reveal(params.reveal.commitment, params.reveal.signing)?
@@ -889,7 +907,7 @@ impl Builder {
         };
 
         let signed = w.sign(reveal_psbt, Some(extra_prevouts))?;
-        Ok(signed)
+        Ok((signed, reveal_input_index))
     }
 
     fn create_open_tap_data(
