@@ -15,6 +15,7 @@ use spaced::{
 };
 use testutil::TestRig;
 use wallet::export::WalletExport;
+use wallet::tx_event::TxEventKind;
 
 const ALICE: &str = "wallet_99";
 const BOB: &str = "wallet_98";
@@ -35,8 +36,8 @@ async fn it_should_open_a_space_for_auction(rig: &TestRig) -> anyhow::Result<()>
         })],
         false,
     )
-    .await
-    .expect("send request");
+        .await
+        .expect("send request");
 
     for tx_res in &response.result {
         assert!(tx_res.error.is_none(), "expect no errors for simple open");
@@ -90,8 +91,8 @@ async fn it_should_allow_outbidding(rig: &TestRig) -> anyhow::Result<()> {
         })],
         false,
     )
-    .await
-    .expect("send request");
+        .await
+        .expect("send request");
 
     println!("{}", serde_json::to_string_pretty(&result).unwrap());
     rig.mine_blocks(1, None).await?;
@@ -178,11 +179,11 @@ async fn it_should_only_accept_forced_zero_value_bid_increments_and_revoke(
             vec![RpcWalletRequest::Bid(BidParams {
                 name: TEST_SPACE.to_string(),
                 amount: last_bid.to_sat(),
-            }),],
+            }), ],
             false
         )
-        .await
-        .is_err(),
+            .await
+            .is_err(),
         "shouldn't be able to bid with same value unless forced"
     );
 
@@ -197,7 +198,7 @@ async fn it_should_only_accept_forced_zero_value_bid_increments_and_revoke(
                     requests: vec![RpcWalletRequest::Bid(BidParams {
                         name: TEST_SPACE.to_string(),
                         amount: last_bid.to_sat(),
-                    }),],
+                    }), ],
                     fee_rate: Some(FeeRate::from_sat_per_vb(1).expect("fee")),
                     dust: None,
                     force: true,
@@ -284,6 +285,7 @@ async fn it_should_allow_claim_on_or_after_claim_height(rig: &TestRig) -> anyhow
         "heights must match"
     );
 
+    rig.wait_until_synced().await?;
     rig.wait_until_wallet_synced(wallet).await?;
     let all_spaces = rig.spaced.client.wallet_list_spaces(wallet).await?;
 
@@ -296,8 +298,8 @@ async fn it_should_allow_claim_on_or_after_claim_height(rig: &TestRig) -> anyhow
         })],
         false,
     )
-    .await
-    .expect("send request");
+        .await
+        .expect("send request");
 
     println!("{}", serde_json::to_string_pretty(&result).unwrap());
     rig.mine_blocks(1, None).await?;
@@ -355,8 +357,8 @@ async fn it_should_allow_batch_transfers_refreshing_expire_height(
         })],
         false,
     )
-    .await
-    .expect("send request");
+        .await
+        .expect("send request");
 
     println!("{}", serde_json::to_string_pretty(&result).unwrap());
 
@@ -415,14 +417,20 @@ async fn it_should_allow_applying_script_in_batch(rig: &TestRig) -> anyhow::Resu
     let result = wallet_do(
         rig,
         ALICE,
-        vec![RpcWalletRequest::Execute(ExecuteParams {
-            context: registered_spaces.clone(),
-            space_script: SpaceScript::create_set_fallback(&[0xDE, 0xAD, 0xBE, 0xEF]),
-        })],
+        vec![
+            // TODO: transfer then execute causes stack to be outdated
+            // RpcWalletRequest::Transfer(TransferSpacesParams {
+            //     spaces: registered_spaces.clone(),
+            //     to: addr,
+            // }),
+            RpcWalletRequest::Execute(ExecuteParams {
+                context: registered_spaces.clone(),
+                space_script: SpaceScript::create_set_fallback(&[0xDE, 0xAD, 0xBE, 0xEF]),
+            })],
         false,
     )
-    .await
-    .expect("send request");
+        .await
+        .expect("send request");
 
     println!("{}", serde_json::to_string_pretty(&result).unwrap());
 
@@ -476,11 +484,26 @@ async fn it_should_allow_applying_script_in_batch(rig: &TestRig) -> anyhow::Resu
 // Bob attempts to replace it but fails due to a lack of confirmed bid & funding utxos.
 // Eve, with confirmed bid outputs/funds, successfully replaces the bid.
 async fn it_should_replace_mempool_bids(rig: &TestRig) -> anyhow::Result<()> {
-    // create some confirmed bid outs for Eve
+    // create some confirmed bid outs for Alice and Eve
     rig.spaced
         .client
         .wallet_send_request(
             EVE,
+            RpcWalletTxBuilder {
+                bidouts: Some(2),
+                requests: vec![],
+                fee_rate: Some(FeeRate::from_sat_per_vb(2).expect("fee")),
+                dust: None,
+                force: false,
+                confirmed_only: false,
+                skip_tx_check: false,
+            },
+        )
+        .await?;
+    rig.spaced
+        .client
+        .wallet_send_request(
+            ALICE,
             RpcWalletTxBuilder {
                 bidouts: Some(2),
                 requests: vec![],
@@ -507,10 +530,10 @@ async fn it_should_replace_mempool_bids(rig: &TestRig) -> anyhow::Result<()> {
         })],
         false,
     )
-    .await?;
+        .await?;
 
     let response = serde_json::to_string_pretty(&response).unwrap();
-    println!("{}", response);
+    println!("Alice bid on @test2 (unconf): {}", response);
 
     let response = wallet_do(
         rig,
@@ -521,11 +544,11 @@ async fn it_should_replace_mempool_bids(rig: &TestRig) -> anyhow::Result<()> {
         })],
         false,
     )
-    .await?;
+        .await?;
 
     let response = serde_json::to_string_pretty(&response).unwrap();
 
-    println!("{}", response);
+    println!("Bob bid on @test (unconf) {}", response);
 
     assert!(
         response.contains("hint"),
@@ -551,6 +574,7 @@ async fn it_should_replace_mempool_bids(rig: &TestRig) -> anyhow::Result<()> {
             },
         )
         .await?;
+
 
     let response = serde_json::to_string_pretty(&replacement).unwrap();
     println!("{}", response);
@@ -585,6 +609,14 @@ async fn it_should_replace_mempool_bids(rig: &TestRig) -> anyhow::Result<()> {
         )
         .await?;
 
+    let eve_replacement_txid = replacement.result.iter().filter_map(|tx| {
+        if tx.events.iter().any(|event| event.kind == TxEventKind::Bid) {
+            Some(tx.txid)
+        } else {
+            None
+        }
+    }).next().expect("should have eve replacement txid");
+
     let response = serde_json::to_string_pretty(&replacement).unwrap();
     println!("{}", response);
 
@@ -595,20 +627,38 @@ async fn it_should_replace_mempool_bids(rig: &TestRig) -> anyhow::Result<()> {
         )
     }
 
-    // Alice won't be able to build off other transactions from the double spent bid
-    // even when Eve bid gets confirmed. Wallet must remove double spent tx.
-    rig.mine_blocks(1, None).await?;
-    rig.wait_until_wallet_synced(ALICE).await?;
+    // Wait until wallet checks mempool
+    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+
+    // Wallet must undo double spent tx.
     let txs = rig
         .spaced
         .client
         .wallet_list_transactions(ALICE, 1000, 0)
         .await?;
     let unconfirmed: Vec<_> = txs.iter().filter(|tx| !tx.confirmed).collect();
+    for tx in &unconfirmed {
+        println!("Alice's unconfiremd: {}", tx.txid);
+    }
     assert_eq!(
         unconfirmed.len(),
         0,
         "there should be no stuck unconfirmed transactions"
+    );
+
+    // Now Eve's tx is confirmed. Alice wallet must filter it out as irrelevant
+    rig.mine_blocks(1, None).await?;
+    rig.wait_until_wallet_synced(ALICE).await?;
+
+    let txs = rig
+        .spaced
+        .client
+        .wallet_list_transactions(ALICE, 1000, 0)
+        .await?;
+
+    assert!(
+        txs.iter().all(|tx| tx.txid != eve_replacement_txid),
+            "Eve's tx shouldn't be listed in Alice's wallet"
     );
     Ok(())
 }

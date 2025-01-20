@@ -37,6 +37,7 @@ fn test_block_fetching_from_bitcoin_rpc() -> Result<()> {
             panic!("Test timed out after {:?}", timeout);
         }
         match receiver.try_recv() {
+            Ok(BlockEvent::Tip(_)) => {}
             Ok(BlockEvent::Block(id, _)) => {
                 height += 1;
                 if id.height == GENERATED_BLOCKS as u32 {
