@@ -5,7 +5,7 @@ use env_logger::Env;
 use log::error;
 use spaced::{
     config::{safe_exit, Args},
-    rpc::{AsyncChainState, LoadedWallet, RpcServerImpl, WalletManager},
+    rpc::{AsyncChainState, RpcServerImpl, WalletLoadRequest, WalletManager},
     source::{BitcoinBlockSource, BitcoinRpc},
     store,
     sync::Spaced,
@@ -53,7 +53,7 @@ impl Composer {
         }
     }
 
-    async fn setup_rpc_wallet(&mut self, spaced: &Spaced, rx: mpsc::Receiver<LoadedWallet>) {
+    async fn setup_rpc_wallet(&mut self, spaced: &Spaced, rx: mpsc::Receiver<WalletLoadRequest>) {
         let wallet_service = RpcWallet::service(
             spaced.network,
             spaced.rpc.clone(),

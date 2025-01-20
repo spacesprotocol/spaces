@@ -1,5 +1,9 @@
-use std::{net::Ipv4Addr, process::Child, time::Duration};
-use std::process::Stdio;
+use std::{
+    net::Ipv4Addr,
+    process::{Child, Stdio},
+    time::Duration,
+};
+
 use anyhow::Result;
 use assert_cmd::cargo::CommandCargoExt;
 use bitcoind::{anyhow, anyhow::anyhow, get_available_port, tempfile::tempdir};

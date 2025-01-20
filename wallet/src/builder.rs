@@ -8,18 +8,18 @@ use std::{
 
 use anyhow::{anyhow, Context};
 use bdk_wallet::{
-    wallet::{
-        coin_selection::{
-            CoinSelectionAlgorithm, CoinSelectionResult, DefaultCoinSelectionAlgorithm, Error,
-        },
-        error::CreateTxError,
-        tx_builder::TxOrdering,
+    coin_selection::{
+        CoinSelectionAlgorithm, CoinSelectionResult, DefaultCoinSelectionAlgorithm,
+        InsufficientFunds,
     },
+    error::CreateTxError,
+    tx_builder::TxOrdering,
     KeychainKind, TxBuilder, Utxo, WeightedUtxo,
 };
 use bitcoin::{
-    absolute::LockTime, psbt, psbt::Input, script, script::PushBytesBuf, Address, Amount, FeeRate,
-    Network, OutPoint, Psbt, Script, ScriptBuf, Sequence, Transaction, TxOut, Txid, Witness,
+    absolute::LockTime, key::rand::RngCore, psbt::Input, script, script::PushBytesBuf, Address,
+    Amount, FeeRate, Network, OutPoint, Psbt, Script, ScriptBuf, Sequence, Transaction, TxOut,
+    Txid, Weight, Witness,
 };
 use protocol::{
     bitcoin::absolute::Height,
@@ -27,9 +27,11 @@ use protocol::{
     script::SpaceScript,
     Covenant, FullSpaceOut, Space,
 };
-use serde::{Deserialize, Serialize};
-
-use crate::{address::SpaceAddress, DoubleUtxo, FullTxOut, SpaceScriptSigningInfo, SpacesWallet};
+use crate::{
+    address::SpaceAddress,
+    DoubleUtxo, FullTxOut, SpaceScriptSigningInfo, SpacesWallet,
+};
+use crate::tx_event::TxRecord;
 
 #[derive(Debug, Clone)]
 pub struct Builder {
@@ -57,7 +59,8 @@ pub struct BuilderIterator<'a> {
     pub wallet: &'a mut SpacesWallet,
     force: bool,
     median_time: u64,
-    coin_selection: SpacesAwareCoinSelection,
+    confirmed_only: bool,
+    unspendables: Vec<OutPoint>
 }
 
 pub enum BuilderStack {
@@ -77,42 +80,40 @@ pub enum StackRequest {
     Open(OpenRequest),
     Bid(BidRequest),
     Register(RegisterRequest),
-    Transfer(TransferRequest),
+    Transfer(SpaceTransfer),
+    Send(CoinTransfer),
     Execute(ExecuteRequest),
 }
 
 pub enum StackOp {
     Prepare(CreateParams),
-    Open(OpenParams),
+    Open(OpenRevealParams),
     Bid(BidRequest),
     Execute(ExecuteParams),
 }
 
+#[derive(Clone)]
 pub struct SpaceScriptRevealParams {
     signing: SpaceScriptSigningInfo,
     commitment: FullTxOut,
 }
 
-pub struct OpenParams {
-    reveals: Vec<SpaceScriptRevealParams>,
-    amount: Amount,
+#[derive(Clone)]
+pub struct OpenRevealParams {
+    space: String,
+    initial_bid: Amount,
+    script: SpaceScriptRevealParams,
 }
 
 pub struct ExecuteParams {
-    reveal: SpaceScriptRevealParams,
     context: Vec<SpaceTransfer>,
+    reveal: SpaceScriptRevealParams,
 }
 
 #[derive(Debug, Clone)]
 pub struct RegisterRequest {
     pub space: FullSpaceOut,
     pub to: Option<SpaceAddress>,
-}
-
-#[derive(Debug, Clone)]
-pub enum TransferRequest {
-    Space(SpaceTransfer),
-    Coin(CoinTransfer),
 }
 
 #[derive(Debug, Clone)]
@@ -136,8 +137,9 @@ pub struct ExecuteRequest {
 pub struct CreateParams {
     opens: Vec<OpenRequest>,
     executes: Vec<ExecuteRequest>,
-    transfers: Vec<TransferRequest>,
-    auction_outputs: Option<u8>,
+    transfers: Vec<SpaceTransfer>,
+    sends: Vec<CoinTransfer>,
+    bidouts: Option<u8>,
 }
 
 #[derive(Clone, Debug)]
@@ -169,7 +171,14 @@ trait TxBuilderSpacesUtils<'a, Cs: CoinSelectionAlgorithm> {
         signing: SpaceScriptSigningInfo,
     ) -> anyhow::Result<&mut Self>;
 
-    fn add_transfer(&mut self, request: TransferRequest) -> anyhow::Result<&mut Self>;
+    fn add_transfer(&mut self, request: SpaceTransfer) -> anyhow::Result<&mut Self>;
+
+    fn add_send(&mut self, request: CoinTransfer) -> anyhow::Result<&mut Self>;
+}
+
+fn tap_key_spend_weight() -> Weight {
+    let tap_key_spend_weight: u64 = 66;
+    Weight::from_vb(tap_key_spend_weight).expect("valid weight")
 }
 
 impl<'a, Cs: CoinSelectionAlgorithm> TxBuilderSpacesUtils<'a, Cs> for TxBuilder<'a, Cs> {
@@ -179,12 +188,11 @@ impl<'a, Cs: CoinSelectionAlgorithm> TxBuilderSpacesUtils<'a, Cs> for TxBuilder<
             Some(out) => out,
         };
 
-        let tap_key_spend_weight = 66;
         self.version(BID_PSBT_TX_VERSION.0);
         self.add_foreign_utxo_with_sequence(
             info.outpoint(),
             input,
-            tap_key_spend_weight,
+            tap_key_spend_weight(),
             BID_PSBT_INPUT_SEQUENCE,
         )?;
         self.add_recipient(txout.script_pubkey, txout.value);
@@ -218,7 +226,7 @@ impl<'a, Cs: CoinSelectionAlgorithm> TxBuilderSpacesUtils<'a, Cs> for TxBuilder<
             },
         };
 
-        let mut spend_input = psbt::Input {
+        let mut spend_input = Input {
             witness_utxo: Some(placeholder.spend.txout.clone()),
             final_script_witness: Some(Witness::default()),
             final_script_sig: Some(ScriptBuf::new()),
@@ -233,14 +241,14 @@ impl<'a, Cs: CoinSelectionAlgorithm> TxBuilderSpacesUtils<'a, Cs> for TxBuilder<
             placeholder.auction.outpoint.vout as u8,
             &offer,
         )?)
-        .expect("compressed psbt script bytes");
+            .expect("compressed psbt script bytes");
 
         let carrier = ScriptBuf::new_op_return(&compressed_psbt);
 
         self.add_foreign_utxo_with_sequence(
             placeholder.spend.outpoint,
             spend_input,
-            66,
+            tap_key_spend_weight(),
             Sequence::ENABLE_RBF_NO_LOCKTIME,
         )?;
         self.add_recipient(carrier, burn_amount);
@@ -277,74 +285,55 @@ impl<'a, Cs: CoinSelectionAlgorithm> TxBuilderSpacesUtils<'a, Cs> for TxBuilder<
         Ok(self)
     }
 
-    fn add_transfer(&mut self, request: TransferRequest) -> anyhow::Result<&mut Self> {
-        match request {
-            TransferRequest::Space(request) => {
-                let output_value = space_dust(
-                    request
-                        .space
-                        .spaceout
-                        .script_pubkey
-                        .minimal_non_dust()
-                        .mul(2),
-                );
+    fn add_transfer(&mut self, request: SpaceTransfer) -> anyhow::Result<&mut Self> {
+        let output_value = space_dust(
+            request
+                .space
+                .spaceout
+                .script_pubkey
+                .minimal_non_dust()
+                .mul(2),
+        );
 
-                let mut spend_input = psbt::Input {
-                    witness_utxo: Some(TxOut {
-                        value: request.space.spaceout.value,
-                        script_pubkey: request.space.spaceout.script_pubkey,
-                    }),
-                    final_script_witness: Some(Witness::default()),
-                    final_script_sig: Some(ScriptBuf::new()),
-                    proprietary: BTreeMap::new(),
-                    ..Default::default()
-                };
-                spend_input
-                    .proprietary
-                    .insert(SpacesWallet::spaces_signer("tbs"), Vec::new());
-                self.add_foreign_utxo(
-                    OutPoint {
-                        txid: request.space.txid,
-                        vout: request.space.spaceout.n as u32,
-                    },
-                    spend_input,
-                    66,
-                )?;
+        self.add_utxo(OutPoint {
+            txid: request.space.txid,
+            vout: request.space.spaceout.n as u32,
+        })?;
 
-                self.add_recipient(
-                    request.recipient.script_pubkey(),
-                    // TODO: another reason we need to keep more metadata
-                    // we use a special dust value here so that list auction
-                    // outputs won't accidentally auction off this output
-                    output_value,
-                );
-            }
-            TransferRequest::Coin(request) => {
-                self.add_recipient(request.recipient.script_pubkey(), request.amount);
-            }
-        }
+        self.add_recipient(
+            request.recipient.script_pubkey(),
+            // TODO: another reason we need to keep more metadata
+            // we use a special dust value here so that list auction
+            // outputs won't accidentally auction off this output
+            output_value,
+        );
 
+        Ok(self)
+    }
+
+    fn add_send(&mut self, request: CoinTransfer) -> anyhow::Result<&mut Self> {
+        self.add_recipient(request.recipient.script_pubkey(), request.amount);
         Ok(self)
     }
 }
 
 impl Builder {
     fn prepare_all(
-        coin_selection: SpacesAwareCoinSelection,
         median_time: u64,
         w: &mut SpacesWallet,
         auction_outputs: Option<u8>,
         reveals: Option<&Vec<SpaceScriptSigningInfo>>,
         space_transfers: Vec<SpaceTransfer>,
         coin_transfers: Vec<CoinTransfer>,
+        unspendables: Vec<OutPoint>,
         fee_rate: FeeRate,
         dust: Option<Amount>,
+        confirmed_only: bool,
     ) -> anyhow::Result<(Transaction, Vec<FullTxOut>)> {
-        let coin_selection_confirmed_only = coin_selection.confirmed_only;
         let mut vout: u32 = 0;
         let mut tap_outputs = Vec::new();
         let change_address = w
-            .spaces
+            .internal
             .next_unused_address(KeychainKind::Internal)
             .script_pubkey();
 
@@ -355,7 +344,7 @@ impl Builder {
                 // one is spent in an auction.
                 // pointer/spend output
                 let addr1 = w
-                    .spaces
+                    .internal
                     .next_unused_address(KeychainKind::Internal)
                     .script_pubkey();
                 let dust = match dust {
@@ -366,16 +355,34 @@ impl Builder {
                 let magic_dust = magic_dust(dust);
 
                 placeholder_outputs.push((addr1, connector_dust));
-                let addr2 = w.spaces.next_unused_address(KeychainKind::External);
+                let addr2 = w.internal.next_unused_address(KeychainKind::External);
                 placeholder_outputs.push((addr2.script_pubkey(), magic_dust));
             }
         }
 
         let commit_psbt = {
-            let mut builder = w.spaces.build_tx().coin_selection(coin_selection);
+            let mut builder = w.build_tx(unspendables, confirmed_only)?;
             builder.nlocktime(magic_lock_time(median_time));
 
-            builder.ordering(TxOrdering::Untouched);
+            // handle transfers
+            if !space_transfers.is_empty() {
+                // Must be an odd number of outputs so that
+                // transfers align correctly
+                // TODO: use the actual change output instead of creating this
+                if vout % 2 == 0 {
+                    let dust = match dust {
+                        None => change_address.minimal_non_dust().mul(2),
+                        Some(dust) => dust,
+                    };
+                    builder.add_recipient(change_address, dust);
+                    vout += 1;
+                }
+                for transfer in space_transfers {
+                    builder.add_transfer(transfer)?;
+                    vout += 1;
+                }
+            }
+
             for (addr, amount) in placeholder_outputs {
                 builder.add_recipient(addr, amount);
                 vout += 1;
@@ -397,31 +404,16 @@ impl Builder {
 
             if !coin_transfers.is_empty() {
                 for coin in coin_transfers {
-                    builder.add_transfer(TransferRequest::Coin(coin))?;
+                    builder.add_send(coin)?;
                     vout += 1;
                 }
             }
 
-            // handle transfers
-            if !space_transfers.is_empty() {
-                // Must be an odd number of outputs so that
-                // transfers align correctly
-                // TODO: use the actual change output instead of creating this
-                if vout % 2 == 0 {
-                    let dust = match dust {
-                        None => change_address.minimal_non_dust().mul(2),
-                        Some(dust) => dust,
-                    };
-                    builder.add_recipient(change_address, dust);
-                }
-                for transfer in space_transfers {
-                    builder.add_transfer(TransferRequest::Space(transfer))?;
-                }
-            }
 
-            builder.enable_rbf().fee_rate(fee_rate);
+
+            builder.fee_rate(fee_rate);
             let r = builder.finish().map_err(|e| match e {
-                CreateTxError::CoinSelection(e) if coin_selection_confirmed_only => {
+                CreateTxError::CoinSelection(e) if confirmed_only => {
                     anyhow!("{} (replacements use confirmed balance only)", e)
                 }
                 _ => {
@@ -445,26 +437,8 @@ impl Builder {
     }
 }
 
-pub struct TaggedTransaction {
-    pub tx: Transaction,
-    pub tags: Vec<TransactionTag>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "kebab-case")]
-pub enum TransactionTag {
-    FeeBump,
-    Bidouts,
-    Commitment,
-    Transfers,
-    Open,
-    Bid,
-    Script,
-    ForceSpendTestOnly,
-}
-
 impl Iterator for BuilderIterator<'_> {
-    type Item = anyhow::Result<TaggedTransaction>;
+    type Item = anyhow::Result<TxRecord>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let op = match self.stack.pop() {
@@ -473,29 +447,19 @@ impl Iterator for BuilderIterator<'_> {
         };
 
         match op {
+            // A Prepare tx could bundle all P2TR commitments for open and other scripts
+            // it can also bundle all transfers, and it can create bid outputs
             StackOp::Prepare(params) => {
-                let mut tags = Vec::new();
-                if !params.transfers.is_empty() {
-                    tags.push(TransactionTag::Transfers);
-                }
-                if params.auction_outputs.is_some() {
-                    tags.push(TransactionTag::Bidouts);
-                }
-                if !params.opens.is_empty() || !params.executes.is_empty() {
-                    tags.push(TransactionTag::Commitment);
-                }
-
                 let mut reveals = Vec::with_capacity(params.opens.len() + params.executes.len());
-                let mut amounts = Vec::with_capacity(params.opens.len());
 
-                for req in params.opens {
+                // Push all open script commitments
+                for req in params.opens.iter() {
                     let tap = Builder::create_open_tap_data(self.wallet.config.network, &req.name)
                         .context("could not initialize tap data for name");
                     if tap.is_err() {
                         return Some(Err(tap.unwrap_err()));
                     }
                     reveals.push(tap.unwrap());
-                    amounts.push(req.initial_amount);
                 }
 
                 let mut contexts = Vec::with_capacity(params.executes.len());
@@ -509,66 +473,76 @@ impl Iterator for BuilderIterator<'_> {
                     contexts.push(execute.context);
                 }
 
-                let prep = Builder::prepare_all(
-                    self.coin_selection.clone(),
+                let (tx, commitments) = match Builder::prepare_all(
                     self.median_time,
                     self.wallet,
-                    params.auction_outputs,
+                    params.bidouts.clone(),
                     Some(&reveals),
-                    params
-                        .transfers
-                        .iter()
-                        .filter_map(|req| match req {
-                            TransferRequest::Space(transfer) => Some(transfer.clone()),
-                            _ => None,
-                        })
-                        .collect(),
-                    params
-                        .transfers
-                        .iter()
-                        .filter_map(|req| match req {
-                            TransferRequest::Coin(transfer) => Some(transfer.clone()),
-                            _ => None,
-                        })
-                        .collect(),
+                    params.transfers.clone(),
+                    params.sends.clone(),
+                    self.unspendables.clone(),
                     self.fee_rate,
                     self.dust,
-                );
-                if prep.is_err() {
-                    return Some(Err(prep.unwrap_err()));
-                }
+                    self.confirmed_only,
 
-                let (tx, commitments) = prep.unwrap();
+                ) {
+                    Ok(prep) => prep,
+                    Err(err) => return Some(Err(err)),
+                };
+
+                let mut detailed_tx = TxRecord::new(tx);
+                if let Some(count) = params.bidouts {
+                    detailed_tx.add_bidout(count as _);
+                }
 
                 let mut reveals_iter = reveals.into_iter();
                 let mut commitments_iter = commitments.into_iter();
 
                 let open_reveals = reveals_iter
                     .by_ref()
-                    .take(amounts.len())
+                    .take(params.opens.len())
                     .collect::<Vec<SpaceScriptSigningInfo>>()
                     .into_iter();
                 let open_commitments = commitments_iter
                     .by_ref()
-                    .take(amounts.len())
+                    .take(params.opens.len())
                     .collect::<Vec<FullTxOut>>()
                     .into_iter();
 
-                for ((signing, commitment), amount) in
-                    open_reveals.zip(open_commitments).zip(amounts)
+                for ((signing, commitment), open) in
+                    open_reveals.zip(open_commitments).zip(params.opens)
                 {
-                    self.stack.push(StackOp::Open(OpenParams {
-                        reveals: vec![SpaceScriptRevealParams {
+                    detailed_tx.add_commitment(
+                        open.name.clone(),
+                        commitment.txout.script_pubkey.clone(),
+                        signing.to_vec(),
+                    );
+                    self.stack.push(StackOp::Open(OpenRevealParams {
+                        space: open.name,
+                        initial_bid: open.initial_amount,
+                        script: SpaceScriptRevealParams {
                             signing: signing.clone(),
                             commitment,
-                        }],
-                        amount,
-                    }))
+                        },
+                    }));
                 }
 
-                for ((signing, commitment), context) in
-                    reveals_iter.zip(commitments_iter).zip(contexts)
-                {
+                for ((signing, commitment), context) in reveals_iter.zip(commitments_iter).zip(contexts) {
+                    // script applies to every space in context
+                    for transfer in context.iter() {
+                        detailed_tx.add_commitment(
+                            transfer
+                                .space
+                                .spaceout
+                                .space
+                                .as_ref()
+                                .expect("space")
+                                .name
+                                .to_string(),
+                            commitment.txout.script_pubkey.clone(),
+                            signing.to_vec(),
+                        );
+                    }
                     self.stack.push(StackOp::Execute(ExecuteParams {
                         reveal: SpaceScriptRevealParams {
                             signing,
@@ -578,46 +552,75 @@ impl Iterator for BuilderIterator<'_> {
                     }))
                 }
 
-                Some(Ok(TaggedTransaction { tx, tags }))
+                if !params.transfers.is_empty() {
+                    // TODO: resolved address recipient
+                    for transfer in &params.transfers {
+                        detailed_tx.add_transfer(
+                            transfer
+                                .space
+                                .spaceout
+                                .space
+                                .as_ref()
+                                .expect("space")
+                                .name
+                                .to_string(),
+                            transfer.recipient.script_pubkey(),
+                        );
+                    }
+                }
+                Some(Ok(detailed_tx))
             }
             StackOp::Open(params) => {
                 let tx = Builder::open_tx(
-                    self.coin_selection.clone(),
                     self.wallet,
-                    params,
+                    params.clone(),
                     self.fee_rate,
+                    self.unspendables.clone(),
+                    self.confirmed_only,
                     self.force,
                 );
-                Some(tx.map(|tx| TaggedTransaction {
-                    tx,
-                    tags: vec![TransactionTag::Open],
+                Some(tx.map(|tx| {
+                    let mut detailed = TxRecord::new(tx);
+                    detailed.add_open(params.space, params.initial_bid);
+                    detailed
                 }))
             }
             StackOp::Execute(params) => {
-                let tx = Builder::execute_tx(
-                    self.coin_selection.clone(),
+                let spaces = params.context.clone();
+                let res = Builder::execute_tx(
                     self.wallet,
                     params,
                     self.fee_rate,
+                    self.unspendables.clone(),
+                    self.confirmed_only,
                     self.force,
                 );
-                Some(tx.map(|tx| TaggedTransaction {
-                    tx,
-                    tags: vec![TransactionTag::Script],
+
+                Some(res.map(|(tx, reveal_input_index)| {
+                    let mut detailed = TxRecord::new(tx);
+                    for space in spaces {
+                        detailed.add_execute(
+                            space.space.spaceout.space.expect("space").name.to_string(),
+                            reveal_input_index,
+                        );
+                    }
+                    detailed
                 }))
             }
             StackOp::Bid(bid) => {
                 let tx = Builder::bid_tx(
-                    self.coin_selection.clone(),
                     self.wallet,
-                    bid.space,
+                    bid.space.clone(),
                     bid.amount,
                     self.fee_rate,
+                    self.unspendables.clone(),
+                    self.confirmed_only,
                     self.force,
                 );
-                Some(tx.map(|tx| TaggedTransaction {
-                    tx,
-                    tags: vec![TransactionTag::Bid],
+                Some(tx.map(|tx| {
+                    let mut detailed = TxRecord::new(tx);
+                    detailed.add_bid(self.wallet, &bid.space, bid.amount);
+                    detailed
                 }))
             }
         }
@@ -669,8 +672,13 @@ impl Builder {
         self
     }
 
-    pub fn add_transfer(mut self, request: TransferRequest) -> Self {
+    pub fn add_transfer(mut self, request: SpaceTransfer) -> Self {
         self.requests.push(StackRequest::Transfer(request));
+        self
+    }
+
+    pub fn add_send(mut self, request: CoinTransfer) -> Self {
+        self.requests.push(StackRequest::Send(request));
         self
     }
 
@@ -691,7 +699,8 @@ impl Builder {
         dust: Option<Amount>,
         median_time: u64,
         wallet: &mut SpacesWallet,
-        coin_selection: SpacesAwareCoinSelection,
+        unspendables: Vec<OutPoint>,
+        confirmed_only: bool,
     ) -> anyhow::Result<BuilderIterator> {
         let fee_rate = self
             .fee_rate
@@ -714,30 +723,30 @@ impl Builder {
                     _ => counts,
                 });
 
-        let required_auction_outputs = open_count + bid_count as u8;
-        let available = if required_auction_outputs > 0 {
-            let mut selection = coin_selection.clone();
-            selection.confirmed_only = false;
-            wallet.list_bidouts(&selection)?
+        let required_bidouts = open_count + bid_count as u8;
+        let available = if required_bidouts > 0 {
+            wallet.list_bidouts(false)?
         } else {
             Vec::new()
         };
 
+        // Always create a few more bidouts for future transactions
+        const EXTRA_BIDOUTS : u8 = 2;
         // check how many bid outputs we need to create
         let auction_outputs = match self.bidouts {
             None => {
-                if required_auction_outputs > available.len() as u8 {
-                    Some(required_auction_outputs - available.len() as u8)
+                if required_bidouts > available.len() as u8 {
+                    Some((required_bidouts - available.len() as u8) + EXTRA_BIDOUTS)
                 } else {
                     None
                 }
             }
             Some(count) => {
-                if required_auction_outputs > available.len() as u8 + count {
+                if required_bidouts > available.len() as u8 + count {
                     return Err(anyhow!(
-                        "number of required placeholders {} \
+                        "number of required bidouts {} \
                     exceeds currently available {} + requested {}",
-                        required_auction_outputs,
+                        required_bidouts,
                         available.len(),
                         count
                     ));
@@ -751,6 +760,7 @@ impl Builder {
         let mut opens = Vec::new();
         let mut bids = Vec::new();
         let mut transfers = Vec::new();
+        let mut sends = Vec::new();
         let mut executes = Vec::new();
         for req in self.requests {
             match req {
@@ -761,11 +771,12 @@ impl Builder {
                         None => wallet.next_unused_space_address(),
                         Some(address) => address,
                     };
-                    transfers.push(TransferRequest::Space(SpaceTransfer {
+                    transfers.push(SpaceTransfer {
                         space: params.space,
                         recipient: to.0,
-                    }))
+                    })
                 }
+                StackRequest::Send(send) => sends.push(send),
                 StackRequest::Transfer(params) => transfers.push(params),
                 StackRequest::Execute(params) => executes.push(params),
             }
@@ -785,7 +796,8 @@ impl Builder {
                 opens,
                 executes,
                 transfers,
-                auction_outputs,
+                sends: vec![],
+                bidouts: auction_outputs,
             }));
         }
 
@@ -795,28 +807,27 @@ impl Builder {
             fee_rate,
             wallet,
             force: self.force,
+            unspendables,
+            confirmed_only,
             median_time,
-            coin_selection,
         })
     }
 
     fn bid_tx(
-        coin_selection: SpacesAwareCoinSelection,
         w: &mut SpacesWallet,
         prev: FullSpaceOut,
         bid: Amount,
         fee_rate: FeeRate,
+        unspendables: Vec<OutPoint>,
+        confirmed_only: bool,
         force: bool,
     ) -> anyhow::Result<Transaction> {
-        w.watch_bid_spend(prev.outpoint());
-
-        let (offer, placeholder) = w.new_bid_psbt(bid, &coin_selection)?;
+        let (offer, placeholder) = w.new_bid_psbt(bid, confirmed_only)?;
         let bid_psbt = {
-            let mut builder = w.spaces.build_tx().coin_selection(coin_selection);
+            let mut builder = w.build_tx(unspendables, confirmed_only)?;
             builder
-                .ordering(TxOrdering::Untouched)
                 .nlocktime(LockTime::Blocks(Height::ZERO))
-                .enable_rbf_with_sequence(BID_PSBT_INPUT_SEQUENCE)
+                .set_exact_sequence(BID_PSBT_INPUT_SEQUENCE)
                 .add_bid(
                     Some(prev.spaceout.space.as_ref().unwrap()),
                     offer,
@@ -834,30 +845,32 @@ impl Builder {
     }
 
     fn open_tx(
-        coin_selection: SpacesAwareCoinSelection,
         w: &mut SpacesWallet,
-        params: OpenParams,
+        params: OpenRevealParams,
         fee_rate: FeeRate,
+        unspendables: Vec<OutPoint>,
+        confirmed_only: bool,
         force: bool,
     ) -> anyhow::Result<Transaction> {
-        let (offer, placeholder) = w.new_bid_psbt(params.amount, &coin_selection)?;
+        let (offer, placeholder) = w.new_bid_psbt(params.initial_bid, confirmed_only)?;
         let mut extra_prevouts = BTreeMap::new();
         let open_psbt = {
-            let mut builder = w.spaces.build_tx().coin_selection(coin_selection);
+            let mut builder = w.build_tx(unspendables, confirmed_only)?;
             builder.ordering(TxOrdering::Untouched).add_bid(
                 None,
                 offer,
                 placeholder,
-                params.amount,
+                params.initial_bid,
                 force,
             )?;
 
-            for reveal in params.reveals {
-                builder.add_reveal(reveal.commitment.clone(), reveal.signing)?;
-                extra_prevouts.insert(reveal.commitment.outpoint, reveal.commitment.txout);
-            }
+            builder.add_reveal(params.script.commitment.clone(), params.script.signing)?;
+            extra_prevouts.insert(
+                params.script.commitment.outpoint,
+                params.script.commitment.txout,
+            );
 
-            builder.enable_rbf().fee_rate(fee_rate);
+            builder.fee_rate(fee_rate);
             builder.finish()?
         };
 
@@ -866,22 +879,23 @@ impl Builder {
     }
 
     fn execute_tx(
-        coin_selection: SpacesAwareCoinSelection,
         w: &mut SpacesWallet,
         params: ExecuteParams,
         fee_rate: FeeRate,
+        unspendables: Vec<OutPoint>,
+        confirmed_only: bool,
         _force: bool,
-    ) -> anyhow::Result<Transaction> {
+    ) -> anyhow::Result<(Transaction, usize)> {
         let mut extra_prevouts = BTreeMap::new();
+        let reveal_input_index;
         let reveal_psbt = {
             let change_address = w
-                .spaces
+                .internal
                 .next_unused_address(KeychainKind::Internal)
                 .script_pubkey();
-            let mut builder = w.spaces.build_tx().coin_selection(coin_selection);
+            let mut builder = w.build_tx(unspendables, confirmed_only)?;
 
             builder
-                .ordering(TxOrdering::Untouched)
                 // Added first to keep an odd number of outputs before adding transfers
                 .add_recipient(change_address, Amount::from_sat(1000));
 
@@ -890,20 +904,21 @@ impl Builder {
                 params.reveal.commitment.txout.clone(),
             );
 
+            let input_count = params.context.len();
             for transfer in params.context {
-                builder.add_transfer(TransferRequest::Space(transfer))?;
+                builder.add_transfer(transfer)?;
             }
 
+            reveal_input_index = input_count + 1;
             builder
                 // add reveal last to not disrupt space inputs order
                 .add_reveal(params.reveal.commitment, params.reveal.signing)?
-                .enable_rbf()
                 .fee_rate(fee_rate);
             builder.finish()?
         };
 
         let signed = w.sign(reveal_psbt, Some(extra_prevouts))?;
-        Ok(signed)
+        Ok((signed, reveal_input_index))
     }
 
     fn create_open_tap_data(
@@ -932,7 +947,7 @@ pub struct SelectionOutput {
 pub struct SpacesAwareCoinSelection {
     pub default_algorithm: DefaultCoinSelectionAlgorithm,
     // Exclude outputs
-    pub exclude_outputs: Vec<SelectionOutput>,
+    pub exclude_outputs: Vec<OutPoint>,
     // Whether to use confirmed only outputs
     // to fund the transaction
     pub confirmed_only: bool,
@@ -942,7 +957,7 @@ impl SpacesAwareCoinSelection {
     // Will skip any outputs with value less than the dust threshold
     // to avoid accidentally spending space outputs
     pub const DUST_THRESHOLD: Amount = Amount::from_sat(1200);
-    pub fn new(excluded: Vec<SelectionOutput>, confirmed_only: bool) -> Self {
+    pub fn new(excluded: Vec<OutPoint>, confirmed_only: bool) -> Self {
         Self {
             default_algorithm: DefaultCoinSelectionAlgorithm::default(),
             exclude_outputs: excluded,
@@ -952,14 +967,15 @@ impl SpacesAwareCoinSelection {
 }
 
 impl CoinSelectionAlgorithm for SpacesAwareCoinSelection {
-    fn coin_select(
+    fn coin_select<R: RngCore>(
         &self,
         required_utxos: Vec<WeightedUtxo>,
         mut optional_utxos: Vec<WeightedUtxo>,
         fee_rate: FeeRate,
-        target_amount: u64,
+        target_amount: Amount,
         drain_script: &Script,
-    ) -> Result<CoinSelectionResult, Error> {
+        rand: &mut R,
+    ) -> Result<CoinSelectionResult, InsufficientFunds> {
         let required = required_utxos
             .iter()
             .map(|w| w.utxo.clone())
@@ -970,7 +986,7 @@ impl CoinSelectionAlgorithm for SpacesAwareCoinSelection {
             if self.confirmed_only {
                 match &weighted_utxo.utxo {
                     Utxo::Local(local) => {
-                        if !local.confirmation_time.is_confirmed() {
+                        if !local.chain_position.is_confirmed() {
                             return false;
                         }
                     }
@@ -980,9 +996,9 @@ impl CoinSelectionAlgorithm for SpacesAwareCoinSelection {
 
             weighted_utxo.utxo.txout().value > SpacesAwareCoinSelection::DUST_THRESHOLD
                 && !self
-                    .exclude_outputs
-                    .iter()
-                    .any(|o| o.outpoint == weighted_utxo.utxo.outpoint())
+                .exclude_outputs
+                .iter()
+                .any(|o| o == &weighted_utxo.utxo.outpoint())
         });
 
         let mut result = self.default_algorithm.coin_select(
@@ -991,6 +1007,7 @@ impl CoinSelectionAlgorithm for SpacesAwareCoinSelection {
             fee_rate,
             target_amount,
             drain_script,
+            rand,
         )?;
 
         let mut optional = Vec::with_capacity(result.selected.len() - required.len());

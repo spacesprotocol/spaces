@@ -5,8 +5,8 @@ edition = "2021"
 
 [dependencies]
 bitcoin = { version = "0.32.2", features = ["base64", "serde"] }
-bdk_wallet = { version = "=1.0.0-alpha.13", features = ["keys-bip39"] }
-bdk_file_store = "0.13.0"
+# bdk version 1.0.0-beta.6 + hard coded patch for double spend fix from PR https://github.com/bitcoindevkit/bdk/pull/1765
+bdk_wallet = { git = "https://github.com/buffrr/bdk.git", rev= "43bca8643dec6fdda99e4a29bf88709729af349e", features = ["keys-bip39", "rusqlite"] }
 secp256k1 = "0.29.0"
 anyhow = "1.0.80"
 bech32 = "0.11.0"
@@ -18,3 +18,7 @@ protocol = { path = "../protocol", features = ["std"], version = "*" }
 ctrlc = "3.4.4"
 hex = "0.4.3"
 log = "0.4.21"
+
+
+[dev-dependencies]
+tempfile = "3.14.0"
