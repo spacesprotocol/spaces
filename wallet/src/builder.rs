@@ -362,6 +362,25 @@ impl Builder {
             let mut builder = w.build_tx(confirmed_only)?;
             builder.nlocktime(magic_lock_time(median_time));
 
+            // handle transfers
+            if !space_transfers.is_empty() {
+                // Must be an odd number of outputs so that
+                // transfers align correctly
+                // TODO: use the actual change output instead of creating this
+                if vout % 2 == 0 {
+                    let dust = match dust {
+                        None => change_address.minimal_non_dust().mul(2),
+                        Some(dust) => dust,
+                    };
+                    builder.add_recipient(change_address, dust);
+                    vout += 1;
+                }
+                for transfer in space_transfers {
+                    builder.add_transfer(transfer)?;
+                    vout += 1;
+                }
+            }
+
             for (addr, amount) in placeholder_outputs {
                 builder.add_recipient(addr, amount);
                 vout += 1;
@@ -388,22 +407,7 @@ impl Builder {
                 }
             }
 
-            // handle transfers
-            if !space_transfers.is_empty() {
-                // Must be an odd number of outputs so that
-                // transfers align correctly
-                // TODO: use the actual change output instead of creating this
-                if vout % 2 == 0 {
-                    let dust = match dust {
-                        None => change_address.minimal_non_dust().mul(2),
-                        Some(dust) => dust,
-                    };
-                    builder.add_recipient(change_address, dust);
-                }
-                for transfer in space_transfers {
-                    builder.add_transfer(transfer)?;
-                }
-            }
+
 
             builder.fee_rate(fee_rate);
             let r = builder.finish().map_err(|e| match e {
