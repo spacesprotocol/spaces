@@ -499,6 +499,22 @@ async fn it_should_allow_applying_script_in_batch(rig: &TestRig) -> anyhow::Resu
 // Bob attempts to replace it but fails due to a lack of confirmed bid & funding utxos.
 // Eve, with confirmed bid outputs/funds, successfully replaces the bid.
 async fn it_should_replace_mempool_bids(rig: &TestRig) -> anyhow::Result<()> {
+    // make sure Bob runs out of confirmed bidouts
+    let bob_bidout_count = rig.spaced.client.wallet_list_bidouts(BOB)
+        .await.expect("get bidouts").len();
+    for i in 0..bob_bidout_count {
+        wallet_do(
+            rig,
+            BOB,
+            vec![RpcWalletRequest::Bid(BidParams {
+                name: format!("@test{}", i + 100),
+                amount: 200,
+            })],
+            false,
+        )
+            .await.expect("bob makes a bid");
+    }
+
     // create some confirmed bid outs for Alice and Eve
     rig.spaced
         .client

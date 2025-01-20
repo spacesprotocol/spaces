@@ -711,28 +711,30 @@ impl Builder {
                     _ => counts,
                 });
 
-        let required_auction_outputs = open_count + bid_count as u8;
-        let available = if required_auction_outputs > 0 {
+        let required_bidouts = open_count + bid_count as u8;
+        let available = if required_bidouts > 0 {
             wallet.list_bidouts(false)?
         } else {
             Vec::new()
         };
 
+        // Always create a few more bidouts for future transactions
+        const EXTRA_BIDOUTS : u8 = 2;
         // check how many bid outputs we need to create
         let auction_outputs = match self.bidouts {
             None => {
-                if required_auction_outputs > available.len() as u8 {
-                    Some(required_auction_outputs - available.len() as u8)
+                if required_bidouts > available.len() as u8 {
+                    Some((required_bidouts - available.len() as u8) + EXTRA_BIDOUTS)
                 } else {
                     None
                 }
             }
             Some(count) => {
-                if required_auction_outputs > available.len() as u8 + count {
+                if required_bidouts > available.len() as u8 + count {
                     return Err(anyhow!(
-                        "number of required placeholders {} \
+                        "number of required bidouts {} \
                     exceeds currently available {} + requested {}",
-                        required_auction_outputs,
+                        required_bidouts,
                         available.len(),
                         count
                     ));
