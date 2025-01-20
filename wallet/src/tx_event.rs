@@ -1,5 +1,4 @@
 use std::{fmt, fmt::Display, str::FromStr};
-
 use bdk_wallet::{
     chain, rusqlite,
     rusqlite::{
@@ -11,7 +10,7 @@ use bitcoin::{Amount, OutPoint, ScriptBuf, Transaction, TxOut, Txid};
 use serde::{Deserialize, Serialize};
 use protocol::{Covenant, FullSpaceOut};
 use crate::rusqlite_impl::{migrate_schema, Impl};
-use crate::SpacesWallet;
+use crate::{SpaceScriptSigningInfo, SpacesWallet};
 
 #[derive(Clone, Debug)]
 pub struct TxRecord {
@@ -63,14 +62,15 @@ pub struct OpenEventDetails {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CommitEventDetails {
-    pub reveal_script_pubkey: protocol::Bytes,
+    pub commit_script_pubkey: protocol::Bytes,
     /// [SpaceScriptSigningInfo] in raw format
-    pub reveal_signing_info: protocol::Bytes,
+    pub commit_signing_info: protocol::Bytes,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ExecuteEventDetails {
-    pub space_script_input_index: usize,
+    // Space script input index
+    pub n: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -167,6 +167,29 @@ impl TxEvent {
         ))?;
         let results: Vec<Self> = Self::from_sqlite_statement(stmt, [Impl(txid)])?;
         Ok(results.get(0).cloned())
+    }
+
+    pub fn get_signing_info(db_tx: &rusqlite::Transaction, txid: Txid, script_pubkey: &ScriptBuf) -> rusqlite::Result<Option<SpaceScriptSigningInfo>> {
+        let stmt = db_tx.prepare(&format!(
+            "SELECT type, space, foreign_input, details
+         FROM {} WHERE type = 'commit' AND txid = ?1",
+            Self::TX_EVENTS_TABLE_NAME,
+        ))?;
+
+        let results: Vec<Self> = Self::from_sqlite_statement(stmt, [Impl(txid)])
+            .expect("could not retrieve signing details from sqlite");
+        for result in results {
+            let details = result.details.expect("signing details in tx event");
+            let details: CommitEventDetails = serde_json::from_value(details)
+                .expect("signing details");
+            if details.commit_script_pubkey.as_slice() == script_pubkey.as_bytes() {
+                let raw = details.commit_signing_info.to_vec();
+                let info =
+                    SpaceScriptSigningInfo::from_slice(raw.as_slice()).expect("valid signing info");
+                return Ok(Some(info))
+            }
+        }
+        Ok(None)
     }
 
     pub fn spaces(db_tx: &rusqlite::Transaction) -> rusqlite::Result<Vec<String>> {
@@ -318,8 +341,8 @@ impl TxRecord {
             foreign_input: None,
             details: Some(
                 serde_json::to_value(CommitEventDetails {
-                    reveal_script_pubkey: protocol::Bytes::new(reveal_address.to_bytes()),
-                    reveal_signing_info: protocol::Bytes::new(signing_info),
+                    commit_script_pubkey: protocol::Bytes::new(reveal_address.to_bytes()),
+                    commit_signing_info: protocol::Bytes::new(signing_info),
                 })
                     .expect("json value"),
             ),
@@ -348,7 +371,7 @@ impl TxRecord {
             foreign_input: None,
             details: Some(
                 serde_json::to_value(ExecuteEventDetails {
-                    space_script_input_index: reveal_input_index,
+                    n: reveal_input_index,
                 })
                     .expect("json value"),
             ),

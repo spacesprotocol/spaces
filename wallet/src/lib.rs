@@ -3,7 +3,6 @@ use std::{
     fmt::Debug,
     fs,
     path::PathBuf,
-    time::{Duration, SystemTime},
 };
 
 use anyhow::{anyhow, Context};
@@ -31,6 +30,7 @@ use crate::tx_event::TxRecord;
 
 pub extern crate bdk_wallet;
 pub extern crate bitcoin;
+extern crate core;
 
 pub mod address;
 pub mod builder;
@@ -120,7 +120,7 @@ pub struct WalletDescriptors {
 }
 
 pub trait Mempool {
-    fn in_mempool(&self, txid: &Txid) -> anyhow::Result<bool>;
+    fn in_mempool(&self, txid: &Txid, height: u32) -> anyhow::Result<bool>;
 }
 
 impl SpacesWallet {
@@ -165,8 +165,6 @@ impl SpacesWallet {
             internal: spaces_wallet,
             connection: conn,
         };
-
-        wallet.clear_unused_signing_info();
         Ok(wallet)
     }
 
@@ -271,6 +269,10 @@ impl SpacesWallet {
         self.internal.list_unspent()
     }
 
+    pub fn list_output(&self) -> impl Iterator<Item=LocalOutput> + '_ {
+        self.internal.list_output()
+    }
+
     pub fn list_unspent_with_details(&mut self, store: &mut impl DataSource) -> anyhow::Result<Vec<WalletOutput>> {
         let mut wallet_outputs = Vec::new();
         for output in self.internal.list_unspent() {
@@ -292,16 +294,16 @@ impl SpacesWallet {
     /// Checks the mempool for dropped bid transactions and reverts them in the wallet’s Tx graph,
     /// reclaiming any "stuck" funds. This is necessary because continuously scanning the entire
     /// mainnet mempool would be resource-intensive to fetch from Bitcoin Core RPC.
-    pub fn update_unconfirmed_bids(&mut self, mem: impl Mempool, data_source: &mut impl DataSource) -> anyhow::Result<Vec<Txid>> {
+    pub fn update_unconfirmed_bids(&mut self, mem: impl Mempool, height: u32, data_source: &mut impl DataSource) -> anyhow::Result<Vec<Txid>> {
         let unconfirmed_bids = self.unconfirmed_bids()?;
         let mut revert_txs = Vec::new();
         for (bid, outpoint) in unconfirmed_bids {
-            let in_mempool = mem.in_mempool(&bid.tx_node.txid)?;
+            let in_mempool = mem.in_mempool(&bid.tx_node.txid, height)?;
             if in_mempool {
                 continue;
             }
-            // bid dropped from mempool perhaps it was confirmed?
-            if data_source.get_spaceout(&outpoint)?.is_none() {
+            // bid dropped from mempool perhaps it was confirmed spending outpoint?
+            if data_source.get_spaceout(&outpoint).context("could not fetch spaceout from db")?.is_none() {
                 continue;
             }
             if let Some((revert, seen)) = revert_unconfirmed_bid_tx(&bid, outpoint) {
@@ -632,12 +634,14 @@ impl SpacesWallet {
                     continue;
                 }
 
+                let previous_output = psbt.unsigned_tx.input[input_index].previous_output;
                 let signing_info =
-                    self.get_signing_info(&input.witness_utxo.as_ref().unwrap().script_pubkey);
+                    self.get_signing_info(previous_output, &input.witness_utxo.as_ref().unwrap().script_pubkey)
+                        .context("could not retrieve signing info for script")?;
                 if let Some(info) = signing_info {
                     input
                         .proprietary
-                        .insert(Self::spaces_signer("reveal_signing_info"), info);
+                        .insert(Self::spaces_signer("reveal_signing_info"), info.to_vec());
                     input.final_script_witness = Some(Witness::default());
                 }
             }
@@ -662,10 +666,6 @@ impl SpacesWallet {
                 let raw = input.proprietary.get(&reveal_key).expect("signing info");
                 let signing_info = SpaceScriptSigningInfo::from_slice(raw.as_slice())
                     .context("expected reveal signing info")?;
-
-                let script = input.witness_utxo.as_ref().unwrap().script_pubkey.clone();
-                self.save_signing_info(script, raw.clone())?;
-
                 reveals.insert(idx as u32, signing_info);
             }
         }
@@ -727,46 +727,13 @@ impl SpacesWallet {
         Ok(tx)
     }
 
-    fn get_signing_info(&self, script: &ScriptBuf) -> Option<Vec<u8>> {
-        let script_info_dir = self.config.data_dir.join("script_solutions");
-        let filename = hex::encode(script.as_bytes());
-        let file_path = script_info_dir.join(filename);
-        fs::read(file_path).ok()
-    }
+    fn get_signing_info(&mut self, previous_output: OutPoint, script: &ScriptBuf)
+        -> anyhow::Result<Option<SpaceScriptSigningInfo>> {
 
-    fn save_signing_info(&self, script: ScriptBuf, raw: Vec<u8>) -> anyhow::Result<()> {
-        let script_info_dir = self.config.data_dir.join("script_solutions");
-        fs::create_dir_all(&script_info_dir).context("could not create script_info directory")?;
-        let filename = hex::encode(script.as_bytes());
-        let file_path = script_info_dir.join(filename);
-        fs::write(file_path, raw)?;
-        Ok(())
-    }
-
-    fn clear_unused_signing_info(&self) {
-        let script_info_dir = self.config.data_dir.join("script_solutions");
-        let one_week_ago = SystemTime::now() - Duration::from_secs(7 * 24 * 60 * 60);
-
-        let entries = match fs::read_dir(&script_info_dir) {
-            Ok(entries) => entries,
-            Err(_) => return,
-        };
-
-        for entry in entries.flatten() {
-            let metadata = match entry.metadata() {
-                Ok(metadata) => metadata,
-                Err(_) => continue,
-            };
-
-            let modified_time = match metadata.modified() {
-                Ok(time) => time,
-                Err(_) => continue,
-            };
-
-            if modified_time < one_week_ago {
-                let _ = fs::remove_file(entry.path());
-            }
-        }
+        let db_tx = self.connection.transaction()
+            .context("couldn't create db transaction")?;
+        let info = TxEvent::get_signing_info(&db_tx, previous_output.txid, script)?;
+        Ok(info)
     }
 }
 
