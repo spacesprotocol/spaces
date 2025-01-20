@@ -473,7 +473,7 @@ impl RpcWallet {
         let mut transactions: Vec<_> = wallet.transactions().collect();
         transactions.sort();
 
-        let mut txs : Vec<_> = transactions
+        let mut txs: Vec<_> = transactions
             .iter()
             .rev()
             .skip(skip)
@@ -490,7 +490,7 @@ impl RpcWallet {
                     sent,
                     received,
                     fee,
-                    events: vec![]
+                    events: vec![],
                 }
             })
             .collect();
@@ -599,7 +599,7 @@ impl RpcWallet {
                 RpcWalletRequest::SendCoins(params) => {
                     let recipient = match Self::resolve(network, store, &params.to, false)? {
                         None => {
-                            return Err(anyhow!("sendcoins: could not resolve '{}'", params.to))
+                            return Err(anyhow!("send: could not resolve '{}'", params.to))
                         }
                         Some(r) => r,
                     };
@@ -626,15 +626,23 @@ impl RpcWallet {
                     for space in spaces {
                         let spacehash = SpaceKey::from(Sha256::hash(space.as_ref()));
                         match store.get_space_info(&spacehash)? {
-                            None => return Err(anyhow!("sendspaces: you don't own `{}`", space)),
+                            None => return Err(anyhow!("transfer: you don't own `{}`", space)),
                             Some(full)
                             if full.spaceout.space.is_none()
                                 || !full.spaceout.space.as_ref().unwrap().is_owned()
                                 || !wallet
                                 .is_mine(full.spaceout.script_pubkey.clone()) =>
                                 {
-                                    return Err(anyhow!("sendspaces: you don't own `{}`", space));
+                                    return Err(anyhow!("transfer: you don't own `{}`", space));
                                 }
+
+                            Some(full) if wallet.get_utxo(full.outpoint()).is_none() => {
+                                return Err(anyhow!(
+                            "transfer '{}': wallet already has a pending tx for this space",
+                            space
+                        ));
+                            }
+
                             Some(full) => {
                                 builder = builder.add_transfer(SpaceTransfer {
                                     space: full,
@@ -687,6 +695,13 @@ impl RpcWallet {
                         ));
                     }
 
+                    if wallet.get_utxo(utxo.outpoint()).is_none() {
+                        return Err(anyhow!(
+                            "register '{}': wallet already has a pending tx for this space",
+                            params.name
+                        ));
+                    }
+
                     if !tx.force {
                         let claim_height = utxo.spaceout.space.as_ref().unwrap().claim_height();
                         let tip_height = wallet.local_chain().tip().height();
@@ -730,15 +745,23 @@ impl RpcWallet {
                         let spacehash = SpaceKey::from(Sha256::hash(name.as_ref()));
                         let spaceout = store.get_space_info(&spacehash)?;
                         if spaceout.is_none() {
-                            return Err(anyhow!("execute on '{}': space does not exist", space));
+                            return Err(anyhow!("script '{}': space does not exist", space));
                         }
                         let spaceout = spaceout.unwrap();
                         if !wallet.is_mine(spaceout.spaceout.script_pubkey.clone()) {
                             return Err(anyhow!(
-                                "execute on '{}': you don't own this space",
+                                "script '{}': you don't own this space",
                                 space
                             ));
                         }
+
+                        if wallet.get_utxo(spaceout.outpoint()).is_none() {
+                            return Err(anyhow!(
+                                "script '{}': wallet already has a pending tx for this space",
+                                space
+                            ));
+                        }
+
                         let address = wallet.next_unused_space_address();
                         spaces.push(SpaceTransfer {
                             space: spaceout,

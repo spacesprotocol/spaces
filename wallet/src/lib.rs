@@ -194,6 +194,10 @@ impl SpacesWallet {
         self.internal.get_tx(txid)
     }
 
+    pub fn get_utxo(&mut self, outpoint: OutPoint) -> Option<LocalOutput> {
+        self.internal.get_utxo(outpoint)
+    }
+
     pub fn build_tx(&mut self, confirmed_only: bool)
                     -> anyhow::Result<TxBuilder<SpacesAwareCoinSelection>> {
         self.create_builder(None, confirmed_only)

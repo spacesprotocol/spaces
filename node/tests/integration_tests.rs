@@ -554,6 +554,7 @@ async fn it_should_replace_mempool_bids(rig: &TestRig) -> anyhow::Result<()> {
         .await.expect("send request");
     rig.mine_blocks(1, None).await?;
 
+    rig.wait_until_synced().await?;
     rig.wait_until_wallet_synced(ALICE).await?;
     rig.wait_until_wallet_synced(BOB).await?;
     rig.wait_until_wallet_synced(EVE).await?;
@@ -567,7 +568,7 @@ async fn it_should_replace_mempool_bids(rig: &TestRig) -> anyhow::Result<()> {
         })],
         false,
     )
-        .await?;
+        .await.expect("send request");
 
     let response = serde_json::to_string_pretty(&response).unwrap();
     println!("Alice bid on @test2 (unconf): {}", response);
@@ -645,7 +646,7 @@ async fn it_should_replace_mempool_bids(rig: &TestRig) -> anyhow::Result<()> {
                 skip_tx_check: false,
             },
         )
-        .await?;
+        .await.expect("send request");
 
     let eve_replacement_txid = replacement.result.iter().filter_map(|tx| {
         if tx.events.iter().any(|event| event.kind == TxEventKind::Bid) {
@@ -673,7 +674,7 @@ async fn it_should_replace_mempool_bids(rig: &TestRig) -> anyhow::Result<()> {
         .spaced
         .client
         .wallet_list_transactions(ALICE, 1000, 0)
-        .await?;
+        .await.expect("list transactions");
     let unconfirmed: Vec<_> = txs.iter().filter(|tx| !tx.confirmed).collect();
     for tx in &unconfirmed {
         println!("Alice's unconfiremd: {}", tx.txid);
@@ -692,7 +693,7 @@ async fn it_should_replace_mempool_bids(rig: &TestRig) -> anyhow::Result<()> {
         .spaced
         .client
         .wallet_list_transactions(ALICE, 1000, 0)
-        .await?;
+        .await.expect("list transactions");
 
     assert!(
         txs.iter().all(|tx| tx.txid != eve_replacement_txid),
@@ -752,6 +753,94 @@ async fn it_should_maintain_locktime_when_fee_bumping(rig: &TestRig) -> anyhow::
     Ok(())
 }
 
+
+async fn it_should_not_allow_register_or_transfer_to_same_space_multiple_times(rig: &TestRig) -> anyhow::Result<()> {
+    rig.wait_until_wallet_synced(BOB).await.expect("synced");
+    rig.wait_until_wallet_synced(ALICE).await.expect("synced");
+
+    // known from data set
+    let awaiting_claim = "@test9962".to_string();
+    let response = wallet_do(
+        rig,
+        BOB,
+        vec![RpcWalletRequest::Register(RegisterParams {
+            name: awaiting_claim.clone(),
+            to: None,
+        })],
+        false,
+    ).await.expect("send request");
+
+    println!("{}", serde_json::to_string_pretty(&response).unwrap());
+    assert!(wallet_do(
+        rig,
+        BOB,
+        vec![RpcWalletRequest::Register(RegisterParams {
+            name: awaiting_claim.clone(),
+            to: None,
+        })],
+        false,
+    ).await.is_err(), "should not allow register to same space multiple times");
+
+
+    // Try transfer multiple times
+    let bob_address = rig
+        .spaced
+        .client
+        .wallet_get_new_address(BOB, AddressKind::Space)
+        .await?;
+
+    // let spaces = rig.spaced.client.wallet_list_spaces(ALICE).await.expect("spaces");
+    // println!("{}", serde_json::to_string_pretty(&spaces).unwrap());
+
+
+    let transfer = "@test9995".to_string();
+    let response = wallet_do(
+        rig,
+        ALICE,
+        vec![RpcWalletRequest::Transfer(TransferSpacesParams {
+            spaces: vec![transfer.clone()],
+            to: bob_address.clone(),
+        })],
+        false,
+    ).await.expect("send request");
+
+    println!("{}", serde_json::to_string_pretty(&response).unwrap());
+    assert!(wallet_do(
+        rig,
+        ALICE,
+        vec![RpcWalletRequest::Transfer(TransferSpacesParams {
+            spaces: vec![transfer],
+            to: bob_address,
+        })],
+        false,
+    ).await.is_err(), "should not allow transfer multiple times");
+
+
+    let setdata = "@test9996".to_string();
+    let response = wallet_do(
+        rig,
+        ALICE,
+        vec![RpcWalletRequest::Execute(ExecuteParams {
+            context: vec![setdata.clone()],
+            space_script: SpaceScript::create_set_fallback(&[0xDE, 0xAD]),
+        })],
+        false,
+    ).await.expect("send request");
+
+    println!("{}", serde_json::to_string_pretty(&response).unwrap());
+    assert!(wallet_do(
+        rig,
+        ALICE,
+        vec![RpcWalletRequest::Execute(ExecuteParams {
+            context: vec![setdata],
+            space_script: SpaceScript::create_set_fallback(&[0xDE, 0xAD]),
+        })],
+        false,
+    ).await.is_err(), "should not allow transfer multiple times");
+    Ok(())
+}
+
+
 #[tokio::test]
 async fn run_auction_tests() -> anyhow::Result<()> {
     let rig = TestRig::new_with_regtest_preset().await?;
@@ -774,7 +863,8 @@ async fn run_auction_tests() -> anyhow::Result<()> {
     it_should_allow_applying_script_in_batch(&rig).await.expect("should allow batch applying script");
     it_should_replace_mempool_bids(&rig).await.expect("should replace mempool bids");
     it_should_maintain_locktime_when_fee_bumping(&rig).await.expect("should maintain locktime");
-
+    it_should_not_allow_register_or_transfer_to_same_space_multiple_times(&rig).await
+        .expect("should not allow register/transfer multiple times");
     Ok(())
 }
 

@@ -161,6 +161,7 @@ impl TestRig {
 
     /// Waits until named wallet tip == bitcoind tip
     pub async fn wait_until_wallet_synced(&self, wallet_name: &str) -> anyhow::Result<()> {
+        self.wait_until_synced().await?;
         loop {
             let c = self.bitcoind.clone();
             let count = tokio::task::spawn_blocking(move || c.client.get_block_count())
