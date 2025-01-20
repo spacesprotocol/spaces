@@ -39,6 +39,8 @@ async fn it_should_open_a_space_for_auction(rig: &TestRig) -> anyhow::Result<()>
         .await
         .expect("send request");
 
+    println!("{}", serde_json::to_string_pretty(&response).unwrap());
+
     for tx_res in &response.result {
         assert!(tx_res.error.is_none(), "expect no errors for simple open");
     }
@@ -499,6 +501,10 @@ async fn it_should_allow_applying_script_in_batch(rig: &TestRig) -> anyhow::Resu
 // Bob attempts to replace it but fails due to a lack of confirmed bid & funding utxos.
 // Eve, with confirmed bid outputs/funds, successfully replaces the bid.
 async fn it_should_replace_mempool_bids(rig: &TestRig) -> anyhow::Result<()> {
+    rig.wait_until_wallet_synced(ALICE).await?;
+    rig.wait_until_wallet_synced(BOB).await?;
+    rig.wait_until_wallet_synced(EVE).await?;
+
     // make sure Bob runs out of confirmed bidouts
     let bob_bidout_count = rig.spaced.client.wallet_list_bidouts(BOB)
         .await.expect("get bidouts").len();
@@ -530,7 +536,7 @@ async fn it_should_replace_mempool_bids(rig: &TestRig) -> anyhow::Result<()> {
                 skip_tx_check: false,
             },
         )
-        .await?;
+        .await.expect("send request");
     rig.spaced
         .client
         .wallet_send_request(
@@ -545,7 +551,7 @@ async fn it_should_replace_mempool_bids(rig: &TestRig) -> anyhow::Result<()> {
                 skip_tx_check: false,
             },
         )
-        .await?;
+        .await.expect("send request");
     rig.mine_blocks(1, None).await?;
 
     rig.wait_until_wallet_synced(ALICE).await?;
@@ -566,6 +572,7 @@ async fn it_should_replace_mempool_bids(rig: &TestRig) -> anyhow::Result<()> {
     let response = serde_json::to_string_pretty(&response).unwrap();
     println!("Alice bid on @test2 (unconf): {}", response);
 
+    rig.wait_until_wallet_synced(BOB).await?;
     let response = wallet_do(
         rig,
         BOB,
@@ -575,7 +582,7 @@ async fn it_should_replace_mempool_bids(rig: &TestRig) -> anyhow::Result<()> {
         })],
         false,
     )
-        .await?;
+        .await.expect("send request");
 
     let response = serde_json::to_string_pretty(&response).unwrap();
 
@@ -604,7 +611,7 @@ async fn it_should_replace_mempool_bids(rig: &TestRig) -> anyhow::Result<()> {
                 skip_tx_check: false,
             },
         )
-        .await?;
+        .await.expect("send request");
 
 
     let response = serde_json::to_string_pretty(&replacement).unwrap();
