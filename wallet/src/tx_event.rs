@@ -11,6 +11,7 @@ use bitcoin::{Amount, OutPoint, ScriptBuf, Transaction, Txid};
 use serde::{Deserialize, Serialize};
 use protocol::{Covenant, FullSpaceOut};
 use crate::rusqlite_impl::{migrate_schema, Impl};
+use crate::SpacesWallet;
 
 #[derive(Clone, Debug)]
 pub struct TxRecord {
@@ -25,8 +26,7 @@ pub struct TxEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub space: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub bid_spends: Option<OutPoint>,
-    pub replaced: bool,
+    pub foreign_input: Option<OutPoint>,
     #[serde(skip_serializing_if = "Option::is_none", flatten)]
     pub details: Option<serde_json::Value>,
 }
@@ -83,7 +83,7 @@ pub enum TxEventKind {
     Register,
     Transfer,
     Send,
-    FeeBump
+    FeeBump,
 }
 
 impl TxEvent {
@@ -97,8 +97,7 @@ impl TxEvent {
                 txid TEXT NOT NULL, \
                 type TEXT NOT NULL, \
                 space TEXT, \
-                bid_spends TEXT, \
-                replaced INTEGER DEFAULT 0, \
+                foreign_input TEXT, \
                 details TEXT \
             ) STRICT;",
             Self::TX_EVENTS_TABLE_NAME,
@@ -109,7 +108,7 @@ impl TxEvent {
 
     pub fn all(db_tx: &rusqlite::Transaction, txid: Txid) -> rusqlite::Result<Vec<Self>> {
         let stmt = db_tx.prepare(&format!(
-            "SELECT type, space, bid_spends, replaced, details
+            "SELECT type, space, foreign_input, details
          FROM {} WHERE txid = ?1",
             Self::TX_EVENTS_TABLE_NAME,
         ))?;
@@ -118,11 +117,55 @@ impl TxEvent {
 
     pub fn bids(db_tx: &rusqlite::Transaction, space: String) -> rusqlite::Result<Vec<Self>> {
         let stmt = db_tx.prepare(&format!(
-            "SELECT type, space, bid_spends, replaced, details
+            "SELECT type, space, foreign_input, details
          FROM {} WHERE type = 'bid' AND space = ?1",
             Self::TX_EVENTS_TABLE_NAME,
         ))?;
         Self::from_sqlite_statement(stmt, [space])
+    }
+
+    pub fn filter_bids(
+        db_tx: &rusqlite::Transaction,
+        txids: Vec<Txid>,
+    ) -> rusqlite::Result<Vec<(Txid, OutPoint)>> {
+        if txids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let query_placeholders = txids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+
+        let mut stmt = db_tx.prepare(&format!(
+            "SELECT txid, foreign_input
+         FROM {}
+         WHERE foreign_input IS NOT NULL AND type = 'bid' AND txid IN ({})",
+            Self::TX_EVENTS_TABLE_NAME,
+            query_placeholders
+        ))?;
+
+        let rows = stmt.query_map(
+            rusqlite::params_from_iter(txids.into_iter().map(|t| Impl(t))),
+            |row| {
+                let txid: Impl<Txid> = row.get(0)?;
+                let foreign_input: Option<Impl<OutPoint>> = row.get(1)?;
+                Ok((txid, foreign_input.map(|x| x.0).unwrap()))
+            },
+        )?;
+        let mut results = Vec::new();
+        for row in rows {
+            if let Ok((txid, outpoint)) = row {
+                results.push((txid.0, outpoint));
+            }
+        }
+        Ok(results)
+    }
+
+    pub fn all_bid_txs(db_tx: &rusqlite::Transaction, txid: Txid) -> rusqlite::Result<Option<Self>> {
+        let stmt = db_tx.prepare(&format!(
+            "SELECT type, space, foreign_input, details
+         FROM {} WHERE type = 'bid' AND txid = ?1",
+            Self::TX_EVENTS_TABLE_NAME,
+        ))?;
+        let results: Vec<Self> = Self::from_sqlite_statement(stmt, [Impl(txid)])?;
+        Ok(results.get(0).cloned())
     }
 
     pub fn spaces(db_tx: &rusqlite::Transaction) -> rusqlite::Result<Vec<String>> {
@@ -151,20 +194,18 @@ impl TxEvent {
             Ok((
                 row.get::<_, TxEventKind>("type")?,
                 row.get::<_, Option<String>>("space")?,
-                row.get::<_, Option<Impl<OutPoint>>>("bid_spends")?,
-                row.get::<_, bool>("replaced")?,
+                row.get::<_, Option<Impl<OutPoint>>>("foreign_input")?,
                 row.get::<_, Option<Impl<serde_json::Value>>>("details")?,
             ))
         })?;
 
         let mut events = Vec::new();
         for row in row_iter {
-            let (event_type, space, bid_spends, replaced, details) = row?;
+            let (event_type, space, foreign_input, details) = row?;
             events.push(TxEvent {
                 kind: event_type,
                 space,
-                bid_spends: bid_spends.map(|x| x.0),
-                replaced,
+                foreign_input: foreign_input.map(|x| x.0),
                 details: details.map(|x| x.0),
             })
         }
@@ -177,13 +218,12 @@ impl TxEvent {
         txid: Txid,
         kind: TxEventKind,
         space: Option<String>,
-        bid_spends: Option<OutPoint>,
-        replaced: bool,
+        foreign_input: Option<OutPoint>,
         details: Option<serde_json::Value>,
     ) -> rusqlite::Result<usize> {
         let query = format!(
-            "INSERT INTO {} (txid, type, space, bid_spends, replaced, details)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO {} (txid, type, space, foreign_input, details)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
             Self::TX_EVENTS_TABLE_NAME,
         );
 
@@ -193,8 +233,7 @@ impl TxEvent {
                 txid.to_string(),
                 kind,
                 space,
-                bid_spends.map(|b| b.to_string()),
-                replaced as i32,
+                foreign_input.map(|b| b.to_string()),
                 details.map(|d| d.to_string())
             ],
         )?;
@@ -223,8 +262,7 @@ impl TxRecord {
         self.events.push(TxEvent {
             kind: TxEventKind::FeeBump,
             space: None,
-            bid_spends: None,
-            replaced: false,
+            foreign_input: None,
             details: None,
         });
     }
@@ -233,8 +271,7 @@ impl TxRecord {
         self.events.push(TxEvent {
             kind: TxEventKind::Transfer,
             space: Some(space),
-            bid_spends: None,
-            replaced: false,
+            foreign_input: None,
             details: Some(serde_json::to_value(TransferEventDetails { to }).expect("json value")),
         });
     }
@@ -243,8 +280,7 @@ impl TxRecord {
         self.events.push(TxEvent {
             kind: TxEventKind::Bidout,
             space: None,
-            bid_spends: None,
-            replaced: false,
+            foreign_input: None,
             details: Some(serde_json::to_value(BidoutEventDetails { count }).expect("json value")),
         });
     }
@@ -258,8 +294,7 @@ impl TxRecord {
         self.events.push(TxEvent {
             kind: TxEventKind::Send,
             space: None,
-            bid_spends: None,
-            replaced: false,
+            foreign_input: None,
             details: Some(
                 serde_json::to_value(SendEventDetails {
                     to_space,
@@ -281,8 +316,7 @@ impl TxRecord {
         self.events.push(TxEvent {
             kind: TxEventKind::Commit,
             space: Some(space),
-            bid_spends: None,
-            replaced: false,
+            foreign_input: None,
             details: Some(
                 serde_json::to_value(CommitEventDetails {
                     reveal_script_pubkey: protocol::Bytes::new(reveal_address.to_bytes()),
@@ -297,8 +331,7 @@ impl TxRecord {
         self.events.push(TxEvent {
             kind: TxEventKind::Open,
             space: Some(space),
-            bid_spends: None,
-            replaced: false,
+            foreign_input: None,
             details: Some(
                 serde_json::to_value(OpenEventDetails {
                     bid_initial: initial_bid,
@@ -313,8 +346,7 @@ impl TxRecord {
         self.events.push(TxEvent {
             kind: TxEventKind::Script,
             space: Some(space),
-            bid_spends: None,
-            replaced: false,
+            foreign_input: None,
             details: Some(
                 serde_json::to_value(ExecuteEventDetails {
                     space_script_input_index: reveal_input_index,
@@ -324,7 +356,7 @@ impl TxRecord {
         });
     }
 
-    pub fn add_bid(&mut self, previous: &FullSpaceOut, amount: Amount) {
+    pub fn add_bid(&mut self, wallet: &mut SpacesWallet, previous: &FullSpaceOut, amount: Amount) {
         let space = previous.spaceout.space.as_ref().expect("space not found");
         let previous_bid = match space.covenant {
             Covenant::Bid { total_burned, .. } => total_burned,
@@ -333,8 +365,10 @@ impl TxRecord {
         self.events.push(TxEvent {
             kind: TxEventKind::Bid,
             space: Some(space.name.to_string()),
-            bid_spends: None,
-            replaced: false,
+            foreign_input: match wallet.is_mine(previous.spaceout.script_pubkey.clone()) {
+                false => Some(previous.outpoint()),
+                true => None
+            },
             details: Some(
                 serde_json::to_value(BidEventDetails {
                     bid_current: amount,
@@ -374,7 +408,7 @@ mod tests {
         let space = Some("test_space".to_string());
         let details = Some(json!({"amount": 1000, "currency": "USD"}));
 
-        TxEvent::insert(&tx, txid, kind, space.clone(), None, true, details.clone())?;
+        TxEvent::insert(&tx, txid, kind, space.clone(), None, details.clone())?;
 
         // Commit the transaction
         tx.commit()?;
@@ -389,7 +423,6 @@ mod tests {
         assert_eq!(inserted_events.len(), 1);
         let event = &inserted_events[0];
         assert_eq!(event.space, space);
-        assert_eq!(event.replaced, true);
         assert_eq!(event.details, details);
 
         let mut conn = Connection::open(&db_path)?;

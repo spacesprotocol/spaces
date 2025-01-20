@@ -8,21 +8,11 @@ use std::{
 
 use anyhow::{anyhow, Context};
 use bdk_wallet::{chain, chain::BlockId, coin_selection::{CoinSelectionAlgorithm, CoinSelectionResult, Excess, InsufficientFunds}, rusqlite::Connection, tx_builder::TxOrdering, AddressInfo, KeychainKind, LocalOutput, PersistedWallet, SignOptions, TxBuilder, Wallet, WalletTx, WeightedUtxo};
-use bdk_wallet::chain::{local_chain};
+use bdk_wallet::chain::{local_chain, ChainPosition, Indexer};
 use bdk_wallet::chain::local_chain::LocalChain;
 use bdk_wallet::chain::tx_graph::CalculateFeeError;
 use bincode::config;
-use bitcoin::{
-    absolute::{Height, LockTime},
-    key::rand::RngCore,
-    psbt::raw::ProprietaryKey,
-    script,
-    sighash::{Prevouts, SighashCache},
-    taproot,
-    taproot::LeafVersion,
-    Amount, Block, BlockHash, FeeRate, Network, OutPoint, Psbt, Sequence, TapLeafHash,
-    TapSighashType, Transaction, TxOut, Txid, Weight, Witness,
-};
+use bitcoin::{absolute::{Height, LockTime}, key::rand::RngCore, psbt::raw::ProprietaryKey, script, sighash::{Prevouts, SighashCache}, taproot, taproot::LeafVersion, Amount, Block, BlockHash, FeeRate, Network, OutPoint, Psbt, Sequence, TapLeafHash, TapSighashType, Transaction, TxOut, Txid, Weight, Witness};
 use protocol::{bitcoin::{
     constants::genesis_block,
     key::{rand, UntweakedKeypair},
@@ -129,6 +119,10 @@ pub struct WalletDescriptors {
     pub internal: String,
 }
 
+pub trait Mempool {
+    fn in_mempool(&self, txid: &Txid) -> anyhow::Result<bool>;
+}
+
 impl SpacesWallet {
     pub fn name(&self) -> &str {
         &self.config.name
@@ -202,7 +196,7 @@ impl SpacesWallet {
 
     pub fn build_tx(&mut self, confirmed_only: bool)
                     -> anyhow::Result<TxBuilder<SpacesAwareCoinSelection>> {
-        self.configure_builder(None, confirmed_only)
+        self.create_builder(None, confirmed_only)
     }
 
     pub fn next_unused_address(&mut self, keychain_kind: KeychainKind) -> AddressInfo {
@@ -219,7 +213,8 @@ impl SpacesWallet {
     }
 
     pub fn transactions(&self) -> impl Iterator<Item=WalletTx> + '_ {
-        self.internal.transactions()
+        self.internal.transactions().filter(|tx| !is_revert_tx(tx) &&
+            self.internal.spk_index().is_tx_relevant(&tx.tx_node))
     }
 
     pub fn sent_and_received(&self, tx: &Transaction) -> (Amount, Amount) {
@@ -231,14 +226,15 @@ impl SpacesWallet {
     }
 
     pub fn build_fee_bump(&mut self, txid: Txid, fee_rate: FeeRate) -> anyhow::Result<TxBuilder<'_, SpacesAwareCoinSelection>> {
-        self.configure_builder(Some((txid, fee_rate)), false)
+        self.create_builder(Some((txid, fee_rate)), false)
     }
 
-    fn configure_builder(
+    fn create_builder(
         &mut self,
         replace: Option<(Txid, FeeRate)>,
         confirmed_only: bool,
     ) -> anyhow::Result<TxBuilder<'_, SpacesAwareCoinSelection>> {
+        // TODO: fill excluded
         let selection = SpacesAwareCoinSelection::new(vec![], confirmed_only);
 
         let mut builder = match replace {
@@ -279,7 +275,6 @@ impl SpacesWallet {
                 space: None,
                 is_spaceout: false,
             };
-
             let result = store.get_spaceout(&details.output.outpoint)?;
             if let Some(spaceout) = result {
                 details.is_spaceout = true;
@@ -288,6 +283,59 @@ impl SpacesWallet {
             wallet_outputs.push(details)
         }
         Ok(wallet_outputs)
+    }
+
+    /// Checks the mempool for dropped bid transactions and reverts them in the wallet’s Tx graph,
+    /// reclaiming any "stuck" funds. This is necessary because continuously scanning the entire
+    /// mainnet mempool would be resource-intensive to fetch from Bitcoin Core RPC.
+    pub fn update_unconfirmed_bids(&mut self, mem: impl Mempool, data_source: &mut impl DataSource) -> anyhow::Result<Vec<Txid>> {
+        let unconfirmed_bids = self.unconfirmed_bids()?;
+        let mut revert_txs = Vec::new();
+        for (bid, outpoint) in unconfirmed_bids {
+            let in_mempool = mem.in_mempool(&bid.tx_node.txid)?;
+            if in_mempool {
+                continue;
+            }
+            // bid dropped from mempool perhaps it was confirmed?
+            if data_source.get_spaceout(&outpoint)?.is_none() {
+                continue;
+            }
+            if let Some((revert, seen)) = revert_unconfirmed_bid_tx(&bid, outpoint) {
+                revert_txs.push((bid.tx_node.txid, revert, seen));
+            }
+        }
+
+        let mut txids = Vec::with_capacity(revert_txs.len());
+        for (original, revert_tx, last_seen) in revert_txs {
+            txids.push(original);
+            self.apply_unconfirmed_tx(revert_tx, last_seen);
+        }
+        Ok(txids)
+    }
+
+    /// Returns all unconfirmed bid transactions in the wallet
+    /// and any foreign outputs they're spending.
+    ///
+    /// This is used to monitor bid txs in the mempool
+    /// to check if they have been replaced.
+    pub fn unconfirmed_bids(&mut self) -> anyhow::Result<Vec<(WalletTx, OutPoint)>> {
+        let txids: Vec<_> = {
+            let unconfirmed: Vec<_> = self.transactions()
+                .filter(|x| !x.chain_position.is_confirmed()).collect();
+            unconfirmed.iter().map(|x| x.tx_node.txid).collect()
+        };
+        let bid_txids = {
+            let db_tx = self.connection.transaction()?;
+            TxEvent::filter_bids(&db_tx, txids)?
+        };
+        let bid_txs: Vec<_> = self.transactions()
+            .filter(|tx| !tx.chain_position.is_confirmed())
+            .filter_map(|tx| {
+                bid_txids.iter().find(|(bid_txid, _)| *bid_txid == tx.tx_node.txid).map(|(_, bid_outpoint)| {
+                    (tx, *bid_outpoint)
+                })
+            }).collect();
+        Ok(bid_txs)
     }
 
     pub fn get_tx_events(&mut self, txid: Txid) -> anyhow::Result<Vec<TxEvent>> {
@@ -365,8 +413,7 @@ impl SpacesWallet {
                 txid,
                 event.kind,
                 event.space,
-                event.bid_spends,
-                event.replaced,
+                event.foreign_input,
                 event.details,
             ).context("could not insert tx event into wallet db")?;
         }
@@ -738,6 +785,37 @@ impl CoinSelectionAlgorithm for RequiredUtxosOnlyCoinSelectionAlgorithm {
             },
         })
     }
+}
+
+/// Creates a dummy revert transaction double spending the foreign input
+/// to be applied to the wallet's tx graph
+fn revert_unconfirmed_bid_tx(bid: &WalletTx, foreign_outpoint: OutPoint) -> Option<(Transaction, u64)> {
+    let foreign_input =  bid.tx_node.input.iter()
+        .find(|input| input.previous_output == foreign_outpoint)?.clone();
+
+    let op_return_output = bid.tx_node.output.first()?.clone();
+    if !op_return_output.script_pubkey.is_op_return() {
+        return None
+    }
+    let revert_tx = Transaction {
+        version: bid.tx_node.version,
+        lock_time: bid.tx_node.lock_time,
+        input: vec![foreign_input],
+        output: vec![op_return_output],
+    };
+    let revert_tx_last_seen = match bid.chain_position {
+        ChainPosition::Confirmed { .. } => panic!("must be unconfirmed"),
+        ChainPosition::Unconfirmed { last_seen } =>
+            last_seen.map(|last_seen| last_seen + 1),
+    };
+    Some((revert_tx, revert_tx_last_seen.unwrap_or(1)))
+}
+
+fn is_revert_tx(tx: &WalletTx) -> bool {
+    !tx.chain_position.is_confirmed() &&
+        tx.tx_node.input.len() == 1 &&
+        tx.tx_node.output.len() == 1 &&
+        tx.tx_node.output[0].script_pubkey.is_op_return()
 }
 
 impl SpaceScriptSigningInfo {

@@ -240,7 +240,7 @@ impl<'a, Cs: CoinSelectionAlgorithm> TxBuilderSpacesUtils<'a, Cs> for TxBuilder<
             placeholder.auction.outpoint.vout as u8,
             &offer,
         )?)
-        .expect("compressed psbt script bytes");
+            .expect("compressed psbt script bytes");
 
         let carrier = ScriptBuf::new_op_return(&compressed_psbt);
 
@@ -464,7 +464,7 @@ impl Iterator for BuilderIterator<'_> {
                         return Some(Err(signing_info.unwrap_err()));
                     }
                     reveals.push(signing_info.unwrap());
-                    contexts.push( execute.context);
+                    contexts.push(execute.context);
                 }
 
                 let (tx, commitments) = match Builder::prepare_all(
@@ -476,7 +476,7 @@ impl Iterator for BuilderIterator<'_> {
                     params.sends.clone(),
                     self.fee_rate,
                     self.dust,
-                    self.confirmed_only
+                    self.confirmed_only,
                 ) {
                     Ok(prep) => prep,
                     Err(err) => return Some(Err(err)),
@@ -540,7 +540,7 @@ impl Iterator for BuilderIterator<'_> {
                             signing,
                             commitment,
                         },
-                        context
+                        context,
                     }))
                 }
 
@@ -591,7 +591,7 @@ impl Iterator for BuilderIterator<'_> {
                     for space in spaces {
                         detailed.add_execute(
                             space.space.spaceout.space.expect("space").name.to_string(),
-                            reveal_input_index
+                            reveal_input_index,
                         );
                     }
                     detailed
@@ -608,7 +608,7 @@ impl Iterator for BuilderIterator<'_> {
                 );
                 Some(tx.map(|tx| {
                     let mut detailed = TxRecord::new(tx);
-                    detailed.add_bid(&bid.space, bid.amount);
+                    detailed.add_bid(self.wallet, &bid.space, bid.amount);
                     detailed
                 }))
             }
@@ -683,13 +683,13 @@ impl Builder {
         self
     }
 
-    pub fn build_iter<'a>(
+    pub fn build_iter(
         self,
         dust: Option<Amount>,
         median_time: u64,
-        wallet: &'a mut SpacesWallet,
+        wallet: &mut SpacesWallet,
         confirmed_only: bool,
-    ) -> anyhow::Result<BuilderIterator<'a>> {
+    ) -> anyhow::Result<BuilderIterator> {
         let fee_rate = self
             .fee_rate
             .as_ref()
@@ -978,9 +978,9 @@ impl CoinSelectionAlgorithm for SpacesAwareCoinSelection {
 
             weighted_utxo.utxo.txout().value > SpacesAwareCoinSelection::DUST_THRESHOLD
                 && !self
-                    .exclude_outputs
-                    .iter()
-                    .any(|o| o.outpoint == weighted_utxo.utxo.outpoint())
+                .exclude_outputs
+                .iter()
+                .any(|o| o.outpoint == weighted_utxo.utxo.outpoint())
         });
 
         let mut result = self.default_algorithm.coin_select(

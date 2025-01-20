@@ -172,7 +172,7 @@ impl BitcoinRpc {
         let params = serde_json::json!([]);
         self.make_request("getblockchaininfo", params)
     }
-    pub fn get_mempool_entry(&self, txid: Txid) -> BitcoinRpcRequest {
+    pub fn get_mempool_entry(&self, txid: &Txid) -> BitcoinRpcRequest {
         let params = serde_json::json!([txid]);
 
         self.make_request("getmempoolentry", params)
@@ -824,7 +824,7 @@ impl BlockSource for BitcoinBlockSource {
         ))
     }
 
-    fn in_mempool(&self, txid: Txid) -> Result<bool, BitcoinRpcError> {
+    fn in_mempool(&self, txid: &Txid) -> Result<bool, BitcoinRpcError> {
         let result: Result<Value, _> = self
             .rpc
             .send_json_blocking(&self.client, &self.rpc.get_mempool_entry(txid));

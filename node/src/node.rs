@@ -25,7 +25,7 @@ pub trait BlockSource {
     fn get_block_hash(&self, height: u32) -> Result<BlockHash, BitcoinRpcError>;
     fn get_block(&self, hash: &BlockHash) -> Result<Block, BitcoinRpcError>;
     fn get_median_time(&self) -> Result<u64, BitcoinRpcError>;
-    fn in_mempool(&self, txid: Txid) -> Result<bool, BitcoinRpcError>;
+    fn in_mempool(&self, txid: &Txid) -> Result<bool, BitcoinRpcError>;
     fn get_block_count(&self) -> Result<u64, BitcoinRpcError>;
     fn get_best_chain(&self) -> Result<ChainAnchor, BitcoinRpcError>;
 }

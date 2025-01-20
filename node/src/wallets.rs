@@ -3,7 +3,6 @@ use std::{
     str::FromStr,
     time::{Duration},
 };
-
 use anyhow::anyhow;
 use clap::ValueEnum;
 use futures::{stream::FuturesUnordered, StreamExt};
@@ -22,6 +21,7 @@ use tokio::{
     select,
     sync::{broadcast, mpsc, mpsc::Receiver, oneshot},
 };
+use tokio::time::Instant;
 use wallet::{address::SpaceAddress, bdk_wallet::{
     chain::{local_chain::CheckPoint, BlockId},
     KeychainKind,
@@ -36,6 +36,10 @@ use crate::{
     },
     store::{ChainState, LiveSnapshot, Sha256},
 };
+
+const MEMPOOL_CHECK_INTERVAL: Duration = Duration::from_millis(
+    if cfg!(debug_assertions) { 500 } else { 10_000 }
+);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TxResponse {
@@ -113,6 +117,14 @@ pub enum AddressKind {
 #[derive(Clone)]
 pub struct RpcWallet {
     pub sender: mpsc::Sender<WalletCommand>,
+}
+
+pub struct MempoolChecker<'a>(&'a BitcoinBlockSource);
+
+impl wallet::Mempool for MempoolChecker<'_> {
+    fn in_mempool(&self, txid: &Txid) -> anyhow::Result<bool> {
+        Ok(self.0.in_mempool(txid)?)
+    }
 }
 
 impl RpcWallet {
@@ -218,10 +230,15 @@ impl RpcWallet {
         mut state: &mut LiveSnapshot,
         wallet: &mut SpacesWallet,
         command: WalletCommand,
+        synced: bool,
     ) -> anyhow::Result<()> {
         match command {
             WalletCommand::GetInfo { resp } => _ = resp.send(Ok(wallet.get_info())),
             WalletCommand::BatchTx { request, resp } => {
+                if !synced && !request.force {
+                    _ = resp.send(Err(anyhow::anyhow!("Wallet is syncing")));
+                    return Ok(());
+                }
                 let batch_result = Self::batch_tx(network, &source, wallet, &mut state, request);
                 _ = resp.send(batch_result);
             }
@@ -231,6 +248,10 @@ impl RpcWallet {
                 skip_tx_check,
                 resp,
             } => {
+                if !synced {
+                    _ = resp.send(Err(anyhow::anyhow!("Wallet is syncing")));
+                    return Ok(());
+                }
                 let result = Self::handle_fee_bump(
                     source,
                     &mut state,
@@ -286,6 +307,10 @@ impl RpcWallet {
                 _ = resp.send(result);
             }
             WalletCommand::GetBalance { resp } => {
+                if !synced {
+                    _ = resp.send(Err(anyhow::anyhow!("Wallet is syncing")));
+                    return Ok(());
+                }
                 let balance = wallet.balance();
                 _ = resp.send(balance);
             }
@@ -294,6 +319,26 @@ impl RpcWallet {
             }
         }
         Ok(())
+    }
+
+    /// Returns true if Bitcoin, protocol, and wallet tips match.
+    fn all_synced(bitcoin: &BitcoinBlockSource, protocol: &mut LiveSnapshot, wallet: &SpacesWallet) -> bool {
+        let bitcoin_tip = match bitcoin.get_best_chain() {
+            Ok(tip) => tip,
+            Err(e) => {
+                warn!("Sync check failed: {}", e);
+                return false;
+            }
+        };
+        let wallet_tip = wallet.local_chain().tip();
+        let protocol_tip = match protocol.tip.read() {
+            Ok(tip) => tip.clone(),
+            Err(e) => {
+                warn!("Failed to read protocol tip: {}", e);
+                return false;
+            }
+        };
+        protocol_tip.hash == wallet_tip.hash() && protocol_tip.hash == bitcoin_tip.hash
     }
 
     fn wallet_sync(
@@ -316,18 +361,23 @@ impl RpcWallet {
         };
 
         fetcher.start(wallet_tip);
-
+        let mut synced_at_least_once = false;
+        let mut last_mempool_check = Instant::now();
         loop {
             if shutdown.try_recv().is_ok() {
                 info!("Shutting down wallet sync");
                 break;
             }
+
             if let Ok(command) = commands.try_recv() {
-                Self::wallet_handle_commands(network, &source, &mut state, &mut wallet, command)?;
+                let synced = Self::all_synced(&source, &mut state, &wallet);
+                Self::wallet_handle_commands(network, &source, &mut state, &mut wallet, command, synced)?;
             }
             if let Ok(event) = receiver.try_recv() {
                 match event {
-                    BlockEvent::Tip(_) => {}
+                    BlockEvent::Tip(_) => {
+                        synced_at_least_once = true;
+                    }
                     BlockEvent::Block(id, block) => {
                         wallet.apply_block_connected_to(
                             id.height,
@@ -337,22 +387,6 @@ impl RpcWallet {
                                 hash: wallet_tip.hash,
                             },
                         )?;
-
-                        // // Temporary fix for https://github.com/bitcoindevkit/bdk/issues/1740
-                        // for tx in block.txdata {
-                        //     for input in tx.input.iter() {
-                        //         if wallet.watch_bid_spends.contains(&input.previous_output) {
-                        //             if wallet.spaces.get_tx(tx.compute_txid()).is_some() {
-                        //                 break;
-                        //             }
-                        //             wallet.insert_tx(tx, ConfirmationTime::Confirmed {
-                        //                 height: id.height,
-                        //                 time: block.header.time as _,
-                        //             })?;
-                        //             break;
-                        //         }
-                        //     }
-                        // }
 
                         wallet_tip.height = id.height;
                         wallet_tip.hash = id.hash;
@@ -410,7 +444,19 @@ impl RpcWallet {
                 continue;
             }
 
-            // TODO: update wallet mempool
+            if synced_at_least_once &&
+                last_mempool_check.elapsed() > MEMPOOL_CHECK_INTERVAL &&
+                Self::all_synced(&source, &mut state, &wallet) {
+                let mem = MempoolChecker(&source);
+                match wallet.update_unconfirmed_bids(mem, &mut state) {
+                    Ok(txids) => for txid in txids {
+                        info!("Dropped {} unconfirmed bid due to potential replacement", txid);
+                    }
+                    Err(err) =>
+                        warn!("Could not check for unconfirmed bids in mempool: {}", err),
+                }
+                last_mempool_check = Instant::now();
+            }
             std::thread::sleep(Duration::from_millis(10));
         }
 
@@ -571,13 +617,13 @@ impl RpcWallet {
                         match store.get_space_info(&spacehash)? {
                             None => return Err(anyhow!("sendspaces: you don't own `{}`", space)),
                             Some(full)
-                                if full.spaceout.space.is_none()
-                                    || !full.spaceout.space.as_ref().unwrap().is_owned()
-                                    || !wallet
-                                        .is_mine(full.spaceout.script_pubkey.clone()) =>
-                            {
-                                return Err(anyhow!("sendspaces: you don't own `{}`", space));
-                            }
+                            if full.spaceout.space.is_none()
+                                || !full.spaceout.space.as_ref().unwrap().is_owned()
+                                || !wallet
+                                .is_mine(full.spaceout.script_pubkey.clone()) =>
+                                {
+                                    return Err(anyhow!("sendspaces: you don't own `{}`", space));
+                                }
                             Some(full) => {
                                 builder = builder.add_transfer(SpaceTransfer {
                                     space: full,
