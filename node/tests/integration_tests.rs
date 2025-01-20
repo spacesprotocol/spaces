@@ -149,6 +149,21 @@ async fn it_should_allow_outbidding(rig: &TestRig) -> anyhow::Result<()> {
     Ok(())
 }
 
+
+async fn it_should_insert_txout_for_bids(rig: &TestRig) -> anyhow::Result<()> {
+    rig.wait_until_synced().await?;
+    rig.wait_until_wallet_synced(BOB).await?;
+
+    let tx = rig.spaced.client
+        .wallet_list_transactions(BOB, 10, 0).await?.iter()
+        .filter(|tx| tx.events.iter().any(|event| event.kind == TxEventKind::Bid))
+        .next()
+        .expect("a bid").clone();
+
+    assert!(tx.fee.is_some(), "must be able to calculate fees");
+    Ok(())
+}
+
 /// Eve makes an invalid bid with a burn increment of 0 only refunding Bob's money
 async fn it_should_only_accept_forced_zero_value_bid_increments_and_revoke(
     rig: &TestRig,
@@ -658,7 +673,7 @@ async fn it_should_replace_mempool_bids(rig: &TestRig) -> anyhow::Result<()> {
 
     assert!(
         txs.iter().all(|tx| tx.txid != eve_replacement_txid),
-            "Eve's tx shouldn't be listed in Alice's wallet"
+        "Eve's tx shouldn't be listed in Alice's wallet"
     );
     Ok(())
 }
@@ -727,14 +742,15 @@ async fn run_auction_tests() -> anyhow::Result<()> {
     load_wallet(&rig, wallets_path.clone(), BOB).await?;
     load_wallet(&rig, wallets_path, EVE).await?;
 
-    it_should_open_a_space_for_auction(&rig).await?;
-    it_should_allow_outbidding(&rig).await?;
-    it_should_only_accept_forced_zero_value_bid_increments_and_revoke(&rig).await?;
-    it_should_allow_claim_on_or_after_claim_height(&rig).await?;
-    it_should_allow_batch_transfers_refreshing_expire_height(&rig).await?;
-    it_should_allow_applying_script_in_batch(&rig).await?;
-    it_should_replace_mempool_bids(&rig).await?;
-    it_should_maintain_locktime_when_fee_bumping(&rig).await?;
+    it_should_open_a_space_for_auction(&rig).await.expect("should open auction");
+    it_should_allow_outbidding(&rig).await.expect("should allow outbidding");
+    it_should_insert_txout_for_bids(&rig).await.expect("should insert txout");
+    it_should_only_accept_forced_zero_value_bid_increments_and_revoke(&rig).await.expect("should only revoke a bid");
+    it_should_allow_claim_on_or_after_claim_height(&rig).await.expect("should allow claim on or above height");
+    it_should_allow_batch_transfers_refreshing_expire_height(&rig).await.expect("should allow batch transfers refresh expire height");
+    it_should_allow_applying_script_in_batch(&rig).await.expect("should allow batch applying script");
+    it_should_replace_mempool_bids(&rig).await.expect("should replace mempool bids");
+    it_should_maintain_locktime_when_fee_bumping(&rig).await.expect("should maintain locktime");
 
     Ok(())
 }

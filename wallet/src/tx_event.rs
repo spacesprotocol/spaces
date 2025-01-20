@@ -7,7 +7,7 @@ use bdk_wallet::{
         ToSql,
     },
 };
-use bitcoin::{Amount, OutPoint, ScriptBuf, Transaction, Txid};
+use bitcoin::{Amount, OutPoint, ScriptBuf, Transaction, TxOut, Txid};
 use serde::{Deserialize, Serialize};
 use protocol::{Covenant, FullSpaceOut};
 use crate::rusqlite_impl::{migrate_schema, Impl};
@@ -17,6 +17,7 @@ use crate::SpacesWallet;
 pub struct TxRecord {
     pub tx: Transaction,
     pub events: Vec<TxEvent>,
+    pub txouts: Vec<(OutPoint, TxOut)>
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -245,16 +246,14 @@ impl TxEvent {
 
 impl TxRecord {
     pub fn new(tx: Transaction) -> Self {
-        Self {
-            events: Vec::new(),
-            tx,
-        }
+        Self::new_with_events(tx, vec![])
     }
 
     pub fn new_with_events(tx: Transaction, events: Vec<TxEvent>) -> Self {
         Self {
             events,
             tx,
+            txouts: vec![],
         }
     }
 
@@ -362,13 +361,22 @@ impl TxRecord {
             Covenant::Bid { total_burned, .. } => total_burned,
             _ => panic!("expected a bid"),
         };
+        let foreign_input = match wallet.is_mine(previous.spaceout.script_pubkey.clone()) {
+            false => Some(previous.outpoint()),
+            true => None
+        };
+
+        if foreign_input.is_some() {
+            self.txouts.push((previous.outpoint(), TxOut {
+                value: previous.spaceout.value,
+                script_pubkey: previous.spaceout.script_pubkey.clone(),
+            }))
+        }
+
         self.events.push(TxEvent {
             kind: TxEventKind::Bid,
             space: Some(space.name.to_string()),
-            foreign_input: match wallet.is_mine(previous.spaceout.script_pubkey.clone()) {
-                false => Some(previous.outpoint()),
-                true => None
-            },
+            foreign_input,
             details: Some(
                 serde_json::to_value(BidEventDetails {
                     bid_current: amount,

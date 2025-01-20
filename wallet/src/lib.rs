@@ -405,6 +405,11 @@ impl SpacesWallet {
         let txid = tx_record.tx.compute_txid();
         self.apply_unconfirmed_tx(tx_record.tx, seen);
 
+        // Insert txouts for foreign inputs to be able to calculate fees
+        for (outpoint, txout) in tx_record.txouts {
+            self.internal.insert_txout(outpoint, txout);
+        }
+
         let db_tx = self.connection.transaction()
             .context("could not create wallet db transaction")?;
         for event in tx_record.events {
