@@ -6,7 +6,7 @@ use std::{
 use anyhow::anyhow;
 use clap::ValueEnum;
 use futures::{stream::FuturesUnordered, StreamExt};
-use log::{error, info, warn};
+use log::{info, warn};
 use protocol::{
     bitcoin::Txid,
     constants::ChainAnchor,
@@ -22,7 +22,6 @@ use tokio::{
     sync::{broadcast, mpsc, mpsc::Receiver, oneshot},
 };
 use tokio::time::Instant;
-use protocol::bitcoin::BlockHash;
 use wallet::{address::SpaceAddress, bdk_wallet::{
     chain::{local_chain::CheckPoint, BlockId},
     KeychainKind,
