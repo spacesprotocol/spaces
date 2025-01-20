@@ -101,13 +101,18 @@ async fn it_should_allow_outbidding(rig: &TestRig) -> anyhow::Result<()> {
     let alices_balance_updated = rig.spaced.client.wallet_get_balance(ALICE).await?;
 
     assert_eq!(
-        alices_spaces.len() - 1,
-        alice_spaces_updated.len(),
+        alices_spaces.winning.len() - 1,
+        alice_spaces_updated.winning.len(),
         "alice must have one less space"
     );
+    // assert_eq!(
+    //     alices_spaces.outbid.len() + 1,
+    //     alice_spaces_updated.outbid.len(),
+    //     "alice must have one less space"
+    // );
     assert_eq!(
-        bobs_spaces.len() + 1,
-        bob_spaces_updated.len(),
+        bobs_spaces.winning.len() + 1,
+        bob_spaces_updated.winning.len(),
         "bob must have a new space"
     );
     assert_eq!(
@@ -254,8 +259,8 @@ async fn it_should_only_accept_forced_zero_value_bid_increments_and_revoke(
     let eve_spaces_updated = rig.spaced.client.wallet_list_spaces(EVE).await?;
 
     assert_eq!(
-        bob_spaces.len() - 1,
-        bob_spaces_updated.len(),
+        bob_spaces.winning.len() - 1,
+        bob_spaces_updated.winning.len(),
         "bob must have one less space"
     );
     assert_eq!(
@@ -264,8 +269,8 @@ async fn it_should_only_accept_forced_zero_value_bid_increments_and_revoke(
         "alice must be refunded this exact amount"
     );
     assert_eq!(
-        eve_spaces_updated.len(),
-        eve_spaces.len(),
+        eve_spaces_updated.winning.len(),
+        eve_spaces.winning.len(),
         "eve must have the same number of spaces"
     );
 
@@ -319,7 +324,7 @@ async fn it_should_allow_claim_on_or_after_claim_height(rig: &TestRig) -> anyhow
     rig.wait_until_wallet_synced(wallet).await?;
     let all_spaces_2 = rig.spaced.client.wallet_list_spaces(wallet).await?;
 
-    assert_eq!(all_spaces.len(), all_spaces_2.len(), "must be equal");
+    assert_eq!(all_spaces.owned.len() + 1, all_spaces_2.owned.len(), "must be equal");
 
     let space = rig
         .spaced
@@ -343,14 +348,9 @@ async fn it_should_allow_batch_transfers_refreshing_expire_height(
     rig.wait_until_synced().await?;
     let all_spaces = rig.spaced.client.wallet_list_spaces(ALICE).await?;
     let registered_spaces: Vec<_> = all_spaces
+        .owned
         .iter()
-        .filter_map(|s| {
-            let space = s.space.as_ref().expect("space");
-            match space.covenant {
-                Covenant::Transfer { .. } => Some(space.name.to_string()),
-                _ => None,
-            }
-        })
+        .map(|out| out.spaceout.space.as_ref().expect("space").name.to_string())
         .collect();
 
     let space_address = rig
@@ -380,14 +380,12 @@ async fn it_should_allow_batch_transfers_refreshing_expire_height(
     rig.wait_until_wallet_synced(ALICE).await?;
     let all_spaces_2 = rig.spaced.client.wallet_list_spaces(ALICE).await?;
 
-    assert_eq!(all_spaces.len(), all_spaces_2.len(), "must be equal");
+    assert_eq!(all_spaces.owned.len(), all_spaces_2.owned.len(), "must be equal");
 
-    let mut count = 0;
-    all_spaces_2.iter().for_each(|s| {
-        let space = s.space.as_ref().expect("space");
+    let _ = all_spaces_2.owned.iter().for_each(|s| {
+        let space = s.spaceout.space.as_ref().expect("space");
         match space.covenant {
             Covenant::Transfer { expire_height, .. } => {
-                count += 1;
                 assert_eq!(
                     expire_height, expected_expire_height,
                     "must refresh expire height"
@@ -396,14 +394,10 @@ async fn it_should_allow_batch_transfers_refreshing_expire_height(
             _ => {}
         }
     });
+
     assert_eq!(
-        count,
-        registered_spaces.len(),
-        "must keep the exact number of registered spaces"
-    );
-    assert_eq!(
-        all_spaces.len(),
-        all_spaces_2.len(),
+        all_spaces.winning.len(),
+        all_spaces_2.winning.len(),
         "shouldn't change number of held spaces"
     );
 
@@ -414,16 +408,8 @@ async fn it_should_allow_applying_script_in_batch(rig: &TestRig) -> anyhow::Resu
     rig.wait_until_wallet_synced(ALICE).await?;
     rig.wait_until_synced().await?;
     let all_spaces = rig.spaced.client.wallet_list_spaces(ALICE).await?;
-    let registered_spaces: Vec<_> = all_spaces
-        .iter()
-        .filter_map(|s| {
-            let space = s.space.as_ref().expect("space");
-            match space.covenant {
-                Covenant::Transfer { .. } => Some(space.name.to_string()),
-                _ => None,
-            }
-        })
-        .collect();
+    let registered_spaces: Vec<_> = all_spaces.owned.iter().map(|out|
+        out.spaceout.space.as_ref().expect("space").name.to_string()).collect();
 
     let result = wallet_do(
         rig,
@@ -452,17 +438,16 @@ async fn it_should_allow_applying_script_in_batch(rig: &TestRig) -> anyhow::Resu
     rig.wait_until_wallet_synced(ALICE).await?;
     let all_spaces_2 = rig.spaced.client.wallet_list_spaces(ALICE).await?;
 
-    assert_eq!(all_spaces.len(), all_spaces_2.len(), "must be equal");
+    assert_eq!(all_spaces.owned.len(), all_spaces_2.owned.len(), "must be equal");
+    assert_eq!(all_spaces.winning.len(), all_spaces_2.winning.len(), "must be equal");
 
-    let mut count = 0;
-    all_spaces_2.iter().for_each(|s| {
-        let space = s.space.as_ref().expect("space");
+    all_spaces_2.owned.iter().for_each(|s| {
+        let space = s.spaceout.space.as_ref().expect("space");
         match &space.covenant {
             Covenant::Transfer {
                 expire_height,
                 data,
             } => {
-                count += 1;
                 assert_eq!(
                     *expire_height, expected_expire_height,
                     "must refresh expire height"
@@ -477,17 +462,6 @@ async fn it_should_allow_applying_script_in_batch(rig: &TestRig) -> anyhow::Resu
             _ => {}
         }
     });
-    assert_eq!(
-        count,
-        registered_spaces.len(),
-        "must keep the exact number of registered spaces"
-    );
-    assert_eq!(
-        all_spaces.len(),
-        all_spaces_2.len(),
-        "shouldn't change number of held spaces"
-    );
-
     Ok(())
 }
 
@@ -911,15 +885,15 @@ async fn it_can_batch_txs(rig: &TestRig) -> anyhow::Result<()> {
     rig.wait_until_wallet_synced(BOB).await.expect("synced");
 
     let bob_spaces = rig.spaced.client.wallet_list_spaces(BOB).await.expect("bob spaces");
-    assert!(bob_spaces.iter().find(|output|
-        output.space.as_ref().is_some_and(|s| s.name.to_string() == "@test9996")).is_some(),
+    assert!(bob_spaces.owned.iter().find(|output|
+        output.spaceout.space.as_ref().is_some_and(|s| s.name.to_string() == "@test9996")).is_some(),
             "expected bob to own the space name"
     );
 
     let alice_spaces = rig.spaced.client.wallet_list_spaces(ALICE).await.expect("alice spaces");
-    let batch1 = alice_spaces.iter().find(|output|
-        output.space.as_ref().is_some_and(|s| s.name.to_string() == "@batch1"))
-        .expect("exists").space.clone().expect("space exists");
+    let batch1 = alice_spaces.winning.iter().find(|output|
+        output.spaceout.space.as_ref().is_some_and(|s| s.name.to_string() == "@batch1"))
+        .expect("exists").spaceout.space.clone().expect("space exists");
 
     match batch1.covenant {
         Covenant::Bid { total_burned, .. } => {
@@ -927,9 +901,9 @@ async fn it_can_batch_txs(rig: &TestRig) -> anyhow::Result<()> {
         }
         _ => panic!("must be a bid")
     }
-    let batch2 = alice_spaces.iter().find(|output|
-        output.space.as_ref().is_some_and(|s| s.name.to_string() == "@batch2"))
-        .expect("exists").space.clone().expect("space exists");
+    let batch2 = alice_spaces.winning.iter().find(|output|
+        output.spaceout.space.as_ref().is_some_and(|s| s.name.to_string() == "@batch2"))
+        .expect("exists").spaceout.space.clone().expect("space exists");
     match batch2.covenant {
         Covenant::Bid { total_burned, .. } => {
             assert_eq!(total_burned.to_sat(), 1000, "incorrect burn value")
@@ -942,9 +916,9 @@ async fn it_can_batch_txs(rig: &TestRig) -> anyhow::Result<()> {
         "@test9999".to_string(),
         "@test9998".to_string()
     ] {
-        let space = alice_spaces.iter().find(|output|
-            output.space.as_ref().is_some_and(|s| s.name.to_string() == space))
-            .expect("exists").space.clone().expect("space exists");
+        let space = alice_spaces.owned.iter().find(|output|
+            output.spaceout.space.as_ref().is_some_and(|s| s.name.to_string() == space))
+            .expect("exists").spaceout.space.clone().expect("space exists");
 
         match space.covenant {
             Covenant::Transfer { data, .. } => {
