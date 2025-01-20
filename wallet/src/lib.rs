@@ -4,7 +4,6 @@ use std::{
     fs,
     path::PathBuf,
 };
-
 use anyhow::{anyhow, Context};
 use bdk_wallet::{chain, chain::BlockId, coin_selection::{CoinSelectionAlgorithm, CoinSelectionResult, Excess, InsufficientFunds}, rusqlite::Connection, tx_builder::TxOrdering, AddressInfo, KeychainKind, LocalOutput, PersistedWallet, SignOptions, TxBuilder, Update, Wallet, WalletTx, WeightedUtxo};
 use bdk_wallet::chain::{ChainPosition, Indexer};
@@ -209,11 +208,6 @@ impl SpacesWallet {
         self.internal.get_utxo(outpoint)
     }
 
-    pub fn build_tx(&mut self, confirmed_only: bool)
-                    -> anyhow::Result<TxBuilder<SpacesAwareCoinSelection>> {
-        self.create_builder(None, confirmed_only)
-    }
-
     pub fn next_unused_address(&mut self, keychain_kind: KeychainKind) -> AddressInfo {
         self.internal.next_unused_address(keychain_kind)
     }
@@ -245,7 +239,22 @@ impl SpacesWallet {
         self.internal.calculate_fee(tx)
     }
 
-    pub fn build_fee_bump(&mut self, txid: Txid, fee_rate: FeeRate) -> anyhow::Result<TxBuilder<'_, SpacesAwareCoinSelection>> {
+    pub fn build_tx(&mut self, unspendables: Vec<OutPoint>, confirmed_only: bool)
+                    -> anyhow::Result<TxBuilder<SpacesAwareCoinSelection>> {
+        self.create_builder(unspendables, None, confirmed_only)
+    }
+
+    pub fn list_spaces_outpoints(&self, src: &mut impl DataSource) -> anyhow::Result<Vec<OutPoint>> {
+        let mut outs = Vec::new();
+        for unspent in self.list_unspent() {
+            if src.get_spaceout(&unspent.outpoint)?.and_then(|out| out.space).is_some() {
+                outs.push(unspent.outpoint);
+            }
+        }
+        Ok(outs)
+    }
+
+    pub fn build_fee_bump(&mut self, unspendables: Vec<OutPoint>, txid: Txid, fee_rate: FeeRate) -> anyhow::Result<TxBuilder<'_, SpacesAwareCoinSelection>> {
         let events = self.get_tx_events(txid)?;
         for event in events {
             match event.kind {
@@ -261,16 +270,18 @@ impl SpacesWallet {
             }
         }
 
-        self.create_builder(Some((txid, fee_rate)), false)
+        self.create_builder(unspendables, Some((txid, fee_rate)), false)
     }
 
     fn create_builder(
         &mut self,
+        unspendables: Vec<OutPoint>,
         replace: Option<(Txid, FeeRate)>,
         confirmed_only: bool,
     ) -> anyhow::Result<TxBuilder<'_, SpacesAwareCoinSelection>> {
-        // TODO: fill excluded
-        let selection = SpacesAwareCoinSelection::new(vec![], confirmed_only);
+        let selection = SpacesAwareCoinSelection::new(
+            unspendables, confirmed_only
+        );
 
         let mut builder = match replace {
             None => {
@@ -437,7 +448,6 @@ impl SpacesWallet {
     ) -> anyhow::Result<()> {
         self.internal
             .apply_block_connected_to(&block, height, block_id)?;
-
         Ok(())
     }
 

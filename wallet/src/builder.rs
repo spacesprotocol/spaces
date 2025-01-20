@@ -60,6 +60,7 @@ pub struct BuilderIterator<'a> {
     force: bool,
     median_time: u64,
     confirmed_only: bool,
+    unspendables: Vec<OutPoint>
 }
 
 pub enum BuilderStack {
@@ -324,6 +325,7 @@ impl Builder {
         reveals: Option<&Vec<SpaceScriptSigningInfo>>,
         space_transfers: Vec<SpaceTransfer>,
         coin_transfers: Vec<CoinTransfer>,
+        unspendables: Vec<OutPoint>,
         fee_rate: FeeRate,
         dust: Option<Amount>,
         confirmed_only: bool,
@@ -359,7 +361,7 @@ impl Builder {
         }
 
         let commit_psbt = {
-            let mut builder = w.build_tx(confirmed_only)?;
+            let mut builder = w.build_tx(unspendables, confirmed_only)?;
             builder.nlocktime(magic_lock_time(median_time));
 
             // handle transfers
@@ -478,9 +480,11 @@ impl Iterator for BuilderIterator<'_> {
                     Some(&reveals),
                     params.transfers.clone(),
                     params.sends.clone(),
+                    self.unspendables.clone(),
                     self.fee_rate,
                     self.dust,
                     self.confirmed_only,
+
                 ) {
                     Ok(prep) => prep,
                     Err(err) => return Some(Err(err)),
@@ -571,6 +575,7 @@ impl Iterator for BuilderIterator<'_> {
                     self.wallet,
                     params.clone(),
                     self.fee_rate,
+                    self.unspendables.clone(),
                     self.confirmed_only,
                     self.force,
                 );
@@ -586,6 +591,7 @@ impl Iterator for BuilderIterator<'_> {
                     self.wallet,
                     params,
                     self.fee_rate,
+                    self.unspendables.clone(),
                     self.confirmed_only,
                     self.force,
                 );
@@ -607,6 +613,7 @@ impl Iterator for BuilderIterator<'_> {
                     bid.space.clone(),
                     bid.amount,
                     self.fee_rate,
+                    self.unspendables.clone(),
                     self.confirmed_only,
                     self.force,
                 );
@@ -692,6 +699,7 @@ impl Builder {
         dust: Option<Amount>,
         median_time: u64,
         wallet: &mut SpacesWallet,
+        unspendables: Vec<OutPoint>,
         confirmed_only: bool,
     ) -> anyhow::Result<BuilderIterator> {
         let fee_rate = self
@@ -799,6 +807,7 @@ impl Builder {
             fee_rate,
             wallet,
             force: self.force,
+            unspendables,
             confirmed_only,
             median_time,
         })
@@ -809,12 +818,13 @@ impl Builder {
         prev: FullSpaceOut,
         bid: Amount,
         fee_rate: FeeRate,
+        unspendables: Vec<OutPoint>,
         confirmed_only: bool,
         force: bool,
     ) -> anyhow::Result<Transaction> {
         let (offer, placeholder) = w.new_bid_psbt(bid, confirmed_only)?;
         let bid_psbt = {
-            let mut builder = w.build_tx(confirmed_only)?;
+            let mut builder = w.build_tx(unspendables, confirmed_only)?;
             builder
                 .nlocktime(LockTime::Blocks(Height::ZERO))
                 .set_exact_sequence(BID_PSBT_INPUT_SEQUENCE)
@@ -838,13 +848,14 @@ impl Builder {
         w: &mut SpacesWallet,
         params: OpenRevealParams,
         fee_rate: FeeRate,
+        unspendables: Vec<OutPoint>,
         confirmed_only: bool,
         force: bool,
     ) -> anyhow::Result<Transaction> {
         let (offer, placeholder) = w.new_bid_psbt(params.initial_bid, confirmed_only)?;
         let mut extra_prevouts = BTreeMap::new();
         let open_psbt = {
-            let mut builder = w.build_tx(confirmed_only)?;
+            let mut builder = w.build_tx(unspendables, confirmed_only)?;
             builder.ordering(TxOrdering::Untouched).add_bid(
                 None,
                 offer,
@@ -871,6 +882,7 @@ impl Builder {
         w: &mut SpacesWallet,
         params: ExecuteParams,
         fee_rate: FeeRate,
+        unspendables: Vec<OutPoint>,
         confirmed_only: bool,
         _force: bool,
     ) -> anyhow::Result<(Transaction, usize)> {
@@ -881,7 +893,7 @@ impl Builder {
                 .internal
                 .next_unused_address(KeychainKind::Internal)
                 .script_pubkey();
-            let mut builder = w.build_tx(confirmed_only)?;
+            let mut builder = w.build_tx(unspendables, confirmed_only)?;
 
             builder
                 // Added first to keep an odd number of outputs before adding transfers
@@ -935,7 +947,7 @@ pub struct SelectionOutput {
 pub struct SpacesAwareCoinSelection {
     pub default_algorithm: DefaultCoinSelectionAlgorithm,
     // Exclude outputs
-    pub exclude_outputs: Vec<SelectionOutput>,
+    pub exclude_outputs: Vec<OutPoint>,
     // Whether to use confirmed only outputs
     // to fund the transaction
     pub confirmed_only: bool,
@@ -945,7 +957,7 @@ impl SpacesAwareCoinSelection {
     // Will skip any outputs with value less than the dust threshold
     // to avoid accidentally spending space outputs
     pub const DUST_THRESHOLD: Amount = Amount::from_sat(1200);
-    pub fn new(excluded: Vec<SelectionOutput>, confirmed_only: bool) -> Self {
+    pub fn new(excluded: Vec<OutPoint>, confirmed_only: bool) -> Self {
         Self {
             default_algorithm: DefaultCoinSelectionAlgorithm::default(),
             exclude_outputs: excluded,
@@ -986,7 +998,7 @@ impl CoinSelectionAlgorithm for SpacesAwareCoinSelection {
                 && !self
                 .exclude_outputs
                 .iter()
-                .any(|o| o.outpoint == weighted_utxo.utxo.outpoint())
+                .any(|o| o == &weighted_utxo.utxo.outpoint())
         });
 
         let mut result = self.default_algorithm.coin_select(

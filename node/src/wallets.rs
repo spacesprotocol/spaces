@@ -153,9 +153,10 @@ impl RpcWallet {
         skip_tx_check: bool,
         fee_rate: FeeRate,
     ) -> anyhow::Result<Vec<TxResponse>> {
+        let unspendables = wallet.list_spaces_outpoints(state)?;
         let tx_events = wallet.get_tx_events(txid)?;
         let builder =
-            wallet.build_fee_bump(txid, fee_rate)?;
+            wallet.build_fee_bump(unspendables, txid, fee_rate)?;
 
         let psbt = builder.finish()?;
         let replacement = wallet.sign(psbt, None)?;
@@ -859,6 +860,7 @@ impl RpcWallet {
             }
         }
 
+        let unspendables = wallet.list_spaces_outpoints(store)?;
         let median_time = source.get_median_time()?;
         let mut checker = TxChecker::new(store);
 
@@ -875,8 +877,7 @@ impl RpcWallet {
             }
         }
 
-
-        let mut tx_iter = builder.build_iter(tx.dust, median_time, wallet, bid_replacement)?;
+        let mut tx_iter = builder.build_iter(tx.dust, median_time, wallet, unspendables, bid_replacement)?;
         let mut result_set = Vec::new();
 
         while let Some(tx_result) = tx_iter.next() {
