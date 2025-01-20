@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 bitcoin = { version = "0.32.2", features = ["base64", "serde"] }
-bdk_wallet = { version = "1.0.0-beta.5", features = ["keys-bip39", "rusqlite"] }
+bdk_wallet = { version = "1.0.0-beta.6", features = ["keys-bip39", "rusqlite"] }
 secp256k1 = "0.29.0"
 anyhow = "1.0.80"
 bech32 = "0.11.0"
@@ -17,3 +17,7 @@ protocol = { path = "../protocol", features = ["std"], version = "*" }
 ctrlc = "3.4.4"
 hex = "0.4.3"
 log = "0.4.21"
+
+
+[dev-dependencies]
+tempfile = "3.14.0"

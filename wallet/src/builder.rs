@@ -954,7 +954,7 @@ impl CoinSelectionAlgorithm for SpacesAwareCoinSelection {
         required_utxos: Vec<WeightedUtxo>,
         mut optional_utxos: Vec<WeightedUtxo>,
         fee_rate: FeeRate,
-        target_amount: u64,
+        target_amount: Amount,
         drain_script: &Script,
         rand: &mut R,
     ) -> Result<CoinSelectionResult, InsufficientFunds> {
@@ -968,7 +968,7 @@ impl CoinSelectionAlgorithm for SpacesAwareCoinSelection {
             if self.confirmed_only {
                 match &weighted_utxo.utxo {
                     Utxo::Local(local) => {
-                        if !local.confirmation_time.is_confirmed() {
+                        if !local.chain_position.is_confirmed() {
                             return false;
                         }
                     }

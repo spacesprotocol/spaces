@@ -184,7 +184,7 @@ impl SpacesWallet {
             dust: unspent
                 .filter(|output|
                     // confirmed or trusted pending only
-                    (output.confirmation_time.is_confirmed() || output.keychain == KeychainKind::Internal) &&
+                    (output.chain_position.is_confirmed() || output.keychain == KeychainKind::Internal) &&
                         (output.txout.value <= SpacesAwareCoinSelection::DUST_THRESHOLD)
                 )
                 .map(|output| output.txout.value)
@@ -200,8 +200,8 @@ impl SpacesWallet {
         self.internal.get_tx(txid)
     }
 
-    pub fn build_tx<'a>(&'a mut self, confirmed_only: bool)
-                        -> anyhow::Result<TxBuilder<'a, SpacesAwareCoinSelection>> {
+    pub fn build_tx(&mut self, confirmed_only: bool)
+                    -> anyhow::Result<TxBuilder<SpacesAwareCoinSelection>> {
         self.configure_builder(None, confirmed_only)
     }
 
@@ -213,8 +213,9 @@ impl SpacesWallet {
         self.internal.local_chain()
     }
 
-    pub fn insert_checkpoint(&mut self, checkpoint: BlockId) -> Result<bool, local_chain::AlterCheckPointError> {
-        self.internal.insert_checkpoint(checkpoint)
+    pub fn insert_checkpoint(&mut self, _checkpoint: BlockId) -> Result<bool, local_chain::AlterCheckPointError> {
+        // TODO: fix or remove
+        Ok(true)
     }
 
     pub fn transactions(&self) -> impl Iterator<Item=WalletTx> + '_ {
@@ -426,7 +427,7 @@ impl SpacesWallet {
                 && !is_space_dust(utxo2.txout.value)
                 && utxo2.txout.is_magic_output()
                 // Check if confirmed only are required
-                && (!confirmed_only || utxo1.confirmation_time.is_confirmed())
+                && (!confirmed_only || utxo1.chain_position.is_confirmed())
             {
                 // While it's possible to create outputs within space transactions
                 // that don't use a special locktime, for now it's safer to require
@@ -448,7 +449,7 @@ impl SpacesWallet {
                         outpoint: utxo2.outpoint,
                         txout: utxo2.txout.clone(),
                     },
-                    confirmed: utxo1.confirmation_time.is_confirmed(),
+                    confirmed: utxo1.chain_position.is_confirmed(),
                 });
             }
         }
@@ -722,18 +723,18 @@ impl CoinSelectionAlgorithm for RequiredUtxosOnlyCoinSelectionAlgorithm {
         required_utxos: Vec<WeightedUtxo>,
         _optional_utxos: Vec<WeightedUtxo>,
         _fee_rate: FeeRate,
-        _target_amount: u64,
+        _target_amount: Amount,
         _drain_script: &bitcoin::Script,
         _rand: &mut R,
     ) -> Result<CoinSelectionResult, InsufficientFunds> {
         let utxos = required_utxos.iter().map(|w| w.utxo.clone()).collect();
         Ok(CoinSelectionResult {
             selected: utxos,
-            fee_amount: 0,
+            fee_amount: Amount::from_sat(0),
             excess: Excess::NoChange {
-                dust_threshold: 0,
-                remaining_amount: 0,
-                change_fee: 0,
+                dust_threshold: Amount::from_sat(0),
+                remaining_amount: Amount::from_sat(0),
+                change_fee: Amount::from_sat(0),
             },
         })
     }
