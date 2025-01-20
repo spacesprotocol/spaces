@@ -6,9 +6,9 @@ use std::{
 };
 
 use anyhow::{anyhow, Context};
-use bdk_wallet::{chain, chain::BlockId, coin_selection::{CoinSelectionAlgorithm, CoinSelectionResult, Excess, InsufficientFunds}, rusqlite::Connection, tx_builder::TxOrdering, AddressInfo, KeychainKind, LocalOutput, PersistedWallet, SignOptions, TxBuilder, Wallet, WalletTx, WeightedUtxo};
+use bdk_wallet::{chain, chain::BlockId, coin_selection::{CoinSelectionAlgorithm, CoinSelectionResult, Excess, InsufficientFunds}, rusqlite::Connection, tx_builder::TxOrdering, AddressInfo, KeychainKind, LocalOutput, PersistedWallet, SignOptions, TxBuilder, Update, Wallet, WalletTx, WeightedUtxo};
 use bdk_wallet::chain::{local_chain, ChainPosition, Indexer};
-use bdk_wallet::chain::local_chain::LocalChain;
+use bdk_wallet::chain::local_chain::{CannotConnectError, LocalChain};
 use bdk_wallet::chain::tx_graph::CalculateFeeError;
 use bincode::config;
 use bitcoin::{absolute::{Height, LockTime}, key::rand::RngCore, psbt::raw::ProprietaryKey, script, sighash::{Prevouts, SighashCache}, taproot, taproot::LeafVersion, Amount, Block, BlockHash, FeeRate, Network, OutPoint, Psbt, Sequence, TapLeafHash, TapSighashType, Transaction, TxOut, Txid, Weight, Witness};
@@ -220,9 +220,14 @@ impl SpacesWallet {
         self.internal.local_chain()
     }
 
-    pub fn insert_checkpoint(&mut self, _checkpoint: BlockId) -> Result<bool, local_chain::AlterCheckPointError> {
-        // TODO: fix or remove
-        Ok(true)
+    pub fn insert_checkpoint(&mut self, checkpoint: BlockId) -> Result<(), CannotConnectError> {
+        let mut cp = self.internal.latest_checkpoint();
+        cp = cp.insert(checkpoint);
+        self.internal
+            .apply_update(Update {
+                chain: Some(cp),
+                ..Default::default()
+            })
     }
 
     pub fn transactions(&self) -> impl Iterator<Item=WalletTx> + '_ {
@@ -744,8 +749,7 @@ impl SpacesWallet {
     }
 
     fn get_signing_info(&mut self, previous_output: OutPoint, script: &ScriptBuf)
-        -> anyhow::Result<Option<SpaceScriptSigningInfo>> {
-
+                        -> anyhow::Result<Option<SpaceScriptSigningInfo>> {
         let db_tx = self.connection.transaction()
             .context("couldn't create db transaction")?;
         let info = TxEvent::get_signing_info(&db_tx, previous_output.txid, script)?;
@@ -782,12 +786,12 @@ impl CoinSelectionAlgorithm for RequiredUtxosOnlyCoinSelectionAlgorithm {
 /// Creates a dummy revert transaction double spending the foreign input
 /// to be applied to the wallet's tx graph
 fn revert_unconfirmed_bid_tx(bid: &WalletTx, foreign_outpoint: OutPoint) -> Option<(Transaction, u64)> {
-    let foreign_input =  bid.tx_node.input.iter()
+    let foreign_input = bid.tx_node.input.iter()
         .find(|input| input.previous_output == foreign_outpoint)?.clone();
 
     let op_return_output = bid.tx_node.output.first()?.clone();
     if !op_return_output.script_pubkey.is_op_return() {
-        return None
+        return None;
     }
     let revert_tx = Transaction {
         version: bid.tx_node.version,
