@@ -22,7 +22,9 @@ use spaced::{
     store::Sha256,
     wallets::AddressKind,
 };
+use wallet::bitcoin::secp256k1::schnorr::Signature;
 use wallet::export::WalletExport;
+use wallet::Listing;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -174,6 +176,46 @@ enum Commands {
         #[arg(long, short)]
         fee_rate: u64,
     },
+    /// Buy a space from the specified listing
+    #[command(name = "buy")]
+    Buy {
+        /// The space to buy
+        space: String,
+        /// The listing price
+        price: u64,
+        /// The seller's signature
+        #[arg(long)]
+        signature: String,
+        /// The seller's address
+        #[arg(long)]
+        seller: String,
+        /// Fee rate to use in sat/vB
+        #[arg(long, short)]
+        fee_rate: Option<u64>,
+    },
+    /// List a space you own for sale
+    #[command(name = "sell")]
+    Sell {
+        /// The space to sell
+        space: String,
+        /// Amount in satoshis
+        price: u64,
+    },
+    /// Verify a listing
+    #[command(name = "verifylisting")]
+    VerifyListing {
+        /// The space to buy
+        space: String,
+        /// The listing price
+        price: u64,
+        /// The seller's signature
+        #[arg(long)]
+        signature: String,
+        /// The seller's address
+        #[arg(long)]
+        seller: String,
+    },
+
     /// Get a spaceout - a Bitcoin output relevant to the Spaces protocol.
     #[command(name = "getspaceout")]
     GetSpaceOut {
@@ -452,7 +494,7 @@ async fn handle_commands(
                 fee_rate,
                 false,
             )
-            .await?
+                .await?
         }
         Commands::Bid {
             space,
@@ -469,7 +511,7 @@ async fn handle_commands(
                 fee_rate,
                 confirmed_only,
             )
-            .await?
+                .await?
         }
         Commands::CreateBidOuts { pairs, fee_rate } => {
             cli.send_request(None, Some(pairs), fee_rate, false).await?
@@ -488,7 +530,7 @@ async fn handle_commands(
                 fee_rate,
                 false,
             )
-            .await?
+                .await?
         }
         Commands::Transfer {
             spaces,
@@ -505,7 +547,7 @@ async fn handle_commands(
                 fee_rate,
                 false,
             )
-            .await?
+                .await?
         }
         Commands::SendCoins {
             amount,
@@ -521,7 +563,7 @@ async fn handle_commands(
                 fee_rate,
                 false,
             )
-            .await?
+                .await?
         }
         Commands::SetRawFallback {
             mut space,
@@ -550,7 +592,7 @@ async fn handle_commands(
                 fee_rate,
                 false,
             )
-            .await?;
+                .await?;
         }
         Commands::ListUnspent => {
             let spaces = cli.client.wallet_list_unspent(&cli.wallet).await?;
@@ -613,6 +655,50 @@ async fn handle_commands(
                 "{}",
                 hash_space(&space).map_err(|e| ClientError::Custom(e.to_string()))?
             );
+        }
+        Commands::Buy { space, price, signature, seller, fee_rate } => {
+            let listing = Listing {
+                space: normalize_space(&space),
+                price,
+                seller,
+                signature: Signature::from_slice(hex::decode(signature)
+                    .map_err(|_| ClientError::Custom("Signature must be in hex format".to_string()))?.as_slice())
+                    .map_err(|_| ClientError::Custom("Invalid signature".to_string()))?,
+            };
+            let result = cli
+                .client
+                .wallet_buy(
+                    &cli.wallet,
+                    listing,
+                    fee_rate.map(|rate| FeeRate::from_sat_per_vb(rate).expect("valid fee rate")),
+                    cli.skip_tx_check,
+                ).await?;
+            println!("{}", serde_json::to_string_pretty(&result).expect("result"));
+        }
+        Commands::Sell { space, price,  } => {
+            let result = cli
+                .client
+                .wallet_sell(
+                    &cli.wallet,
+                    space,
+                    Amount::from_sat(price),
+                ).await?;
+            println!("{}", serde_json::to_string_pretty(&result).expect("result"));
+        }
+        Commands::VerifyListing { space, price, signature, seller  } => {
+            let listing = Listing {
+                space: normalize_space(&space),
+                price,
+                seller,
+                signature: Signature::from_slice(hex::decode(signature)
+                    .map_err(|_| ClientError::Custom("Signature must be in hex format".to_string()))?.as_slice())
+                    .map_err(|_| ClientError::Custom("Invalid signature".to_string()))?,
+            };
+
+            let result = cli
+                .client
+                .verify_listing(listing).await?;
+            println!("{}", serde_json::to_string_pretty(&result).expect("result"));
         }
     }
 

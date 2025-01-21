@@ -61,7 +61,7 @@ pub struct Balance {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Listing {
     pub space: String,
-    pub price: Amount,
+    pub price: u64,
     pub seller: String,
     pub signature: schnorr::Signature,
 }
@@ -619,7 +619,7 @@ impl SpacesWallet {
                 )?
                 .add_recipient(
                     seller.script_pubkey(),
-                    spaceout.spaceout.value + listing.price,
+                    spaceout.spaceout.value + Amount::from_sat(listing.price),
                 )
                 .add_recipient(space_address.script_pubkey(), dust_amount);
             builder.finish()?
@@ -661,7 +661,7 @@ impl SpacesWallet {
         let prevouts = Prevouts::One(0, txout.clone());
         let addr = SpaceAddress::from_str(&listing.seller)?;
 
-        let total = listing.price + txout.value;
+        let total = Amount::from_sat(listing.price) + txout.value;
         let mut tx = bitcoin::blockdata::transaction::Transaction {
             version: Version(2),
             lock_time: BID_PSBT_TX_LOCK_TIME,
@@ -756,7 +756,7 @@ impl SpacesWallet {
 
         Ok(Listing {
             space: space.to_string(),
-            price: asking_price,
+            price: asking_price.to_sat(),
             seller: recipient.to_string(),
             signature: Signature::from_slice(&signature[..64])
                 .expect("signed listing has a valid signature"),
