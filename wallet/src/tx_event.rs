@@ -85,6 +85,7 @@ pub enum TxEventKind {
     Transfer,
     Send,
     FeeBump,
+    Buy,
 }
 
 impl TxEvent {
@@ -505,7 +506,8 @@ impl Display for TxEventKind {
             TxEventKind::Transfer => "transfer",
             TxEventKind::Send => "send",
             TxEventKind::Script => "script",
-            TxEventKind::FeeBump => "fee-bump"
+            TxEventKind::FeeBump => "fee-bump",
+            TxEventKind::Buy => "buy"
         })
     }
 }

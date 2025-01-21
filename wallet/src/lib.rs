@@ -4,27 +4,36 @@ use std::{
     fs,
     path::PathBuf,
 };
+use std::ops::Mul;
+use std::str::FromStr;
 use anyhow::{anyhow, Context};
 use bdk_wallet::{chain, chain::BlockId, coin_selection::{CoinSelectionAlgorithm, CoinSelectionResult, Excess, InsufficientFunds}, rusqlite::Connection, tx_builder::TxOrdering, AddressInfo, KeychainKind, LocalOutput, PersistedWallet, SignOptions, TxBuilder, Update, Wallet, WalletTx, WeightedUtxo};
 use bdk_wallet::chain::{ChainPosition, Indexer};
 use bdk_wallet::chain::local_chain::{CannotConnectError, LocalChain};
 use bdk_wallet::chain::tx_graph::CalculateFeeError;
 use bincode::config;
-use bitcoin::{absolute::{Height, LockTime}, key::rand::RngCore, psbt::raw::ProprietaryKey, script, sighash::{Prevouts, SighashCache}, taproot, taproot::LeafVersion, Amount, Block, BlockHash, FeeRate, Network, OutPoint, Psbt, Sequence, TapLeafHash, TapSighashType, Transaction, TxOut, Txid, Weight, Witness};
+use bitcoin::{absolute::{Height, LockTime}, key::rand::RngCore, psbt, psbt::raw::ProprietaryKey, script, sighash::{Prevouts, SighashCache}, taproot, taproot::LeafVersion, Amount, Block, BlockHash, FeeRate, Network, OutPoint, Psbt, Sequence, TapLeafHash, TapSighashType, Transaction, TxIn, TxOut, Txid, Weight, Witness};
+use bitcoin::transaction::Version;
+use secp256k1::{schnorr, Message};
+use secp256k1::schnorr::Signature;
 use protocol::{bitcoin::{
     constants::genesis_block,
     key::{rand, UntweakedKeypair},
     opcodes,
     taproot::{ControlBlock, TaprootBuilder},
     Address, ScriptBuf, XOnlyPublicKey,
-}, prepare::{is_magic_lock_time, TrackableOutput}, Space};
+}, prepare::{is_magic_lock_time, TrackableOutput}, FullSpaceOut, Space};
 use serde::{ser::SerializeSeq, Deserialize, Deserializer, Serialize, Serializer};
+use protocol::constants::{BID_PSBT_INPUT_SEQUENCE, BID_PSBT_TX_LOCK_TIME};
+use protocol::hasher::{KeyHasher, SpaceKey};
 use protocol::prepare::DataSource;
+use protocol::slabel::SLabel;
 use crate::{
     address::SpaceAddress,
     builder::{is_connector_dust, is_space_dust, SpacesAwareCoinSelection},
     tx_event::TxEvent,
 };
+use crate::builder::{space_dust, tap_key_spend_weight};
 use crate::tx_event::{TxEventKind, TxRecord};
 
 pub extern crate bdk_wallet;
@@ -47,6 +56,14 @@ pub struct SpacesWallet {
 pub struct Balance {
     pub balance: Amount,
     pub details: BalanceDetails,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Listing {
+    pub space: String,
+    pub price: Amount,
+    pub seller: String,
+    pub signature: schnorr::Signature,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -154,7 +171,7 @@ impl SpacesWallet {
                 .descriptor(KeychainKind::Internal, Some(config.space_descriptors.internal.clone()))
                 .lookahead(50)
                 .extract_keys()
-            .load_wallet(&mut conn).context("could not load wallet")? {
+                .load_wallet(&mut conn).context("could not load wallet")? {
             wallet
         } else {
             Wallet::create(
@@ -280,7 +297,7 @@ impl SpacesWallet {
         confirmed_only: bool,
     ) -> anyhow::Result<TxBuilder<'_, SpacesAwareCoinSelection>> {
         let selection = SpacesAwareCoinSelection::new(
-            unspendables, confirmed_only
+            unspendables, confirmed_only,
         );
 
         let mut builder = match replace {
@@ -561,6 +578,189 @@ impl SpacesWallet {
         }
 
         Ok(not_auctioned)
+    }
+
+    pub fn buy<H: KeyHasher>(&mut self, src: &mut impl DataSource, listing: &Listing, fee_rate: FeeRate) -> anyhow::Result<Transaction> {
+        let (seller,spaceout) = Self::verify_listing::<H>(src, &listing)?;
+
+        let mut witness = Witness::new();
+        witness.push(
+            taproot::Signature {
+                signature: listing.signature,
+                sighash_type: TapSighashType::SinglePlusAnyoneCanPay,
+            }
+                .to_vec(),
+        );
+
+        let funded_psbt = {
+            let unspendables = self.list_spaces_outpoints(src)?;
+            let space_address = self.next_unused_space_address();
+            let dust_amount = space_dust(space_address.script_pubkey().minimal_non_dust().mul(2));
+
+            let mut builder = self.build_tx(unspendables, false)?;
+            builder
+                .version(2)
+                .ordering(TxOrdering::Untouched)
+                .fee_rate(fee_rate)
+                .nlocktime(LockTime::Blocks(Height::ZERO))
+                .set_exact_sequence(Sequence::ENABLE_RBF_NO_LOCKTIME)
+                .add_foreign_utxo_with_sequence(
+                    spaceout.outpoint(),
+                    psbt::Input {
+                        witness_utxo: Some(TxOut {
+                            value: spaceout.spaceout.value,
+                            script_pubkey: spaceout.spaceout.script_pubkey.clone(),
+                        }),
+                        final_script_witness: Some(witness),
+                        ..Default::default()
+                    },
+                    tap_key_spend_weight(),
+                    BID_PSBT_INPUT_SEQUENCE,
+                )?
+                .add_recipient(
+                    seller.script_pubkey(),
+                    spaceout.spaceout.value + listing.price,
+                )
+                .add_recipient(space_address.script_pubkey(), dust_amount);
+            builder.finish()?
+        };
+
+        let tx = self.sign(funded_psbt, None)?;
+        Ok(tx)
+    }
+
+    pub fn verify_listing<H: KeyHasher>(src: &mut impl DataSource, listing: &Listing) -> anyhow::Result<(SpaceAddress, FullSpaceOut)> {
+        let label = SLabel::from_str(&listing.space)?;
+        let space_key = SpaceKey::from(H::hash(label.as_ref()));
+        let outpoint = match src.get_space_outpoint(&space_key)? {
+            None => return Err(anyhow::anyhow!("Unknown space {} - no outpoint found", listing.space)),
+            Some(outpoint) => outpoint
+        };
+
+        let spaceout = match src.get_spaceout(&outpoint)? {
+            None => return Err(anyhow!("Unknown or spent spaces utxo: {}", outpoint)),
+            Some(outpoint) => outpoint,
+        };
+
+        if spaceout.space.is_none() {
+            return Err(anyhow!("No associated space"));
+        }
+
+        let recipient = Self::verify_listing_signature(&listing, outpoint, TxOut {
+            value: spaceout.value,
+            script_pubkey: spaceout.script_pubkey.clone(),
+        })?;
+
+        Ok((recipient, FullSpaceOut {
+            txid: outpoint.txid,
+            spaceout,
+        }))
+    }
+
+    fn verify_listing_signature(listing: &Listing, outpoint: OutPoint, txout: TxOut) -> anyhow::Result<SpaceAddress> {
+        let prevouts = Prevouts::One(0, txout.clone());
+        let addr = SpaceAddress::from_str(&listing.seller)?;
+
+        let total = listing.price + txout.value;
+        let mut tx = bitcoin::blockdata::transaction::Transaction {
+            version: Version(2),
+            lock_time: BID_PSBT_TX_LOCK_TIME,
+            input: vec![TxIn {
+                previous_output: outpoint,
+                script_sig: ScriptBuf::new(),
+                sequence: BID_PSBT_INPUT_SEQUENCE,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: total,
+                script_pubkey: addr.script_pubkey(),
+            }],
+        };
+
+        let mut sighash_cache = SighashCache::new(&mut tx);
+        let sighash = sighash_cache.taproot_key_spend_signature_hash(
+            0,
+            &prevouts,
+            TapSighashType::SinglePlusAnyoneCanPay,
+        )?;
+
+        let msg = Message::from_digest_slice(sighash.as_ref())?;
+        let ctx = bitcoin::secp256k1::Secp256k1::verification_only();
+        let script_bytes = txout.script_pubkey.as_bytes();
+
+        let pubkey = XOnlyPublicKey::from_slice(&script_bytes[2..])?;
+
+        ctx.verify_schnorr(&listing.signature, &msg, &pubkey)?;
+        Ok(addr)
+    }
+
+    pub fn sell<H: KeyHasher>(
+        &mut self,
+        src: &mut impl DataSource,
+        space: &str,
+        asking_price: Amount,
+    ) -> anyhow::Result<Listing> {
+        let label = SLabel::from_str(&space)?;
+        let spacehash = SpaceKey::from(H::hash(label.as_ref()));
+        let space_outpoint = match src.get_space_outpoint(&spacehash)? {
+            None => return Err(anyhow::anyhow!("Space not found")),
+            Some(outpoint) => outpoint,
+        };
+        let utxo = match self.internal.get_utxo(space_outpoint) {
+            None => return Err(anyhow::anyhow!("Wallet does not own a space with outpoint {}", space_outpoint)),
+            Some(utxo) => utxo
+        };
+
+        let recipient = self.next_unused_space_address();
+
+
+        let mut sell_psbt = {
+            let mut builder = self
+                .internal
+                .build_tx()
+                .coin_selection(RequiredUtxosOnlyCoinSelectionAlgorithm);
+
+            let total = utxo.txout.value + asking_price;
+            builder
+                .version(2)
+                .allow_dust(true)
+                .ordering(TxOrdering::Untouched)
+                .nlocktime(LockTime::Blocks(Height::ZERO))
+                .set_exact_sequence(Sequence::ENABLE_RBF_NO_LOCKTIME)
+                .manually_selected_only()
+                .sighash(TapSighashType::SinglePlusAnyoneCanPay.into())
+                .add_utxo(utxo.outpoint)?
+                .add_recipient(
+                    recipient.script_pubkey(),
+                    total,
+                );
+            builder.finish()?
+        };
+
+        let finalized = self.internal.sign(
+            &mut sell_psbt,
+            SignOptions {
+                allow_all_sighashes: true,
+                ..Default::default()
+            },
+        )?;
+        if !finalized {
+            return Err(anyhow::anyhow!("signing listing psbt failed"));
+        }
+
+        let witness = sell_psbt.inputs[0].clone().final_script_witness
+            .expect("signed listing psbt has a witness");
+
+        let signature = witness.iter().next()
+            .expect("signed listing must have a single witness item");
+
+        Ok(Listing {
+            space: space.to_string(),
+            price: asking_price,
+            seller: recipient.to_string(),
+            signature: Signature::from_slice(&signature[..64])
+                .expect("signed listing has a valid signature"),
+        })
     }
 
     pub fn new_bid_psbt(
