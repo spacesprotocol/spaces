@@ -176,7 +176,7 @@ trait TxBuilderSpacesUtils<'a, Cs: CoinSelectionAlgorithm> {
     fn add_send(&mut self, request: CoinTransfer) -> anyhow::Result<&mut Self>;
 }
 
-fn tap_key_spend_weight() -> Weight {
+pub fn tap_key_spend_weight() -> Weight {
     let tap_key_spend_weight: u64 = 66;
     Weight::from_vb(tap_key_spend_weight).expect("valid weight")
 }

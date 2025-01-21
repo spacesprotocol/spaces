@@ -35,7 +35,7 @@ use tokio::{
     sync::{broadcast, mpsc, oneshot, RwLock},
     task::JoinSet,
 };
-use wallet::{bdk_wallet as bdk, bdk_wallet::template::Bip86, bitcoin::hashes::Hash, export::WalletExport, Balance, DoubleUtxo, WalletConfig, WalletDescriptors, WalletInfo, WalletOutput};
+use wallet::{bdk_wallet as bdk, bdk_wallet::template::Bip86, bitcoin::hashes::Hash, export::WalletExport, Balance, DoubleUtxo, Listing, SpacesWallet, WalletConfig, WalletDescriptors, WalletInfo, WalletOutput};
 
 use crate::{
     checker::TxChecker,
@@ -94,6 +94,10 @@ pub enum ChainStateCommand {
     GetRollout {
         target: usize,
         resp: Responder<anyhow::Result<Vec<RolloutEntry>>>,
+    },
+    VerifyListing {
+        listing: Listing,
+        resp: Responder<anyhow::Result<()>>,
     },
 }
 
@@ -181,6 +185,29 @@ pub trait Rpc {
         skip_tx_check: bool,
     ) -> Result<Vec<TxResponse>, ErrorObjectOwned>;
 
+    #[method(name = "walletbuy")]
+    async fn wallet_buy(
+        &self,
+        wallet: &str,
+        listing: Listing,
+        fee_rate: Option<FeeRate>,
+        skip_tx_check: bool,
+    ) -> Result<TxResponse, ErrorObjectOwned>;
+
+    #[method(name = "walletsell")]
+    async fn wallet_sell(
+        &self,
+        wallet: &str,
+        space: String,
+        amount: u64,
+    ) -> Result<Listing, ErrorObjectOwned>;
+
+    #[method(name = "verifylisting")]
+    async fn verify_listing(
+        &self,
+        listing: Listing,
+    ) -> Result<(), ErrorObjectOwned>;
+
     #[method(name = "walletlisttransactions")]
     async fn wallet_list_transactions(
         &self,
@@ -199,7 +226,7 @@ pub trait Rpc {
 
     #[method(name = "walletlistspaces")]
     async fn wallet_list_spaces(&self, wallet: &str)
-        -> Result<ListSpacesResponse, ErrorObjectOwned>;
+                                -> Result<ListSpacesResponse, ErrorObjectOwned>;
 
     #[method(name = "walletlistunspent")]
     async fn wallet_list_unspent(
@@ -754,6 +781,29 @@ impl RpcServer for RpcServerImpl {
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
     }
 
+    async fn wallet_buy(&self, wallet: &str, listing: Listing, fee_rate: Option<FeeRate>, skip_tx_check: bool) -> Result<TxResponse, ErrorObjectOwned> {
+        self.wallet(&wallet)
+            .await?
+            .send_buy(listing, fee_rate, skip_tx_check)
+            .await
+            .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
+    }
+
+    async fn wallet_sell(&self, wallet: &str, space: String, amount: u64) -> Result<Listing, ErrorObjectOwned> {
+        self.wallet(&wallet)
+            .await?
+            .send_sell(space, amount)
+            .await
+            .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
+    }
+
+    async fn verify_listing(&self, listing: Listing) -> Result<(), ErrorObjectOwned> {
+        self.store
+            .verify_listing(listing)
+            .await
+            .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
+    }
+
     async fn wallet_list_transactions(
         &self,
         wallet: &str,
@@ -953,6 +1003,9 @@ impl AsyncChainState {
                 let rollouts = chain_state.get_rollout(target);
                 _ = resp.send(rollouts);
             }
+            ChainStateCommand::VerifyListing { listing, resp } => {
+                _ = resp.send(SpacesWallet::verify_listing::<Sha256>(chain_state, &listing).map(|_| ()));
+            }
         }
     }
 
@@ -982,6 +1035,14 @@ impl AsyncChainState {
         let (resp, resp_rx) = oneshot::channel();
         self.sender
             .send(ChainStateCommand::EstimateBid { target, resp })
+            .await?;
+        resp_rx.await?
+    }
+
+    pub async fn verify_listing(&self, listing: Listing) -> anyhow::Result<()> {
+        let (resp, resp_rx) = oneshot::channel();
+        self.sender
+            .send(ChainStateCommand::VerifyListing { listing, resp })
             .await?;
         resp_rx.await?
     }

@@ -18,7 +18,7 @@ use tokio::time::Instant;
 use wallet::{address::SpaceAddress, bdk_wallet::{
     chain::{local_chain::CheckPoint, BlockId},
     KeychainKind,
-}, bitcoin, bitcoin::{Address, Amount, FeeRate, OutPoint}, builder::{CoinTransfer, SpaceTransfer, SpacesAwareCoinSelection}, tx_event::{TxRecord, TxEvent, TxEventKind}, Balance, DoubleUtxo, SpacesWallet, WalletInfo, WalletOutput};
+}, bitcoin, bitcoin::{Address, Amount, FeeRate, OutPoint}, builder::{CoinTransfer, SpaceTransfer, SpacesAwareCoinSelection}, tx_event::{TxRecord, TxEvent, TxEventKind}, Balance, DoubleUtxo, Listing, SpacesWallet, WalletInfo, WalletOutput};
 use crate::{checker::TxChecker, config::ExtendedNetwork, node::BlockSource, rpc::{RpcWalletRequest, RpcWalletTxBuilder, WalletLoadRequest}, source::{
     BitcoinBlockSource, BitcoinRpc, BitcoinRpcError, BlockEvent, BlockFetchError, BlockFetcher,
 }, std_wait, store::{ChainState, LiveSnapshot, Sha256}};
@@ -85,6 +85,17 @@ pub enum WalletCommand {
     ListSpaces {
         resp: crate::rpc::Responder<anyhow::Result<ListSpacesResponse>>,
     },
+    Buy {
+        listing: Listing,
+        skip_tx_check: bool,
+        fee_rate: Option<FeeRate>,
+        resp: crate::rpc::Responder<anyhow::Result<TxResponse>>,
+    },
+    Sell {
+        space: String,
+        price: u64,
+        resp: crate::rpc::Responder<anyhow::Result<Listing>>,
+    },
     ListBidouts {
         resp: crate::rpc::Responder<anyhow::Result<Vec<DoubleUtxo>>>,
     },
@@ -143,6 +154,60 @@ impl RpcWallet {
         }
 
         None
+    }
+
+    fn handle_buy(
+        source: &BitcoinBlockSource,
+        state: &mut LiveSnapshot,
+        wallet: &mut SpacesWallet,
+        listing: Listing,
+        skip_tx_check: bool,
+        fee_rate: Option<FeeRate>,
+    ) -> anyhow::Result<TxResponse> {
+        let fee_rate = match fee_rate.as_ref() {
+            None => match Self::estimate_fee_rate(source) {
+                None => return Err(anyhow!("could not estimate fee rate")),
+                Some(r) => r,
+            },
+            Some(r) => r.clone(),
+        };
+        info!("Using fee rate: {} sat/vB", fee_rate.to_sat_per_vb_ceil());
+
+        let (_, fullspaceout) = SpacesWallet::verify_listing::<Sha256>(state, &listing)?;
+
+        let space = fullspaceout.spaceout.space.as_ref().expect("space").name.to_string();
+        let foreign_input = fullspaceout.outpoint();
+        let tx = wallet.buy::<Sha256>(state, &listing, fee_rate)?;
+        
+        if !skip_tx_check {
+            let tip = wallet.local_chain().tip().height();
+            let mut checker = TxChecker::new(state);
+            checker.check_apply_tx(tip + 1, &tx)?;
+        }
+
+        let new_txid = tx.compute_txid();
+        let last_seen = source.rpc.broadcast_tx(&source.client, &tx)?;
+
+        let tx_record = TxRecord::new_with_events(tx, vec![TxEvent {
+            kind: TxEventKind::Buy,
+            space: Some(space),
+            foreign_input: Some(foreign_input),
+            details: None,
+        }]);
+
+        let events = tx_record.events.clone();
+
+        // Incrementing last_seen by 1 ensures eviction of older tx
+        // in cases with same-second/last seen replacement.
+        wallet.apply_unconfirmed_tx_record(tx_record, last_seen+1)?;
+        wallet.commit()?;
+
+        Ok(TxResponse {
+            txid: new_txid,
+            events,
+            error: None,
+            raw: None,
+        })
     }
 
     fn handle_fee_bump(
@@ -303,6 +368,12 @@ impl RpcWallet {
             }
             WalletCommand::UnloadWallet => {
                 info!("Unloading wallet '{}' ...", wallet.name());
+            }
+            WalletCommand::Buy { listing, resp, skip_tx_check, fee_rate } => {
+                _ = resp.send(Self::handle_buy(source, state, wallet, listing, skip_tx_check, fee_rate));
+            }
+            WalletCommand::Sell { space, price, resp } => {
+                _ = resp.send(wallet.sell::<Sha256>(state, &space, Amount::from_sat(price)));
             }
         }
         Ok(())
@@ -1070,6 +1141,40 @@ impl RpcWallet {
         resp_rx.await?
     }
 
+    pub async fn send_buy(
+        &self,
+        listing: Listing,
+        fee_rate: Option<FeeRate>,
+        skip_tx_check: bool,
+    ) -> anyhow::Result<TxResponse> {
+        let (resp, resp_rx) = oneshot::channel();
+        self.sender
+            .send(WalletCommand::Buy {
+                listing,
+                fee_rate,
+                skip_tx_check,
+                resp,
+            })
+            .await?;
+        resp_rx.await?
+    }
+
+    pub async fn send_sell(
+        &self,
+        space: String,
+        price: u64,
+    ) -> anyhow::Result<Listing> {
+        let (resp, resp_rx) = oneshot::channel();
+        self.sender
+            .send(WalletCommand::Sell {
+                space,
+                resp,
+                price,
+            })
+            .await?;
+        resp_rx.await?
+    }
+
     pub async fn send_list_transactions(
         &self,
         count: usize,
@@ -1081,6 +1186,8 @@ impl RpcWallet {
             .await?;
         resp_rx.await?
     }
+
+
 
     pub async fn send_force_spend(
         &self,
