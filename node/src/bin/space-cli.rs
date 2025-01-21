@@ -681,7 +681,7 @@ async fn handle_commands(
                 .wallet_sell(
                     &cli.wallet,
                     space,
-                    Amount::from_sat(price),
+                    price,
                 ).await?;
             println!("{}", serde_json::to_string_pretty(&result).expect("result"));
         }

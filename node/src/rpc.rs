@@ -199,7 +199,7 @@ pub trait Rpc {
         &self,
         wallet: &str,
         space: String,
-        amount: Amount,
+        amount: u64,
     ) -> Result<Listing, ErrorObjectOwned>;
 
     #[method(name = "verifylisting")]
@@ -789,7 +789,7 @@ impl RpcServer for RpcServerImpl {
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
     }
 
-    async fn wallet_sell(&self, wallet: &str, space: String, amount: Amount) -> Result<Listing, ErrorObjectOwned> {
+    async fn wallet_sell(&self, wallet: &str, space: String, amount: u64) -> Result<Listing, ErrorObjectOwned> {
         self.wallet(&wallet)
             .await?
             .send_sell(space, amount)

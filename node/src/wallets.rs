@@ -93,7 +93,7 @@ pub enum WalletCommand {
     },
     Sell {
         space: String,
-        price: Amount,
+        price: u64,
         resp: crate::rpc::Responder<anyhow::Result<Listing>>,
     },
     ListBidouts {
@@ -373,7 +373,7 @@ impl RpcWallet {
                 _ = resp.send(Self::handle_buy(source, state, wallet, listing, skip_tx_check, fee_rate));
             }
             WalletCommand::Sell { space, price, resp } => {
-                _ = resp.send(wallet.sell::<Sha256>(state, &space, price));
+                _ = resp.send(wallet.sell::<Sha256>(state, &space, Amount::from_sat(price)));
             }
         }
         Ok(())
@@ -1162,7 +1162,7 @@ impl RpcWallet {
     pub async fn send_sell(
         &self,
         space: String,
-        price: Amount,
+        price: u64,
     ) -> anyhow::Result<Listing> {
         let (resp, resp_rx) = oneshot::channel();
         self.sender

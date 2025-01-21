@@ -991,7 +991,7 @@ async fn it_should_allow_buy_sell(rig: &TestRig) -> anyhow::Result<()> {
     let space = alice_spaces.owned.first().expect("alice should have at least 1 space");
 
     let space_name = space.spaceout.space.as_ref().unwrap().name.to_string();
-    let listing = rig.spaced.client.wallet_sell(ALICE, space_name.clone(), Amount::from_sat(5000)).await.expect("sell");
+    let listing = rig.spaced.client.wallet_sell(ALICE, space_name.clone(), 5000).await.expect("sell");
 
     println!("listing\n{}", serde_json::to_string_pretty(&listing).unwrap());
 
