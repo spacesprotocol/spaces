@@ -983,6 +983,47 @@ async fn it_can_use_reserved_op_codes(rig: &TestRig) -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn it_should_allow_buy_sell(rig: &TestRig) -> anyhow::Result<()> {
+    rig.wait_until_wallet_synced(ALICE).await.expect("synced");
+    rig.wait_until_wallet_synced(BOB).await.expect("synced");
+
+    let alice_spaces = rig.spaced.client.wallet_list_spaces(ALICE).await.expect("alice spaces");
+    let space = alice_spaces.owned.first().expect("alice should have at least 1 space");
+
+    let space_name = space.spaceout.space.as_ref().unwrap().name.to_string();
+    let listing = rig.spaced.client.wallet_sell(ALICE, space_name.clone(), Amount::from_sat(5000)).await.expect("sell");
+
+    println!("listing\n{}", serde_json::to_string_pretty(&listing).unwrap());
+
+    rig.spaced.client.verify_listing(listing.clone()).await.expect("verify");
+
+    let alice_balance = rig.spaced.client.wallet_get_balance(ALICE).await.expect("balance");
+    let buy = rig.spaced.client.wallet_buy(
+        BOB,
+        listing.clone(),
+        Some(FeeRate::from_sat_per_vb(1).expect("rate")),
+        false).await.expect("buy"
+    );
+
+    println!("{}", serde_json::to_string_pretty(&buy).unwrap());
+
+    rig.mine_blocks(1, None).await.expect("mine");
+    rig.wait_until_synced().await.expect("synced");
+    rig.wait_until_wallet_synced(BOB).await.expect("synced");
+    rig.wait_until_wallet_synced(ALICE).await.expect("synced");
+
+    rig.spaced.client.verify_listing(listing)
+        .await.expect_err("should no longer be valid");
+
+    let bob_spaces = rig.spaced.client.wallet_list_spaces(BOB).await.expect("bob spaces");
+
+    assert!(bob_spaces.owned.iter().find(|s| s.spaceout.space.as_ref().unwrap().name.to_string() == space_name).is_some(), "bob should own it now");
+
+    let alice_balance_after = rig.spaced.client.wallet_get_balance(ALICE).await.expect("balance");
+    assert_eq!(alice_balance.balance + Amount::from_sat(5666), alice_balance_after.balance);
+
+    Ok(())
+}
 
 async fn it_should_handle_reorgs(rig: &TestRig) -> anyhow::Result<()> {
     rig.wait_until_wallet_synced(ALICE).await.expect("synced");
@@ -1025,6 +1066,7 @@ async fn run_auction_tests() -> anyhow::Result<()> {
         .expect("should not allow register/transfer multiple times");
     it_can_batch_txs(&rig).await.expect("bump fee");
     it_can_use_reserved_op_codes(&rig).await.expect("should use reserved opcodes");
+    it_should_allow_buy_sell(&rig).await.expect("should use reserved opcodes");
 
     // keep reorgs last as it can drop some txs from mempool and mess up wallet state
     it_should_handle_reorgs(&rig).await.expect("should make wallet");
