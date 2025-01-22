@@ -12,15 +12,17 @@ use std::{
 use base64::Engine;
 use bitcoin::{Block, BlockHash, Txid};
 use hex::FromHexError;
-use log::{error, info};
-use reqwest::StatusCode;
+use log::{error};
 use protocol::constants::ChainAnchor;
+use reqwest::StatusCode;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde_json::Value;
 use threadpool::ThreadPool;
 use tokio::time::Instant;
-use wallet::{bdk_wallet::chain::ConfirmationTime, bitcoin, bitcoin::Transaction};
+use wallet::{bitcoin, bitcoin::Transaction};
 
 use crate::node::BlockSource;
+use crate::std_wait;
 
 const BITCOIN_RPC_IN_WARMUP: i32 = -28; // Client still warming up
 const BITCOIN_RPC_CLIENT_NOT_CONNECTED: i32 = -9; // Bitcoin is not connected
@@ -43,6 +45,7 @@ pub struct BlockFetcher {
 }
 
 pub enum BlockEvent {
+    Tip(ChainAnchor),
     Block(ChainAnchor, Block),
     Error(BlockFetchError),
 }
@@ -170,8 +173,7 @@ impl BitcoinRpc {
         let params = serde_json::json!([]);
         self.make_request("getblockchaininfo", params)
     }
-
-    pub fn get_mempool_entry(&self, txid: Txid) -> BitcoinRpcRequest {
+    pub fn get_mempool_entry(&self, txid: &Txid) -> BitcoinRpcRequest {
         let params = serde_json::json!([txid]);
 
         self.make_request("getmempoolentry", params)
@@ -190,7 +192,10 @@ impl BitcoinRpc {
         client: &reqwest::Client,
         request: &BitcoinRpcRequest,
     ) -> Result<T, BitcoinRpcError> {
-        self.send_request(client, request).await?.error_for_rpc().await
+        self.send_request(client, request)
+            .await?
+            .error_for_rpc()
+            .await
     }
 
     pub fn send_json_blocking<T: DeserializeOwned>(
@@ -206,7 +211,7 @@ impl BitcoinRpc {
         &self,
         client: &reqwest::blocking::Client,
         tx: &Transaction,
-    ) -> Result<ConfirmationTime, BitcoinRpcError> {
+    ) -> Result<u64, BitcoinRpcError> {
         let txid: String = self.send_json_blocking(client, &self.send_raw_transaction(tx))?;
 
         const MAX_RETRIES: usize = 10;
@@ -219,7 +224,7 @@ impl BitcoinRpc {
             match res {
                 Ok(mem) => {
                     if let Some(time) = mem.get("time").and_then(|t| t.as_u64()) {
-                        return Ok(ConfirmationTime::Unconfirmed { last_seen: time });
+                        return Ok(time);
                     }
                 }
                 Err(e) => last_error = Some(e),
@@ -236,8 +241,8 @@ impl BitcoinRpc {
         client: &reqwest::Client,
         request: &BitcoinRpcRequest,
     ) -> Result<reqwest::Response, BitcoinRpcError> {
-        let mut delay = Duration::from_millis(1000);
-        let max_retries = 10;
+        let mut delay = Duration::from_millis(100);
+        let max_retries = 5;
         let mut last_error = None;
 
         for attempt in 0..max_retries {
@@ -246,7 +251,12 @@ impl BitcoinRpc {
                 builder = builder.header("Authorization", format!("Basic {}", auth));
             }
 
-            match builder.json(&request.body).send().await.map_err(BitcoinRpcError::from) {
+            match builder
+                .json(&request.body)
+                .send()
+                .await
+                .map_err(BitcoinRpcError::from)
+            {
                 Ok(res) => return Self::clean_rpc_response(res).await,
                 Err(e) if e.is_temporary() && attempt < max_retries - 1 => {
                     error!("Rpc: {} - retrying in {:?}...", e, delay);
@@ -266,8 +276,8 @@ impl BitcoinRpc {
         client: &reqwest::blocking::Client,
         request: &BitcoinRpcRequest,
     ) -> Result<reqwest::blocking::Response, BitcoinRpcError> {
-        let mut delay = Duration::from_millis(1000);
-        let max_retries = 10;
+        let mut delay = Duration::from_millis(100);
+        let max_retries = 5;
         let mut last_error = None;
 
         for attempt in 0..max_retries {
@@ -276,7 +286,11 @@ impl BitcoinRpc {
                 builder = builder.header("Authorization", format!("Basic {}", auth));
             }
 
-            match builder.json(&request.body).send().map_err(BitcoinRpcError::from) {
+            match builder
+                .json(&request.body)
+                .send()
+                .map_err(BitcoinRpcError::from)
+            {
                 Ok(res) => return Self::clean_rpc_response_blocking(res),
                 Err(e) if e.is_temporary() && attempt < max_retries - 1 => {
                     error!("Rpc: {} - retrying in {:?}...", e, delay);
@@ -291,7 +305,9 @@ impl BitcoinRpc {
         Err(last_error.expect("an error"))
     }
 
-    pub async fn clean_rpc_response(res: reqwest::Response) -> Result<reqwest::Response, BitcoinRpcError> {
+    pub async fn clean_rpc_response(
+        res: reqwest::Response,
+    ) -> Result<reqwest::Response, BitcoinRpcError> {
         let status = res.status();
         if status.is_success() {
             return Ok(res);
@@ -305,7 +321,9 @@ impl BitcoinRpc {
         Err(Self::parse_error_bytes(status, response_bytes.as_ref()))
     }
 
-    pub fn clean_rpc_response_blocking(res: reqwest::blocking::Response) -> Result<reqwest::blocking::Response, BitcoinRpcError> {
+    pub fn clean_rpc_response_blocking(
+        res: reqwest::blocking::Response,
+    ) -> Result<reqwest::blocking::Response, BitcoinRpcError> {
         let status = res.status();
         if status.is_success() {
             return Ok(res);
@@ -406,6 +424,12 @@ impl BlockFetcher {
         Ok(Some(tip))
     }
 
+    pub fn restart(&self, checkpoint: ChainAnchor, drain_receiver: &Receiver<BlockEvent>) {
+        self.stop();
+        while drain_receiver.try_recv().is_ok() {}
+        self.start(checkpoint)
+    }
+
     pub fn start(&self, mut checkpoint: ChainAnchor) {
         self.stop();
 
@@ -420,7 +444,6 @@ impl BlockFetcher {
 
             loop {
                 if current_task.load(Ordering::SeqCst) != job_id {
-                    info!("Shutting down block fetcher");
                     return;
                 }
                 if last_check.elapsed() < Duration::from_secs(1) {
@@ -433,7 +456,9 @@ impl BlockFetcher {
                     Ok(t) => t,
                     Err(e) => {
                         _ = task_sender.send(BlockEvent::Error(e));
-                        return;
+                        std_wait(|| current_task.load(Ordering::SeqCst) != job_id,
+                                 Duration::from_secs(1));
+                        continue;
                     }
                 };
 
@@ -452,12 +477,20 @@ impl BlockFetcher {
                         Ok(new_tip) => {
                             checkpoint = new_tip;
                         }
+                        Err(e) if matches!(e, BlockFetchError::RpcError(_)) => {
+                            _ = task_sender.send(BlockEvent::Error(e));
+                            std_wait(|| current_task.load(Ordering::SeqCst) != job_id,
+                                     Duration::from_secs(1));
+                            continue;
+                        }
                         Err(e) => {
                             _ = task_sender.send(BlockEvent::Error(e));
                             current_task.fetch_add(1, Ordering::SeqCst);
                             return;
                         }
                     }
+                } else {
+                    _ = task_sender.send(BlockEvent::Tip(checkpoint));
                 }
             }
         });
@@ -803,6 +836,31 @@ impl BlockSource for BitcoinBlockSource {
         Err(BitcoinRpcError::Other(
             "Could not fetch median time".to_string(),
         ))
+    }
+
+    fn in_mempool(&self, txid: &Txid, height: u32) -> Result<bool, BitcoinRpcError> {
+        let result: Result<Value, _> = self
+            .rpc
+            .send_json_blocking(&self.client, &self.rpc.get_mempool_entry(txid));
+
+        match result {
+            Ok(_) => Ok(true),
+            Err(error) => match error {
+                BitcoinRpcError::Rpc(rpc) => {
+                    let current_count = self.get_block_count()?;
+                    if current_count != height as u64 {
+                        // Report it as still in mempool since height changed during the check
+                        return Ok(true);
+                    }
+
+                    if rpc.code == -5 && rpc.message.contains("not in mempool") {
+                        return Ok(false);
+                    }
+                    Err(BitcoinRpcError::Rpc(rpc))
+                }
+                _ => Err(error),
+            },
+        }
     }
 
     fn get_block_count(&self) -> Result<u64, BitcoinRpcError> {

@@ -1,60 +1,47 @@
-use std::{collections::BTreeMap, str::FromStr, time::Duration};
-
-use anyhow::anyhow;
+use std::{
+    collections::BTreeMap,
+    str::FromStr,
+    time::{Duration},
+};
+use anyhow::{anyhow};
 use clap::ValueEnum;
 use futures::{stream::FuturesUnordered, StreamExt};
 use log::{info, warn};
-use protocol::{
-    bitcoin::Txid,
-    constants::ChainAnchor,
-    hasher::{KeyHasher, SpaceKey},
-    prepare::DataSource,
-    script::SpaceScript,
-    slabel::SLabel,
-    FullSpaceOut, Space,
-};
+use protocol::{bitcoin::Txid, constants::ChainAnchor, hasher::{KeyHasher, SpaceKey}, script::SpaceScript, slabel::SLabel, FullSpaceOut, SpaceOut};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::{
     select,
     sync::{broadcast, mpsc, mpsc::Receiver, oneshot},
 };
-use wallet::{
-    address::SpaceAddress,
-    bdk_wallet,
-    bdk_wallet::{
-        chain::{local_chain::CheckPoint, BlockId},
-        wallet::tx_builder::TxOrdering,
-        KeychainKind, LocalOutput,
-    },
-    bitcoin,
-    bitcoin::{Address, Amount, FeeRate, OutPoint},
-    builder::{
-        CoinTransfer, SelectionOutput, SpaceTransfer, SpacesAwareCoinSelection, TransactionTag,
-        TransferRequest,
-    },
-    DoubleUtxo, SpacesWallet, WalletInfo,
-};
-use wallet::bdk_wallet::chain::ConfirmationTime;
-use crate::{
-    config::ExtendedNetwork,
-    node::BlockSource,
-    rpc::{LoadedWallet, RpcWalletRequest, RpcWalletTxBuilder},
-    source::{
-        BitcoinBlockSource, BitcoinRpc, BitcoinRpcError, BlockEvent, BlockFetchError, BlockFetcher,
-    },
-    store::{ChainState, LiveSnapshot, Sha256},
-};
-use crate::checker::TxChecker;
+use tokio::time::Instant;
+use wallet::{address::SpaceAddress, bdk_wallet::{
+    chain::{local_chain::CheckPoint, BlockId},
+    KeychainKind,
+}, bitcoin, bitcoin::{Address, Amount, FeeRate, OutPoint}, builder::{CoinTransfer, SpaceTransfer, SpacesAwareCoinSelection}, tx_event::{TxRecord, TxEvent, TxEventKind}, Balance, DoubleUtxo, Listing, SpacesWallet, WalletInfo, WalletOutput};
+use crate::{checker::TxChecker, config::ExtendedNetwork, node::BlockSource, rpc::{RpcWalletRequest, RpcWalletTxBuilder, WalletLoadRequest}, source::{
+    BitcoinBlockSource, BitcoinRpc, BitcoinRpcError, BlockEvent, BlockFetchError, BlockFetcher,
+}, std_wait, store::{ChainState, LiveSnapshot, Sha256}};
+
+const MEMPOOL_CHECK_INTERVAL: Duration = Duration::from_millis(
+    if cfg!(debug_assertions) { 500 } else { 10_000 }
+);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TxResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<BTreeMap<String, String>>,
     pub txid: Txid,
-    pub tags: Vec<TransactionTag>,
+    pub events: Vec<TxEvent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub raw: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListSpacesResponse {
+    pub winning: Vec<FullSpaceOut>,
+    pub outbid: Vec<FullSpaceOut>,
+    pub owned: Vec<FullSpaceOut>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,19 +51,12 @@ pub struct TxInfo {
     pub sent: Amount,
     pub received: Amount,
     pub fee: Option<Amount>,
+    pub events: Vec<TxEvent>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WalletResponse {
     pub result: Vec<TxResponse>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WalletOutput {
-    #[serde(flatten)]
-    pub output: LocalOutput,
-    pub space: Option<Space>,
-    pub is_spaceout: bool,
 }
 
 pub enum WalletCommand {
@@ -103,7 +83,18 @@ pub enum WalletCommand {
         resp: crate::rpc::Responder<anyhow::Result<Vec<TxInfo>>>,
     },
     ListSpaces {
-        resp: crate::rpc::Responder<anyhow::Result<Vec<WalletOutput>>>,
+        resp: crate::rpc::Responder<anyhow::Result<ListSpacesResponse>>,
+    },
+    Buy {
+        listing: Listing,
+        skip_tx_check: bool,
+        fee_rate: Option<FeeRate>,
+        resp: crate::rpc::Responder<anyhow::Result<TxResponse>>,
+    },
+    Sell {
+        space: String,
+        price: u64,
+        resp: crate::rpc::Responder<anyhow::Result<Listing>>,
     },
     ListBidouts {
         resp: crate::rpc::Responder<anyhow::Result<Vec<DoubleUtxo>>>,
@@ -128,22 +119,17 @@ pub enum AddressKind {
     Space,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Balance {
-    pub balance: Amount,
-    pub details: BalanceDetails,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BalanceDetails {
-    #[serde(flatten)]
-    pub balance: bdk_wallet::wallet::Balance,
-    pub dust: Amount,
-}
-
 #[derive(Clone)]
 pub struct RpcWallet {
     pub sender: mpsc::Sender<WalletCommand>,
+}
+
+pub struct MempoolChecker<'a>(&'a BitcoinBlockSource);
+
+impl wallet::Mempool for MempoolChecker<'_> {
+    fn in_mempool(&self, txid: &Txid, height: u32) -> anyhow::Result<bool> {
+        Ok(self.0.in_mempool(txid, height)?)
+    }
 }
 
 impl RpcWallet {
@@ -170,26 +156,57 @@ impl RpcWallet {
         None
     }
 
-    fn get_balance(state: &mut LiveSnapshot, wallet: &mut SpacesWallet) -> anyhow::Result<Balance> {
-        let unspent = Self::list_unspent(wallet, state)?;
-        let balance = wallet.spaces.balance();
-
-        let details = BalanceDetails {
-            balance,
-            dust: unspent
-                .into_iter()
-                .filter(|output|
-                    // confirmed or trusted pending only
-                    (output.output.confirmation_time.is_confirmed() || output.output.keychain == KeychainKind::Internal) &&
-                        (output.space.is_some() || output.output.txout.value <= SpacesAwareCoinSelection::DUST_THRESHOLD)
-                )
-                .map(|output| output.output.txout.value)
-                .sum(),
+    fn handle_buy(
+        source: &BitcoinBlockSource,
+        state: &mut LiveSnapshot,
+        wallet: &mut SpacesWallet,
+        listing: Listing,
+        skip_tx_check: bool,
+        fee_rate: Option<FeeRate>,
+    ) -> anyhow::Result<TxResponse> {
+        let fee_rate = match fee_rate.as_ref() {
+            None => match Self::estimate_fee_rate(source) {
+                None => return Err(anyhow!("could not estimate fee rate")),
+                Some(r) => r,
+            },
+            Some(r) => r.clone(),
         };
+        info!("Using fee rate: {} sat/vB", fee_rate.to_sat_per_vb_ceil());
 
-        Ok(Balance {
-            balance: (details.balance.confirmed + details.balance.trusted_pending) - details.dust,
-            details,
+        let (_, fullspaceout) = SpacesWallet::verify_listing::<Sha256>(state, &listing)?;
+
+        let space = fullspaceout.spaceout.space.as_ref().expect("space").name.to_string();
+        let foreign_input = fullspaceout.outpoint();
+        let tx = wallet.buy::<Sha256>(state, &listing, fee_rate)?;
+        
+        if !skip_tx_check {
+            let tip = wallet.local_chain().tip().height();
+            let mut checker = TxChecker::new(state);
+            checker.check_apply_tx(tip + 1, &tx)?;
+        }
+
+        let new_txid = tx.compute_txid();
+        let last_seen = source.rpc.broadcast_tx(&source.client, &tx)?;
+
+        let tx_record = TxRecord::new_with_events(tx, vec![TxEvent {
+            kind: TxEventKind::Buy,
+            space: Some(space),
+            foreign_input: Some(foreign_input),
+            details: None,
+        }]);
+
+        let events = tx_record.events.clone();
+
+        // Incrementing last_seen by 1 ensures eviction of older tx
+        // in cases with same-second/last seen replacement.
+        wallet.apply_unconfirmed_tx_record(tx_record, last_seen+1)?;
+        wallet.commit()?;
+
+        Ok(TxResponse {
+            txid: new_txid,
+            events,
+            error: None,
+            raw: None,
         })
     }
 
@@ -201,79 +218,72 @@ impl RpcWallet {
         skip_tx_check: bool,
         fee_rate: FeeRate,
     ) -> anyhow::Result<Vec<TxResponse>> {
-        let coin_selection = Self::get_spaces_coin_selection(
-            wallet, state,
-            false, /* generally bdk won't use unconfirmed for replacements anyways */
-        )?;
-        let previous_tx_lock_time = match wallet.spaces.get_tx(txid) {
-            None => return Err(anyhow::anyhow!("No wallet tx {} found", txid)),
-            Some(tx) => tx.tx_node.lock_time
-        };
-
-        let mut builder = wallet
-            .spaces
-            .build_fee_bump(txid)?
-            .coin_selection(coin_selection);
-
-        builder
-            .enable_rbf()
-            .ordering(TxOrdering::Untouched)
-            .nlocktime(previous_tx_lock_time)
-            .fee_rate(fee_rate);
+        let unspendables = wallet.list_spaces_outpoints(state)?;
+        let tx_events = wallet.get_tx_events(txid)?;
+        let builder =
+            wallet.build_fee_bump(unspendables, txid, fee_rate)?;
 
         let psbt = builder.finish()?;
-        let tx = wallet.sign(psbt, None)?;
+        let replacement = wallet.sign(psbt, None)?;
 
         if !skip_tx_check {
-            let tip = wallet.spaces.local_chain().tip().height();
+            let tip = wallet.local_chain().tip().height();
             let mut checker = TxChecker::new(state);
-            checker.check_apply_tx(tip+1, &tx)?;
+            checker.check_apply_tx(tip + 1, &replacement)?;
         }
 
-        let new_txid = tx.compute_txid();
-        let confirmation = source.rpc.broadcast_tx(&source.client, &tx)?;
-        wallet.insert_tx(tx, confirmation)?;
+        let new_txid = replacement.compute_txid();
+        let last_seen = source.rpc.broadcast_tx(&source.client, &replacement)?;
+
+        let mut tx_record = TxRecord::new_with_events(replacement, tx_events);
+        tx_record.add_fee_bump();
+
+        let new_events = tx_record.events.clone();
+
+        // Incrementing last_seen by 1 ensures eviction of older tx
+        // in cases with same-second/last seen replacement.
+        wallet.apply_unconfirmed_tx_record(tx_record, last_seen+1)?;
         wallet.commit()?;
 
         Ok(vec![TxResponse {
             txid: new_txid,
-            tags: vec![TransactionTag::FeeBump],
+            events: new_events,
             error: None,
             raw: None,
         }])
     }
 
     fn handle_force_spend_output(
-        source: &BitcoinBlockSource,
-        state: &mut LiveSnapshot,
-        wallet: &mut SpacesWallet,
-        output: OutPoint,
-        fee_rate: FeeRate,
+        _source: &BitcoinBlockSource,
+        _state: &mut LiveSnapshot,
+        _wallet: &mut SpacesWallet,
+        _output: OutPoint,
+        _fee_rate: FeeRate,
     ) -> anyhow::Result<TxResponse> {
-        let coin_selection = Self::get_spaces_coin_selection(wallet, state, true)?;
-        let addre = wallet.spaces.next_unused_address(KeychainKind::External);
-        let mut builder = wallet.spaces.build_tx().coin_selection(coin_selection);
-
-        builder.ordering(TxOrdering::Untouched);
-        builder.fee_rate(fee_rate);
-        builder.enable_rbf();
-        builder.add_utxo(output)?;
-        builder.add_recipient(addre.script_pubkey(), Amount::from_sat(5000));
-
-        let psbt = builder.finish()?;
-        let tx = wallet.sign(psbt, None)?;
-
-        let txid = tx.compute_txid();
-        let confirmation = source.rpc.broadcast_tx(&source.client, &tx)?;
-        wallet.insert_tx(tx, confirmation)?;
-        wallet.commit()?;
-
-        Ok(TxResponse {
-            txid,
-            tags: vec![TransactionTag::ForceSpendTestOnly],
-            error: None,
-            raw: None,
-        })
+        todo!("")
+        // let coin_selection = Self::get_spaces_coin_selection(wallet, state, true)?;
+        // let addre = wallet.spaces.next_unused_address(KeychainKind::External);
+        // let mut builder = wallet.spaces.build_tx().coin_selection(coin_selection);
+        //
+        // builder.ordering(TxOrdering::Untouched);
+        // builder.fee_rate(fee_rate);
+        // builder.add_utxo(output)?;
+        // builder.add_recipient(addre.script_pubkey(), Amount::from_sat(5000));
+        //
+        // let psbt = builder.finish()?;
+        // let tx = wallet.sign(psbt, None)?;
+        //
+        // let txid = tx.compute_txid();
+        // let last_seen = source.rpc.broadcast_tx(&source.client, &tx)?;
+        // wallet.apply_unconfirmed_tx(tx, last_seen);
+        // wallet.commit()?;
+        //
+        // Ok(TxResponse {
+        //     txid,
+        //     events: vec![],
+        //     error: None,
+        //     raw: None,
+        // })
     }
 
     fn wallet_handle_commands(
@@ -282,10 +292,15 @@ impl RpcWallet {
         mut state: &mut LiveSnapshot,
         wallet: &mut SpacesWallet,
         command: WalletCommand,
+        synced: bool,
     ) -> anyhow::Result<()> {
         match command {
             WalletCommand::GetInfo { resp } => _ = resp.send(Ok(wallet.get_info())),
             WalletCommand::BatchTx { request, resp } => {
+                if !synced && !request.force {
+                    _ = resp.send(Err(anyhow::anyhow!("Wallet is syncing")));
+                    return Ok(());
+                }
                 let batch_result = Self::batch_tx(network, &source, wallet, &mut state, request);
                 _ = resp.send(batch_result);
             }
@@ -295,7 +310,18 @@ impl RpcWallet {
                 skip_tx_check,
                 resp,
             } => {
-                let result = Self::handle_fee_bump(source, &mut state, wallet, txid, skip_tx_check, fee_rate);
+                if !synced {
+                    _ = resp.send(Err(anyhow::anyhow!("Wallet is syncing")));
+                    return Ok(());
+                }
+                let result = Self::handle_fee_bump(
+                    source,
+                    &mut state,
+                    wallet,
+                    txid,
+                    skip_tx_check,
+                    fee_rate,
+                );
                 _ = resp.send(result);
             }
             WalletCommand::ForceSpendOutput {
@@ -310,7 +336,6 @@ impl RpcWallet {
             WalletCommand::GetNewAddress { kind, resp } => {
                 let address = match kind {
                     AddressKind::Coin => wallet
-                        .spaces
                         .next_unused_address(KeychainKind::External)
                         .address
                         .to_string(),
@@ -319,40 +344,63 @@ impl RpcWallet {
                 _ = resp.send(Ok(address));
             }
             WalletCommand::ListUnspent { resp } => {
-                _ = resp.send(Self::list_unspent(wallet, state));
+                _ = resp.send(wallet.list_unspent_with_details(state));
             }
             WalletCommand::ListTransactions { count, skip, resp } => {
                 let transactions = Self::list_transactions(wallet, count, skip);
                 _ = resp.send(transactions);
             }
             WalletCommand::ListSpaces { resp } => {
-                let result = Self::list_unspent(wallet, state);
-                match result {
-                    Ok(unspent) => {
-                        _ = resp.send(Ok(unspent
-                            .into_iter()
-                            .filter(|s| s.space.is_some())
-                            .collect()));
-                    }
-                    Err(error) => {
-                        _ = resp.send(Err(error));
-                    }
-                }
+                let result = Self::list_spaces(wallet, state);
+                _ = resp.send(result);
             }
             WalletCommand::ListBidouts { resp } => {
-                let sel = Self::get_spaces_coin_selection(wallet, state, false)?;
-                let result = wallet.list_bidouts(&sel);
+                let result = wallet.list_bidouts(false);
                 _ = resp.send(result);
             }
             WalletCommand::GetBalance { resp } => {
-                let balance = Self::get_balance(state, wallet);
+                if !synced {
+                    _ = resp.send(Err(anyhow::anyhow!("Wallet is syncing")));
+                    return Ok(());
+                }
+                let balance = wallet.balance();
                 _ = resp.send(balance);
             }
             WalletCommand::UnloadWallet => {
                 info!("Unloading wallet '{}' ...", wallet.name());
             }
+            WalletCommand::Buy { listing, resp, skip_tx_check, fee_rate } => {
+                _ = resp.send(Self::handle_buy(source, state, wallet, listing, skip_tx_check, fee_rate));
+            }
+            WalletCommand::Sell { space, price, resp } => {
+                _ = resp.send(wallet.sell::<Sha256>(state, &space, Amount::from_sat(price)));
+            }
         }
         Ok(())
+    }
+
+    /// Returns true if Bitcoin, protocol, and wallet tips match.
+    fn all_synced(bitcoin: &BitcoinBlockSource, protocol: &mut LiveSnapshot, wallet: &SpacesWallet) -> Option<ChainAnchor> {
+        let bitcoin_tip = match bitcoin.get_best_chain() {
+            Ok(tip) => tip,
+            Err(e) => {
+                warn!("Sync check failed: {}", e);
+                return None;
+            }
+        };
+        let wallet_tip = wallet.local_chain().tip();
+        let protocol_tip = match protocol.tip.read() {
+            Ok(tip) => tip.clone(),
+            Err(e) => {
+                warn!("Failed to read protocol tip: {}", e);
+                return None;
+            }
+        };
+        if protocol_tip.hash == wallet_tip.hash() && protocol_tip.hash == bitcoin_tip.hash {
+            Some(bitcoin_tip)
+        } else {
+            None
+        }
     }
 
     fn wallet_sync(
@@ -367,7 +415,7 @@ impl RpcWallet {
         let (fetcher, receiver) = BlockFetcher::new(source.clone(), num_workers);
 
         let mut wallet_tip = {
-            let tip = wallet.spaces.local_chain().tip();
+            let tip = wallet.local_chain().tip();
             ChainAnchor {
                 height: tip.height(),
                 hash: tip.hash(),
@@ -375,42 +423,31 @@ impl RpcWallet {
         };
 
         fetcher.start(wallet_tip);
-
+        let mut synced_at_least_once = false;
+        let mut last_mempool_check = Instant::now();
         loop {
             if shutdown.try_recv().is_ok() {
                 info!("Shutting down wallet sync");
                 break;
             }
             if let Ok(command) = commands.try_recv() {
-                Self::wallet_handle_commands(network, &source, &mut state, &mut wallet, command)?;
+                let synced = Self::all_synced(&source, &mut state, &wallet).is_some();
+                Self::wallet_handle_commands(network, &source, &mut state, &mut wallet, command, synced)?;
             }
             if let Ok(event) = receiver.try_recv() {
                 match event {
+                    BlockEvent::Tip(_) => {
+                        synced_at_least_once = true;
+                    }
                     BlockEvent::Block(id, block) => {
                         wallet.apply_block_connected_to(
                             id.height,
                             &block,
-                            wallet::bdk_wallet::chain::BlockId {
+                            BlockId {
                                 height: wallet_tip.height,
                                 hash: wallet_tip.hash,
                             },
                         )?;
-
-                        // Temporary fix for https://github.com/bitcoindevkit/bdk/issues/1740
-                        for tx in block.txdata {
-                            for input in tx.input.iter() {
-                                if wallet.watch_bid_spends.contains(&input.previous_output) {
-                                    if wallet.spaces.get_tx(tx.compute_txid()).is_some() {
-                                        break;
-                                    }
-                                    wallet.insert_tx(tx, ConfirmationTime::Confirmed {
-                                        height: id.height,
-                                        time: block.header.time as _,
-                                    })?;
-                                    break;
-                                }
-                            }
-                        }
 
                         wallet_tip.height = id.height;
                         wallet_tip.hash = id.hash;
@@ -421,31 +458,52 @@ impl RpcWallet {
                     }
                     BlockEvent::Error(e) if matches!(e, BlockFetchError::BlockMismatch) => {
                         let mut checkpoint_in_chain = None;
-                        let best_chain = source.get_best_chain()?;
-                        for cp in wallet.spaces.local_chain().iter_checkpoints() {
+                        let best_chain = match source.get_best_chain() {
+                            Ok(best) => best,
+                            Err(error) => {
+                                warn!("Wallet error: {}", error);
+                                fetcher.restart(wallet_tip, &receiver);
+                                continue;
+                            }
+                        };
+
+                        for cp in wallet.local_chain().iter_checkpoints() {
                             if cp.height() > best_chain.height {
                                 continue;
                             }
-
-                            let hash = source.get_block_hash(cp.height())?;
+                            let hash = match source.get_block_hash(cp.height()) {
+                                Ok(hash) => hash,
+                                Err(err) => {
+                                    warn!("Wallet error: {}", err);
+                                    fetcher.restart(wallet_tip, &receiver);
+                                    continue;
+                                }
+                            };
                             if cp.height() != 0 && hash == cp.hash() {
                                 checkpoint_in_chain = Some(cp);
                                 break;
                             }
                         }
-
                         let restore_point = match checkpoint_in_chain {
                             None => {
                                 // We couldn't find a restore point
                                 warn!("Rebuilding wallet `{}`", wallet.config.name);
                                 let birthday = wallet.config.start_block;
-                                let hash = source.get_block_hash(birthday)?;
+                                let hash = match source.get_block_hash(birthday) {
+                                    Ok(hash) => hash,
+                                    Err(error) => {
+                                        warn!("Wallet error: {}", error);
+                                        fetcher.restart(wallet_tip, &receiver);
+                                        continue;
+                                    }
+                                };
+
                                 let cp = CheckPoint::new(BlockId {
                                     height: birthday,
                                     hash,
                                 });
                                 wallet = wallet.rebuild()?;
-                                wallet.spaces.insert_checkpoint(cp.block_id())?;
+                                wallet.insert_checkpoint(cp.block_id())?;
                                 cp
                             }
                             Some(cp) => cp,
@@ -460,15 +518,32 @@ impl RpcWallet {
                             wallet_tip.hash,
                             wallet_tip.height
                         );
-                        fetcher.start(wallet_tip);
+                        fetcher.restart(wallet_tip, &receiver);
                     }
-                    BlockEvent::Error(e) => return Err(e.into()),
+                    BlockEvent::Error(e) => {
+                        warn!("Fetcher: {} - retrying in 1s", e);
+                        std_wait(|| shutdown.try_recv().is_ok(), Duration::from_secs(1));
+                        fetcher.restart(wallet_tip, &receiver);
+                    }
                 }
 
                 continue;
             }
 
-            // TODO: update wallet mempool
+            if synced_at_least_once && last_mempool_check.elapsed() > MEMPOOL_CHECK_INTERVAL {
+                if let Some(common_tip) = Self::all_synced(&source, &mut state, &wallet) {
+                    let mem = MempoolChecker(&source);
+                    match wallet.update_unconfirmed_bids(mem, common_tip.height, &mut state) {
+                        Ok(txids) => for txid in txids {
+                            info!("Dropped {} - no longer in the mempool", txid);
+                        }
+                        Err(err) =>
+                            warn!("Could not check for unconfirmed bids in mempool: {}", err),
+                    }
+                    last_mempool_check = Instant::now();
+                }
+            }
+
             std::thread::sleep(Duration::from_millis(10));
         }
 
@@ -476,31 +551,65 @@ impl RpcWallet {
         Ok(())
     }
 
-    fn get_spaces_coin_selection(
+    fn list_spaces(
         wallet: &mut SpacesWallet,
-        state: &mut LiveSnapshot,
-        confirmed_only: bool,
-    ) -> anyhow::Result<SpacesAwareCoinSelection> {
-        // Filters out all "spaceouts" with value higher than DUST threshold && all spaceouts representing
-        // spaces.
-        //
-        // Note: This exclusion only applies to confirmed spaceouts; unconfirmed ones are not excluded
-        // as we cannot easily detect them for now.
-        // In practice, this should be fine since Spaces coin selection skips dust by default,
-        // so explicitly excluding spaceouts may be redundant.
-        let excluded = Self::list_unspent(wallet, state)?
-            .into_iter()
-            .filter(|out| out.space.is_some() ||
-                (out.is_spaceout && out.output.txout.value <= SpacesAwareCoinSelection::DUST_THRESHOLD)
-            )
-            .map(|out| SelectionOutput {
-                outpoint: out.output.outpoint,
-                is_space: out.space.is_some(),
-                is_spaceout: out.is_spaceout,
-            })
-            .collect::<Vec<_>>();
+        state: &mut LiveSnapshot
+    ) -> anyhow::Result<ListSpacesResponse> {
+        let unspent = wallet.list_unspent_with_details(state)?;
+        let recent_events = wallet.list_recent_events()?;
 
-        Ok(SpacesAwareCoinSelection::new(excluded, confirmed_only))
+        let mut res = ListSpacesResponse {
+            winning: vec![],
+            outbid: vec![],
+            owned: vec![],
+        };
+        for (txid, event) in recent_events {
+            if unspent.iter()
+                .any(|out| out.space.as_ref()
+                    .is_some_and(|s| &s.name.to_string() == event.space.as_ref().unwrap())) {
+                continue;
+            }
+            let name = SLabel::from_str(event.space.as_ref().unwrap()).expect("valid space name");
+            let spacehash = SpaceKey::from(Sha256::hash(name.as_ref()));
+            let space = state.get_space_info(&spacehash)?;
+            if let Some(space) = space {
+                let tx = wallet.get_tx(txid);
+                if tx.is_none() {
+                    res.outbid.push(space);
+                    continue;
+                }
+
+                let foreign_input = match event.foreign_input {
+                    None => continue,
+                    Some(outpoint) => outpoint
+                };
+                if foreign_input != space.outpoint() {
+                    res.outbid.push(space);
+                }
+            }
+        }
+
+        for wallet_output in unspent.into_iter().filter(|output| output.space.is_some()) {
+            let entry = FullSpaceOut {
+                txid: wallet_output.output.outpoint.txid,
+                spaceout: SpaceOut {
+                    n: wallet_output.output.outpoint.vout as _,
+                    space: wallet_output.space,
+                    script_pubkey: wallet_output.output.txout.script_pubkey,
+                    value: wallet_output.output.txout.value,
+                },
+            };
+
+            let space = entry.spaceout.space.as_ref().expect("space");
+            if matches!(space.covenant, protocol::Covenant::Bid { .. }) {
+                res.winning.push(entry);
+            } else if matches!(space.covenant, protocol::Covenant::Transfer { .. }) {
+                res.owned.push(entry);
+            }
+        }
+
+
+        Ok(res)
     }
 
     fn list_transactions(
@@ -508,10 +617,10 @@ impl RpcWallet {
         count: usize,
         skip: usize,
     ) -> anyhow::Result<Vec<TxInfo>> {
-        let mut transactions: Vec<_> = wallet.spaces.transactions().collect();
+        let mut transactions: Vec<_> = wallet.transactions().collect();
         transactions.sort();
 
-        Ok(transactions
+        let mut txs: Vec<_> = transactions
             .iter()
             .rev()
             .skip(skip)
@@ -520,40 +629,36 @@ impl RpcWallet {
                 let tx = ctx.tx_node.tx.clone();
                 let txid = ctx.tx_node.txid.clone();
                 let confirmed = ctx.chain_position.is_confirmed();
-                let (sent, received) = wallet.spaces.sent_and_received(&tx);
-                let fee = wallet.spaces.calculate_fee(&tx).ok();
+                let (sent, received) = wallet.sent_and_received(&tx);
+                let fee = wallet.calculate_fee(&tx).ok();
                 TxInfo {
                     txid,
                     confirmed,
                     sent,
                     received,
                     fee,
+                    events: vec![],
                 }
             })
-            .collect())
-    }
+            .collect();
 
-    fn list_unspent(
-        wallet: &mut SpacesWallet,
-        store: &mut LiveSnapshot,
-    ) -> anyhow::Result<Vec<WalletOutput>> {
-        let mut wallet_outputs = Vec::new();
-
-        for output in wallet.spaces.list_unspent() {
-            let mut details = WalletOutput {
-                output,
-                space: None,
-                is_spaceout: false,
+        // TODO: use a single query?
+        for tx in txs.iter_mut() {
+            tx.events = {
+                let conn = wallet.connection.transaction()?;
+                let mut events = TxEvent::all(&conn, tx.txid).expect("tx event");
+                for event in events.iter_mut() {
+                    match event.kind {
+                        TxEventKind::Commit => {
+                            event.details = None
+                        }
+                        _ => {}
+                    }
+                }
+                events
             };
-
-            let result = store.get_spaceout(&details.output.outpoint)?;
-            if let Some(spaceout) = result {
-                details.is_spaceout = true;
-                details.space = spaceout.space;
-            }
-            wallet_outputs.push(details)
         }
-        Ok(wallet_outputs)
+        Ok(txs)
     }
 
     fn resolve(
@@ -596,7 +701,6 @@ impl RpcWallet {
     fn replaces_unconfirmed_bid(wallet: &SpacesWallet, bid_spaceout: &FullSpaceOut) -> bool {
         let outpoint = bid_spaceout.outpoint();
         wallet
-            .spaces
             .transactions()
             .filter(|tx| !tx.chain_position.is_confirmed())
             .any(|tx| {
@@ -614,8 +718,7 @@ impl RpcWallet {
         store: &mut LiveSnapshot,
         tx: RpcWalletTxBuilder,
     ) -> anyhow::Result<WalletResponse> {
-        let tip_height = wallet.spaces.local_chain().tip().height();
-
+        let tip_height = wallet.local_chain().tip().height();
 
         if let Some(dust) = tx.dust {
             if dust > SpacesAwareCoinSelection::DUST_THRESHOLD {
@@ -652,14 +755,14 @@ impl RpcWallet {
                 RpcWalletRequest::SendCoins(params) => {
                     let recipient = match Self::resolve(network, store, &params.to, false)? {
                         None => {
-                            return Err(anyhow!("sendcoins: could not resolve '{}'", params.to))
+                            return Err(anyhow!("send: could not resolve '{}'", params.to))
                         }
                         Some(r) => r,
                     };
-                    builder = builder.add_transfer(TransferRequest::Coin(CoinTransfer {
+                    builder = builder.add_send(CoinTransfer {
                         amount: params.amount,
                         recipient: recipient.clone(),
-                    }));
+                    });
                 }
                 RpcWalletRequest::Transfer(params) => {
                     let spaces: Vec<_> = params
@@ -679,22 +782,28 @@ impl RpcWallet {
                     for space in spaces {
                         let spacehash = SpaceKey::from(Sha256::hash(space.as_ref()));
                         match store.get_space_info(&spacehash)? {
-                            None => return Err(anyhow!("sendspaces: you don't own `{}`", space)),
+                            None => return Err(anyhow!("transfer: you don't own `{}`", space)),
                             Some(full)
                             if full.spaceout.space.is_none()
                                 || !full.spaceout.space.as_ref().unwrap().is_owned()
                                 || !wallet
-                                .spaces
-                                .is_mine(full.spaceout.script_pubkey.as_script()) =>
+                                .is_mine(full.spaceout.script_pubkey.clone()) =>
                                 {
-                                    return Err(anyhow!("sendspaces: you don't own `{}`", space));
+                                    return Err(anyhow!("transfer: you don't own `{}`", space));
                                 }
+
+                            Some(full) if wallet.get_utxo(full.outpoint()).is_none() => {
+                                return Err(anyhow!(
+                            "transfer '{}': wallet already has a pending tx for this space",
+                            space
+                        ));
+                            }
+
                             Some(full) => {
-                                builder =
-                                    builder.add_transfer(TransferRequest::Space(SpaceTransfer {
-                                        space: full,
-                                        recipient: recipient.clone(),
-                                    }));
+                                builder = builder.add_transfer(SpaceTransfer {
+                                    space: full,
+                                    recipient: recipient.clone(),
+                                });
                             }
                         };
                     }
@@ -735,16 +844,23 @@ impl RpcWallet {
                         return Err(anyhow!("register '{}': space does not exist", params.name));
                     }
                     let utxo = spaceout.unwrap();
-                    if !wallet.spaces.is_mine(&utxo.spaceout.script_pubkey) {
+                    if !wallet.is_mine(utxo.spaceout.script_pubkey.clone()) {
                         return Err(anyhow!(
                             "register '{}': you don't own this space",
                             params.name
                         ));
                     }
 
+                    if wallet.get_utxo(utxo.outpoint()).is_none() {
+                        return Err(anyhow!(
+                            "register '{}': wallet already has a pending tx for this space",
+                            params.name
+                        ));
+                    }
+
                     if !tx.force {
                         let claim_height = utxo.spaceout.space.as_ref().unwrap().claim_height();
-                        let tip_height = wallet.spaces.local_chain().tip().height();
+                        let tip_height = wallet.local_chain().tip().height();
 
                         if claim_height.is_none() {
                             return Err(anyhow!(
@@ -785,15 +901,23 @@ impl RpcWallet {
                         let spacehash = SpaceKey::from(Sha256::hash(name.as_ref()));
                         let spaceout = store.get_space_info(&spacehash)?;
                         if spaceout.is_none() {
-                            return Err(anyhow!("execute on '{}': space does not exist", space));
+                            return Err(anyhow!("script '{}': space does not exist", space));
                         }
                         let spaceout = spaceout.unwrap();
-                        if !wallet.spaces.is_mine(&spaceout.spaceout.script_pubkey) {
+                        if !wallet.is_mine(spaceout.spaceout.script_pubkey.clone()) {
                             return Err(anyhow!(
-                                "execute on '{}': you don't own this space",
+                                "script '{}': you don't own this space",
                                 space
                             ));
                         }
+
+                        if wallet.get_utxo(spaceout.outpoint()).is_none() {
+                            return Err(anyhow!(
+                                "script '{}': wallet already has a pending tx for this space",
+                                space
+                            ));
+                        }
+
                         let address = wallet.next_unused_space_address();
                         spaces.push(SpaceTransfer {
                             space: spaceout,
@@ -807,16 +931,15 @@ impl RpcWallet {
             }
         }
 
+        let unspendables = wallet.list_spaces_outpoints(store)?;
         let median_time = source.get_median_time()?;
-        let coin_selection = Self::get_spaces_coin_selection(wallet, store, bid_replacement)?;
         let mut checker = TxChecker::new(store);
 
         if !tx.skip_tx_check {
             let mut unconfirmed: Vec<_> = wallet
-                .spaces
                 .transactions()
-                .filter(|x|
-                    !x.chain_position.is_confirmed()).collect();
+                .filter(|x| !x.chain_position.is_confirmed())
+                .collect();
             unconfirmed.sort();
             // no tx checks for unconfirmed as they're already broadcasted,
             // but we need to build on their state still
@@ -825,29 +948,29 @@ impl RpcWallet {
             }
         }
 
-        let mut tx_iter = builder.build_iter(tx.dust, median_time, wallet, coin_selection)?;
+        let mut tx_iter = builder.build_iter(tx.dust, median_time, wallet, unspendables, bid_replacement)?;
         let mut result_set = Vec::new();
 
         while let Some(tx_result) = tx_iter.next() {
-            let tagged = tx_result?;
+            let tx_record = tx_result?;
 
-            let is_bid = tagged.tags.iter().any(|tag| *tag == TransactionTag::Bid);
+            let is_bid = tx_record.events.iter().any(|tag| tag.kind == TxEventKind::Bid);
             result_set.push(TxResponse {
-                txid: tagged.tx.compute_txid(),
-                tags: tagged.tags,
+                txid: tx_record.tx.compute_txid(),
+                events: tx_record.events.clone(),
                 error: None,
                 raw: None,
             });
 
             if !tx.skip_tx_check {
-                checker.check_apply_tx(tip_height + 1, &tagged.tx)?;
+                checker.check_apply_tx(tip_height + 1, &tx_record.tx)?;
             }
 
-            let raw = bitcoin::consensus::encode::serialize_hex(&tagged.tx);
-            let result = source.rpc.broadcast_tx(&source.client, &tagged.tx);
+            let raw = bitcoin::consensus::encode::serialize_hex(&tx_record.tx);
+            let result = source.rpc.broadcast_tx(&source.client, &tx_record.tx);
             match result {
-                Ok(confirmation) => {
-                    tx_iter.wallet.insert_tx(tagged.tx, confirmation)?;
+                Ok(last_seen) => {
+                    tx_iter.wallet.apply_unconfirmed_tx_record(tx_record, last_seen)?;
                     tx_iter.wallet.commit()?;
                 }
                 Err(e) => {
@@ -892,11 +1015,30 @@ impl RpcWallet {
         Ok(WalletResponse { result: result_set })
     }
 
+    pub fn load_wallet(
+        src: &BitcoinBlockSource,
+        request: &WalletLoadRequest,
+    ) -> anyhow::Result<SpacesWallet> {
+        let mut wallet = SpacesWallet::new(request.config.clone())?;
+        let wallet_tip = wallet.local_chain().tip().height();
+
+        if wallet_tip < request.export.blockheight {
+            let hash = src.get_block_hash(request.export.blockheight)?;
+            wallet.insert_checkpoint(BlockId {
+                height: request.export.blockheight,
+                hash,
+            })?;
+            wallet.commit()?;
+        }
+
+        Ok(wallet)
+    }
+
     pub async fn service(
         network: ExtendedNetwork,
         rpc: BitcoinRpc,
         store: LiveSnapshot,
-        mut channel: Receiver<LoadedWallet>,
+        mut channel: Receiver<WalletLoadRequest>,
         shutdown: broadcast::Sender<()>,
         num_workers: usize,
     ) -> anyhow::Result<()> {
@@ -911,9 +1053,7 @@ impl RpcWallet {
                 }
                 wallet = channel.recv() => {
                     if let Some( loaded ) = wallet {
-                        let wallet_name = loaded.wallet.name().to_string();
-                        info!("Loaded wallet: {}", wallet_name);
-
+                        let wallet_name = loaded.export.label.clone();
                         let wallet_chain = store.clone();
                         let rpc = rpc.clone();
                         let wallet_shutdown = shutdown.subscribe();
@@ -921,15 +1061,23 @@ impl RpcWallet {
 
                         std::thread::spawn(move || {
                             let source = BitcoinBlockSource::new(rpc);
-                            _ = tx.send(Self::wallet_sync(
-                                network,
-                                source,
-                                wallet_chain,
-                                loaded.wallet,
-                                loaded.rx,
-                                wallet_shutdown,
-                                num_workers
-                            ));
+                            let wallet = Self::load_wallet(&source, &loaded);
+                            match wallet {
+                                Ok(wallet) => {
+                                  _ = tx.send(Self::wallet_sync(
+                                  network,
+                                  source,
+                                  wallet_chain,
+                                  wallet,
+                                  loaded.rx,
+                                  wallet_shutdown,
+                                  num_workers
+                                ));
+                              }
+                              Err(err) => {
+                                _ = tx.send(Err(err));
+                              }
+                            }
                         });
                         wallet_results.push(named_future(wallet_name, rx));
                     }
@@ -993,6 +1141,40 @@ impl RpcWallet {
         resp_rx.await?
     }
 
+    pub async fn send_buy(
+        &self,
+        listing: Listing,
+        fee_rate: Option<FeeRate>,
+        skip_tx_check: bool,
+    ) -> anyhow::Result<TxResponse> {
+        let (resp, resp_rx) = oneshot::channel();
+        self.sender
+            .send(WalletCommand::Buy {
+                listing,
+                fee_rate,
+                skip_tx_check,
+                resp,
+            })
+            .await?;
+        resp_rx.await?
+    }
+
+    pub async fn send_sell(
+        &self,
+        space: String,
+        price: u64,
+    ) -> anyhow::Result<Listing> {
+        let (resp, resp_rx) = oneshot::channel();
+        self.sender
+            .send(WalletCommand::Sell {
+                space,
+                resp,
+                price,
+            })
+            .await?;
+        resp_rx.await?
+    }
+
     pub async fn send_list_transactions(
         &self,
         count: usize,
@@ -1004,6 +1186,8 @@ impl RpcWallet {
             .await?;
         resp_rx.await?
     }
+
+
 
     pub async fn send_force_spend(
         &self,
@@ -1021,7 +1205,7 @@ impl RpcWallet {
         resp_rx.await?
     }
 
-    pub async fn send_list_spaces(&self) -> anyhow::Result<Vec<WalletOutput>> {
+    pub async fn send_list_spaces(&self) -> anyhow::Result<ListSpacesResponse> {
         let (resp, resp_rx) = oneshot::channel();
         self.sender.send(WalletCommand::ListSpaces { resp }).await?;
         resp_rx.await?
@@ -1077,7 +1261,7 @@ fn fee_rate_from_message(message: &str) -> Option<FeeRate> {
 
 async fn named_future<T>(
     name: String,
-    rx: tokio::sync::oneshot::Receiver<T>,
-) -> (String, Result<T, tokio::sync::oneshot::error::RecvError>) {
+    rx: oneshot::Receiver<T>,
+) -> (String, Result<T, oneshot::error::RecvError>) {
     (name, rx.await)
 }

@@ -15,34 +15,40 @@ use bdk::{
 };
 use jsonrpsee::{core::async_trait, proc_macros::rpc, server::Server, types::ErrorObjectOwned};
 use log::info;
-use protocol::{bitcoin, bitcoin::{
-    bip32::Xpriv,
-    Network::{Regtest, Testnet},
-    OutPoint,
-}, constants::ChainAnchor, hasher::{BaseHash, KeyHasher, SpaceKey}, prepare::DataSource, slabel::SLabel, FullSpaceOut, SpaceOut};
+use protocol::{
+    bitcoin,
+    bitcoin::{
+        bip32::Xpriv,
+        Network::{Regtest, Testnet},
+        OutPoint,
+    },
+    constants::ChainAnchor,
+    hasher::{BaseHash, KeyHasher, SpaceKey},
+    prepare::DataSource,
+    slabel::SLabel,
+    validate::TxChangeSet,
+    FullSpaceOut, SpaceOut,
+};
 use serde::{Deserialize, Serialize};
 use tokio::{
     select,
     sync::{broadcast, mpsc, oneshot, RwLock},
     task::JoinSet,
 };
-use protocol::validate::TxChangeSet;
-use wallet::{
-    bdk_wallet as bdk, bdk_wallet::template::Bip86, bitcoin::hashes::Hash, export::WalletExport,
-    DoubleUtxo, SpacesWallet, WalletConfig, WalletDescriptors, WalletInfo,
-};
+use wallet::{bdk_wallet as bdk, bdk_wallet::template::Bip86, bitcoin::hashes::Hash, export::WalletExport, Balance, DoubleUtxo, Listing, SpacesWallet, WalletConfig, WalletDescriptors, WalletInfo, WalletOutput};
 
 use crate::{
+    checker::TxChecker,
     config::ExtendedNetwork,
     node::{BlockMeta, TxEntry},
     source::BitcoinRpc,
     store::{ChainState, LiveSnapshot, RolloutEntry, Sha256},
     wallets::{
-        AddressKind, Balance, RpcWallet, TxInfo, TxResponse, WalletCommand, WalletOutput,
+        AddressKind, RpcWallet, TxInfo, TxResponse, WalletCommand,
         WalletResponse,
     },
 };
-use crate::checker::TxChecker;
+use crate::wallets::ListSpacesResponse;
 
 pub(crate) type Responder<T> = oneshot::Sender<T>;
 
@@ -89,6 +95,10 @@ pub enum ChainStateCommand {
         target: usize,
         resp: Responder<anyhow::Result<Vec<RolloutEntry>>>,
     },
+    VerifyListing {
+        listing: Listing,
+        resp: Responder<anyhow::Result<()>>,
+    },
 }
 
 #[derive(Clone)]
@@ -117,7 +127,10 @@ pub trait Rpc {
     async fn get_spaceout(&self, outpoint: OutPoint) -> Result<Option<SpaceOut>, ErrorObjectOwned>;
 
     #[method(name = "checkpackage")]
-    async fn check_package(&self, txs: Vec<String>) -> Result<Vec<Option<TxChangeSet>>, ErrorObjectOwned>;
+    async fn check_package(
+        &self,
+        txs: Vec<String>,
+    ) -> Result<Vec<Option<TxChangeSet>>, ErrorObjectOwned>;
 
     #[method(name = "estimatebid")]
     async fn estimate_bid(&self, target: usize) -> Result<u64, ErrorObjectOwned>;
@@ -172,6 +185,29 @@ pub trait Rpc {
         skip_tx_check: bool,
     ) -> Result<Vec<TxResponse>, ErrorObjectOwned>;
 
+    #[method(name = "walletbuy")]
+    async fn wallet_buy(
+        &self,
+        wallet: &str,
+        listing: Listing,
+        fee_rate: Option<FeeRate>,
+        skip_tx_check: bool,
+    ) -> Result<TxResponse, ErrorObjectOwned>;
+
+    #[method(name = "walletsell")]
+    async fn wallet_sell(
+        &self,
+        wallet: &str,
+        space: String,
+        amount: u64,
+    ) -> Result<Listing, ErrorObjectOwned>;
+
+    #[method(name = "verifylisting")]
+    async fn verify_listing(
+        &self,
+        listing: Listing,
+    ) -> Result<(), ErrorObjectOwned>;
+
     #[method(name = "walletlisttransactions")]
     async fn wallet_list_transactions(
         &self,
@@ -190,7 +226,7 @@ pub trait Rpc {
 
     #[method(name = "walletlistspaces")]
     async fn wallet_list_spaces(&self, wallet: &str)
-                                -> Result<Vec<WalletOutput>, ErrorObjectOwned>;
+                                -> Result<ListSpacesResponse, ErrorObjectOwned>;
 
     #[method(name = "walletlistunspent")]
     async fn wallet_list_unspent(
@@ -289,29 +325,20 @@ pub struct WalletManager {
     pub data_dir: PathBuf,
     pub network: ExtendedNetwork,
     pub rpc: BitcoinRpc,
-    pub wallet_loader: mpsc::Sender<LoadedWallet>,
+    pub wallet_loader: mpsc::Sender<WalletLoadRequest>,
     pub wallets: Arc<RwLock<BTreeMap<String, RpcWallet>>>,
 }
 
-pub struct LoadedWallet {
+pub struct WalletLoadRequest {
     pub(crate) rx: mpsc::Receiver<WalletCommand>,
-    pub(crate) wallet: SpacesWallet,
+    pub(crate) config: WalletConfig,
+    pub(crate) export: WalletExport,
 }
 
 const RPC_WALLET_NOT_LOADED: i32 = -18;
 
-impl LoadedWallet {
-    fn new(wallet: SpacesWallet, rx: mpsc::Receiver<WalletCommand>) -> Self {
-        Self { rx, wallet }
-    }
-}
-
 impl WalletManager {
-    pub async fn import_wallet(
-        &self,
-        client: &reqwest::Client,
-        wallet: WalletExport,
-    ) -> anyhow::Result<()> {
+    pub async fn import_wallet(&self, wallet: WalletExport) -> anyhow::Result<()> {
         let wallet_path = self.data_dir.join(&wallet.label);
         if wallet_path.exists() {
             return Err(anyhow!(format!(
@@ -325,7 +352,7 @@ impl WalletManager {
         let mut file = fs::File::create(wallet_export_path)?;
         file.write_all(wallet.to_string().as_bytes())?;
 
-        self.load_wallet(client, &wallet.label).await?;
+        self.load_wallet(&wallet.label).await?;
         Ok(())
     }
 
@@ -346,7 +373,7 @@ impl WalletManager {
 
         let start_block = self.get_wallet_start_block(client).await?;
         self.setup_new_wallet(name.to_string(), mnemonic.to_string(), start_block)?;
-        self.load_wallet(client, name).await?;
+        self.load_wallet(name).await?;
         Ok(())
     }
 
@@ -379,7 +406,9 @@ impl WalletManager {
         let xpriv = Self::descriptor_from_mnemonic(network, &mnemonic.to_string())?;
 
         let (external, internal) = Self::default_descriptors(xpriv);
-        let tmp = bdk::wallet::Wallet::new_or_load(external, internal, None, network)?;
+        let tmp = bdk::Wallet::create(external, internal)
+            .network(network)
+            .create_wallet_no_persist()?;
         let export =
             WalletExport::export_wallet(&tmp, &name, start_block.height).map_err(|e| anyhow!(e))?;
 
@@ -412,7 +441,7 @@ impl WalletManager {
             }
             ExtendedNetwork::Signet => {
                 genesis_hash = Some(
-                    bdk::bitcoin::constants::genesis_block(Network::Signet)
+                    bitcoin::constants::genesis_block(Network::Signet)
                         .header
                         .block_hash(),
                 );
@@ -424,7 +453,7 @@ impl WalletManager {
         (network, genesis_hash)
     }
 
-    pub async fn load_wallet(&self, client: &reqwest::Client, name: &str) -> anyhow::Result<()> {
+    pub async fn load_wallet(&self, name: &str) -> anyhow::Result<()> {
         let wallet_dir = self.data_dir.join(name);
         if !wallet_dir.exists() {
             return Err(anyhow!("Wallet does not exist"));
@@ -435,7 +464,7 @@ impl WalletManager {
         let (network, genesis_hash) = self.fallback_network();
         let export: WalletExport = serde_json::from_reader(file)?;
 
-        let mut wallet = SpacesWallet::new(WalletConfig {
+        let wallet_config = WalletConfig {
             start_block: export.blockheight,
             data_dir: wallet_dir,
             name: name.to_string(),
@@ -447,26 +476,22 @@ impl WalletManager {
                     .change_descriptor()
                     .expect("expected a change descriptor"),
             },
-        })?;
-
-        let wallet_tip = wallet.spaces.local_chain().tip().height();
-
-        if wallet_tip < export.blockheight {
-            let block_id = self.get_block_hash(client, export.blockheight).await?;
-            wallet.spaces.insert_checkpoint(block_id)?;
-            wallet.commit()?;
-        }
+        };
 
         let (rpc_wallet, rpc_wallet_rx) = RpcWallet::new();
-        let loaded_wallet = LoadedWallet::new(wallet, rpc_wallet_rx);
+        let request = WalletLoadRequest {
+            rx: rpc_wallet_rx,
+            config: wallet_config,
+            export,
+        };
 
-        self.wallet_loader.send(loaded_wallet).await?;
+        self.wallet_loader.send(request).await?;
         let mut wallets = self.wallets.write().await;
         wallets.insert(name.to_string(), rpc_wallet);
         Ok(())
     }
 
-    async fn get_block_hash(
+    pub async fn get_block_hash(
         &self,
         client: &reqwest::Client,
         height: u32,
@@ -621,7 +646,10 @@ impl RpcServer for RpcServerImpl {
         Ok(spaceout)
     }
 
-    async fn check_package(&self, txs: Vec<String>) -> Result<Vec<Option<TxChangeSet>>, ErrorObjectOwned> {
+    async fn check_package(
+        &self,
+        txs: Vec<String>,
+    ) -> Result<Vec<Option<TxChangeSet>>, ErrorObjectOwned> {
         let spaceout = self
             .store
             .check_package(txs)
@@ -672,7 +700,7 @@ impl RpcServer for RpcServerImpl {
 
     async fn wallet_load(&self, name: &str) -> Result<(), ErrorObjectOwned> {
         self.wallet_manager
-            .load_wallet(&self.client, name)
+            .load_wallet(name)
             .await
             .map_err(|error| {
                 ErrorObjectOwned::owned(RPC_WALLET_NOT_LOADED, error.to_string(), None::<String>)
@@ -681,7 +709,7 @@ impl RpcServer for RpcServerImpl {
 
     async fn wallet_import(&self, content: WalletExport) -> Result<(), ErrorObjectOwned> {
         self.wallet_manager
-            .import_wallet(&self.client, content)
+            .import_wallet(content)
             .await
             .map_err(|error| {
                 ErrorObjectOwned::owned(RPC_WALLET_NOT_LOADED, error.to_string(), None::<String>)
@@ -744,11 +772,34 @@ impl RpcServer for RpcServerImpl {
         wallet: &str,
         txid: Txid,
         fee_rate: FeeRate,
-        skip_tx_check: bool
+        skip_tx_check: bool,
     ) -> Result<Vec<TxResponse>, ErrorObjectOwned> {
         self.wallet(&wallet)
             .await?
             .send_fee_bump(txid, fee_rate, skip_tx_check)
+            .await
+            .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
+    }
+
+    async fn wallet_buy(&self, wallet: &str, listing: Listing, fee_rate: Option<FeeRate>, skip_tx_check: bool) -> Result<TxResponse, ErrorObjectOwned> {
+        self.wallet(&wallet)
+            .await?
+            .send_buy(listing, fee_rate, skip_tx_check)
+            .await
+            .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
+    }
+
+    async fn wallet_sell(&self, wallet: &str, space: String, amount: u64) -> Result<Listing, ErrorObjectOwned> {
+        self.wallet(&wallet)
+            .await?
+            .send_sell(space, amount)
+            .await
+            .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
+    }
+
+    async fn verify_listing(&self, listing: Listing) -> Result<(), ErrorObjectOwned> {
+        self.store
+            .verify_listing(listing)
             .await
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
     }
@@ -782,7 +833,7 @@ impl RpcServer for RpcServerImpl {
     async fn wallet_list_spaces(
         &self,
         wallet: &str,
-    ) -> Result<Vec<WalletOutput>, ErrorObjectOwned> {
+    ) -> Result<ListSpacesResponse, ErrorObjectOwned> {
         self.wallet(&wallet)
             .await?
             .send_list_spaces()
@@ -850,7 +901,6 @@ impl AsyncChainState {
         Ok(None)
     }
 
-
     async fn get_indexed_block(
         index: &mut Option<LiveSnapshot>,
         block_hash: &BlockHash,
@@ -899,7 +949,7 @@ impl AsyncChainState {
         cmd: ChainStateCommand,
     ) {
         match cmd {
-            ChainStateCommand::CheckPackage { txs : raw_txs, resp } => {
+            ChainStateCommand::CheckPackage { txs: raw_txs, resp } => {
                 let mut txs = Vec::with_capacity(raw_txs.len());
                 for raw_tx in raw_txs {
                     let tx = bitcoin::consensus::encode::deserialize_hex(&raw_tx);
@@ -912,9 +962,9 @@ impl AsyncChainState {
 
                 let tip = chain_state.tip.read().expect("read meta").clone();
                 let mut emulator = TxChecker::new(chain_state);
-                let result = emulator.apply_package(tip.height+1, txs);
+                let result = emulator.apply_package(tip.height + 1, txs);
                 let _ = resp.send(result);
-            },
+            }
             ChainStateCommand::GetTip { resp } => {
                 let tip = chain_state.tip.read().expect("read meta").clone();
                 _ = resp.send(Ok(tip))
@@ -953,6 +1003,9 @@ impl AsyncChainState {
                 let rollouts = chain_state.get_rollout(target);
                 _ = resp.send(rollouts);
             }
+            ChainStateCommand::VerifyListing { listing, resp } => {
+                _ = resp.send(SpacesWallet::verify_listing::<Sha256>(chain_state, &listing).map(|_| ()));
+            }
         }
     }
 
@@ -986,6 +1039,14 @@ impl AsyncChainState {
         resp_rx.await?
     }
 
+    pub async fn verify_listing(&self, listing: Listing) -> anyhow::Result<()> {
+        let (resp, resp_rx) = oneshot::channel();
+        self.sender
+            .send(ChainStateCommand::VerifyListing { listing, resp })
+            .await?;
+        resp_rx.await?
+    }
+
     pub async fn get_rollout(&self, target: usize) -> anyhow::Result<Vec<RolloutEntry>> {
         let (resp, resp_rx) = oneshot::channel();
         self.sender
@@ -1010,7 +1071,10 @@ impl AsyncChainState {
         resp_rx.await?
     }
 
-    pub async fn check_package(&self, txs: Vec<String>) -> anyhow::Result<Vec<Option<TxChangeSet>>> {
+    pub async fn check_package(
+        &self,
+        txs: Vec<String>,
+    ) -> anyhow::Result<Vec<Option<TxChangeSet>>> {
         let (resp, resp_rx) = oneshot::channel();
         self.sender
             .send(ChainStateCommand::CheckPackage { txs, resp })

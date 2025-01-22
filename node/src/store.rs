@@ -8,7 +8,7 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use bincode::{config, Decode, Encode};
 use jsonrpsee::core::Serialize;
 use protocol::{
@@ -25,6 +25,7 @@ use spacedb::{
     tx::{KeyIterator, ReadTransaction, WriteTransaction},
     Configuration, Hash, NodeHasher, Sha256Hasher,
 };
+use protocol::bitcoin::BlockHash;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RolloutEntry {
@@ -53,12 +54,12 @@ pub struct LiveSnapshot {
     db: SpaceDb,
     pub tip: Arc<RwLock<ChainAnchor>>,
     staged: Arc<RwLock<Staged>>,
-    snapshot: (u32, ReadTx),
+    snapshot: (BlockHash, ReadTx),
 }
 
 pub struct Staged {
     /// Block height of latest snapshot
-    snapshot_version: u32,
+    snapshot_version: BlockHash,
     /// Stores changes until committed
     memory: WriteMemory,
 }
@@ -101,7 +102,7 @@ impl Store {
             snapshot.metadata().try_into()?
         };
 
-        let version = anchor.height;
+        let version = anchor.hash;
         let live = LiveSnapshot {
             db: self.0.clone(),
             tip: Arc::new(RwLock::new(anchor)),
@@ -198,7 +199,7 @@ impl LiveSnapshot {
     }
 
     pub fn restore(&self, checkpoint: ChainAnchor) {
-        let snapshot_version = checkpoint.height;
+        let snapshot_version = checkpoint.hash;
         let mut meta_lock = self.tip.write().expect("write lock");
         *meta_lock = checkpoint;
 
@@ -234,8 +235,8 @@ impl LiveSnapshot {
             Some(value) => {
                 let (decoded, _): (T, _) = bincode::decode_from_slice(&value, config::standard())
                     .map_err(|e| {
-                    spacedb::Error::IO(io::Error::new(ErrorKind::Other, e.to_string()))
-                })?;
+                        spacedb::Error::IO(io::Error::new(ErrorKind::Other, e.to_string()))
+                    })?;
                 Ok(Some(decoded))
             }
             None => Ok(None),
@@ -264,14 +265,14 @@ impl LiveSnapshot {
             .insert(key, Some(value));
     }
 
-    fn update_snapshot(&mut self, version: u32) -> Result<()> {
+    fn update_snapshot(&mut self, version: BlockHash) -> Result<()> {
         if self.snapshot.0 != version {
-            self.snapshot.1 = self.db.begin_read()?;
+            self.snapshot.1 = self.db.begin_read().context("could not read snapshot")?;
             let anchor: ChainAnchor = self.snapshot.1.metadata().try_into().map_err(|_| {
                 std::io::Error::new(std::io::ErrorKind::Other, "could not parse metdata")
             })?;
 
-            assert_eq!(version, anchor.height, "inconsistent db state");
+            assert_eq!(version, anchor.hash, "inconsistent db state");
             self.snapshot.0 = version;
         }
         Ok(())
@@ -301,7 +302,7 @@ impl LiveSnapshot {
         let changes = mem::replace(
             &mut *staged,
             Staged {
-                snapshot_version: metadata.height,
+                snapshot_version: metadata.hash,
                 memory: BTreeMap::new(),
             },
         );
@@ -430,7 +431,7 @@ impl DataSource for LiveSnapshot {
     ) -> protocol::errors::Result<Option<OutPoint>> {
         let result: Option<EncodableOutpoint> = self
             .get(*space_hash)
-            .map_err(|err| protocol::errors::Error::IO(err.to_string()))?;
+            .map_err(|err| protocol::errors::Error::IO(format!("getspaceoutpoint: {}", err.to_string())))?;
         Ok(result.map(|out| out.into()))
     }
 
@@ -438,7 +439,7 @@ impl DataSource for LiveSnapshot {
         let h = OutpointKey::from_outpoint::<Sha256>(*outpoint);
         let result = self
             .get(h)
-            .map_err(|err| protocol::errors::Error::IO(err.to_string()))?;
+            .map_err(|err| protocol::errors::Error::IO(format!("getspaceout: {}", err.to_string())))?;
         Ok(result)
     }
 }
@@ -502,8 +503,8 @@ impl Iterator for KeyRolloutIterator {
 
 struct MergingIterator<I1, I2>
 where
-    I1: Iterator<Item = Result<(BidKey, SpaceKey)>>,
-    I2: Iterator<Item = Result<(BidKey, SpaceKey)>>,
+    I1: Iterator<Item=Result<(BidKey, SpaceKey)>>,
+    I2: Iterator<Item=Result<(BidKey, SpaceKey)>>,
 {
     iter1: std::iter::Peekable<I1>,
     iter2: std::iter::Peekable<I2>,
@@ -511,8 +512,8 @@ where
 
 impl<I1, I2> MergingIterator<I1, I2>
 where
-    I1: Iterator<Item = Result<(BidKey, SpaceKey)>>,
-    I2: Iterator<Item = Result<(BidKey, SpaceKey)>>,
+    I1: Iterator<Item=Result<(BidKey, SpaceKey)>>,
+    I2: Iterator<Item=Result<(BidKey, SpaceKey)>>,
 {
     fn new(iter1: I1, iter2: I2) -> Self {
         MergingIterator {
@@ -524,8 +525,8 @@ where
 
 impl<I1, I2> Iterator for MergingIterator<I1, I2>
 where
-    I1: Iterator<Item = Result<(BidKey, SpaceKey)>>,
-    I2: Iterator<Item = Result<(BidKey, SpaceKey)>>,
+    I1: Iterator<Item=Result<(BidKey, SpaceKey)>>,
+    I2: Iterator<Item=Result<(BidKey, SpaceKey)>>,
 {
     type Item = Result<(BidKey, SpaceKey)>;
 
