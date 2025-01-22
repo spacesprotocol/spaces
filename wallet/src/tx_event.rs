@@ -51,7 +51,7 @@ pub struct BidoutEventDetails {
 pub struct SendEventDetails {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub to_space: Option<String>,
-    pub resolved_address: ScriptBuf,
+    pub script_pubkey: ScriptBuf,
     pub amount: Amount,
 }
 
@@ -344,7 +344,7 @@ impl TxRecord {
             details: Some(
                 serde_json::to_value(SendEventDetails {
                     to_space,
-                    resolved_address,
+                    script_pubkey: resolved_address,
                     amount,
                 })
                     .expect("json value"),
@@ -526,6 +526,7 @@ impl FromStr for TxEventKind {
             "send" => Ok(TxEventKind::Send),
             "script" => Ok(TxEventKind::Script),
             "fee-bump" => Ok(TxEventKind::FeeBump),
+            "buy" => Ok(TxEventKind::Buy),
             _ => Err("invalid event kind"),
         }
     }
