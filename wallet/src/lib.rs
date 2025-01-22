@@ -22,7 +22,7 @@ use protocol::{bitcoin::{
     opcodes,
     taproot::{ControlBlock, TaprootBuilder},
     Address, ScriptBuf, XOnlyPublicKey,
-}, prepare::{is_magic_lock_time, TrackableOutput}, FullSpaceOut, Space};
+}, prepare::{is_magic_lock_time, TrackableOutput}, Covenant, FullSpaceOut, Space};
 use serde::{ser::SerializeSeq, Deserialize, Deserializer, Serialize, Serializer};
 use protocol::constants::{BID_PSBT_INPUT_SEQUENCE, BID_PSBT_TX_LOCK_TIME};
 use protocol::hasher::{KeyHasher, SpaceKey};
@@ -645,6 +645,9 @@ impl SpacesWallet {
         if spaceout.space.is_none() {
             return Err(anyhow!("No associated space"));
         }
+        if !matches!(spaceout.space.as_ref().unwrap().covenant, Covenant::Transfer { ..}) {
+            return Err(anyhow::anyhow!("Space not registered"))
+        }
 
         let recipient = Self::verify_listing_signature(&listing, outpoint, TxOut {
             value: spaceout.value,
@@ -706,6 +709,14 @@ impl SpacesWallet {
             None => return Err(anyhow::anyhow!("Space not found")),
             Some(outpoint) => outpoint,
         };
+        let spaceout = match src.get_spaceout(&space_outpoint)? {
+            None => return Err(anyhow::anyhow!("Space not found")),
+            Some(spaceout) => spaceout,
+        };
+        if !matches!(spaceout.space.as_ref().unwrap().covenant, Covenant::Transfer { ..}) {
+            return Err(anyhow::anyhow!("Space not registered"))
+        }
+
         let utxo = match self.internal.get_utxo(space_outpoint) {
             None => return Err(anyhow::anyhow!("Wallet does not own a space with outpoint {}", space_outpoint)),
             Some(utxo) => utxo
