@@ -568,6 +568,16 @@ impl Iterator for BuilderIterator<'_> {
                         );
                     }
                 }
+                if !params.sends.is_empty() {
+                    // TODO: resolved address recipient
+                    for send in &params.sends {
+                        detailed_tx.add_send(
+                            send.amount,
+                            None,
+                            send.recipient.script_pubkey(),
+                        );
+                    }
+                }
                 Some(Ok(detailed_tx))
             }
             StackOp::Open(params) => {
@@ -789,6 +799,7 @@ impl Builder {
         }
         if !opens.is_empty()
             || !transfers.is_empty()
+            || !sends.is_empty()
             || !executes.is_empty()
             || auction_outputs.is_some()
         {
@@ -796,7 +807,7 @@ impl Builder {
                 opens,
                 executes,
                 transfers,
-                sends: vec![],
+                sends,
                 bidouts: auction_outputs,
             }));
         }
