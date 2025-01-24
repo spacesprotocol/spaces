@@ -579,13 +579,10 @@ impl RpcWallet {
                     continue;
                 }
 
-                let foreign_input = match event.foreign_input {
-                    None => continue,
-                    Some(outpoint) => outpoint
-                };
-                if foreign_input != space.outpoint() {
-                    res.outbid.push(space);
+                if event.foreign_input.is_some_and(|input| input == space.outpoint()) {
+                    continue;
                 }
+                res.outbid.push(space);
             }
         }
 

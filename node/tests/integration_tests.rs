@@ -105,11 +105,11 @@ async fn it_should_allow_outbidding(rig: &TestRig) -> anyhow::Result<()> {
         alice_spaces_updated.winning.len(),
         "alice must have one less space"
     );
-    // assert_eq!(
-    //     alices_spaces.outbid.len() + 1,
-    //     alice_spaces_updated.outbid.len(),
-    //     "alice must have one less space"
-    // );
+    assert_eq!(
+        alices_spaces.outbid.len() + 1,
+        alice_spaces_updated.outbid.len(),
+        "alice must have one less space"
+    );
     assert_eq!(
         bobs_spaces.winning.len() + 1,
         bob_spaces_updated.winning.len(),
