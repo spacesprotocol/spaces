@@ -9,7 +9,7 @@ use core::{
 #[cfg(feature = "serde")]
 use serde::{de::Error as ErrorUtil, Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::errors::Error;
+use crate::{constants::RESERVED_SPACES, errors::Error};
 
 pub const MAX_LABEL_LEN: usize = 62;
 pub const PUNYCODE_PREFIX: &[u8] = b"xn--";
@@ -251,6 +251,10 @@ impl SLabel {
     pub fn as_name_ref(&self) -> SLabelRef {
         SLabelRef(&self.0)
     }
+
+    pub fn is_reserved(&self) -> bool {
+        self.as_name_ref().is_reserved()
+    }
 }
 
 impl SLabelRef<'_> {
@@ -258,6 +262,12 @@ impl SLabelRef<'_> {
         let mut owned = SLabel([0; MAX_LABEL_LEN + 1]);
         owned.0[..self.0.len()].copy_from_slice(self.0);
         owned
+    }
+
+    pub fn is_reserved(&self) -> bool {
+        RESERVED_SPACES
+            .iter()
+            .any(|reserved| *reserved == self.as_ref())
     }
 }
 
