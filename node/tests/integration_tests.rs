@@ -364,7 +364,7 @@ async fn it_should_allow_batch_transfers_refreshing_expire_height(
         ALICE,
         vec![RpcWalletRequest::Transfer(TransferSpacesParams {
             spaces: registered_spaces.clone(),
-            to: space_address,
+            to: Some(space_address),
         })],
         false,
     )
@@ -781,7 +781,7 @@ async fn it_should_not_allow_register_or_transfer_to_same_space_multiple_times(r
         ALICE,
         vec![RpcWalletRequest::Transfer(TransferSpacesParams {
             spaces: vec![transfer.clone()],
-            to: bob_address.clone(),
+            to: Some(bob_address.clone()),
         })],
         false,
     ).await.expect("send request");
@@ -792,7 +792,7 @@ async fn it_should_not_allow_register_or_transfer_to_same_space_multiple_times(r
         ALICE,
         vec![RpcWalletRequest::Transfer(TransferSpacesParams {
             spaces: vec![transfer],
-            to: bob_address,
+            to: Some(bob_address),
         })],
         false,
     ).await.expect_err("there's already a transfer submitted");
@@ -849,7 +849,7 @@ async fn it_can_batch_txs(rig: &TestRig) -> anyhow::Result<()> {
         vec![
             RpcWalletRequest::Transfer(TransferSpacesParams {
                 spaces: vec!["@test9996".to_string()],
-                to: bob_address,
+                to: Some(bob_address),
             }),
             RpcWalletRequest::Bid(BidParams {
                 name: "@test100".to_string(),
