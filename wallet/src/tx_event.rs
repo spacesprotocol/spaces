@@ -83,6 +83,7 @@ pub enum TxEventKind {
     Bid,
     Register,
     Transfer,
+    Renew,
     Send,
     FeeBump,
     Buy,
@@ -322,6 +323,15 @@ impl TxRecord {
         });
     }
 
+    pub fn add_renew(&mut self, space: String, to: ScriptBuf) {
+        self.events.push(TxEvent {
+            kind: TxEventKind::Renew,
+            space: Some(space),
+            foreign_input: None,
+            details: Some(serde_json::to_value(TransferEventDetails { to }).expect("json value")),
+        });
+    }
+
     pub fn add_bidout(&mut self, count: usize) {
         self.events.push(TxEvent {
             kind: TxEventKind::Bidout,
@@ -507,7 +517,8 @@ impl Display for TxEventKind {
             TxEventKind::Send => "send",
             TxEventKind::Script => "script",
             TxEventKind::FeeBump => "fee-bump",
-            TxEventKind::Buy => "buy"
+            TxEventKind::Buy => "buy",
+            TxEventKind::Renew => "renew",
         })
     }
 }
@@ -527,6 +538,7 @@ impl FromStr for TxEventKind {
             "script" => Ok(TxEventKind::Script),
             "fee-bump" => Ok(TxEventKind::FeeBump),
             "buy" => Ok(TxEventKind::Buy),
+            "renew" => Ok(TxEventKind::Renew),
             _ => Err("invalid event kind"),
         }
     }
