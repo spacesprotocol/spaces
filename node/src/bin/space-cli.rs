@@ -133,6 +133,16 @@ enum Commands {
         #[arg(long, short)]
         fee_rate: Option<u64>,
     },
+    /// Renew ownership of a space
+    #[command(name = "renew", )]
+    Renew {
+        /// Spaces to renew
+        #[arg(display_order = 0)]
+        spaces: Vec<String>,
+        /// Fee rate to use in sat/vB
+        #[arg(long, short)]
+        fee_rate: Option<u64>,
+    },
     /// Estimates the minimum bid needed for a rollout within the given target blocks
     #[command(name = "estimatebid")]
     EstimateBid {
@@ -554,6 +564,19 @@ async fn handle_commands(
             )
                 .await?
         }
+        Commands::Renew { spaces, fee_rate } => {
+            let spaces: Vec<_> = spaces.into_iter().map(|s| normalize_space(&s)).collect();
+            cli.send_request(
+                Some(RpcWalletRequest::Transfer(TransferSpacesParams {
+                    spaces,
+                    to: None,
+                })),
+                None,
+                fee_rate,
+                false,
+            )
+                .await?
+        }
         Commands::Transfer {
             spaces,
             to,
@@ -563,7 +586,7 @@ async fn handle_commands(
             cli.send_request(
                 Some(RpcWalletRequest::Transfer(TransferSpacesParams {
                     spaces,
-                    to,
+                    to: Some(to),
                 })),
                 None,
                 fee_rate,
@@ -741,6 +764,7 @@ async fn handle_commands(
             }).await?;
             println!("{}", serde_json::to_string_pretty(&result).expect("result"));
         }
+
     }
 
     Ok(())
