@@ -22,6 +22,7 @@ use wallet::{address::SpaceAddress, bdk_wallet::{
 use crate::{checker::TxChecker, config::ExtendedNetwork, node::BlockSource, rpc::{RpcWalletRequest, RpcWalletTxBuilder, WalletLoadRequest}, source::{
     BitcoinBlockSource, BitcoinRpc, BitcoinRpcError, BlockEvent, BlockFetchError, BlockFetcher,
 }, std_wait, store::{ChainState, LiveSnapshot, Sha256}};
+use crate::rpc::SignedMessage;
 
 const MEMPOOL_CHECK_INTERVAL: Duration = Duration::from_millis(
     if cfg!(debug_assertions) { 500 } else { 10_000 }
@@ -111,6 +112,11 @@ pub enum WalletCommand {
         resp: crate::rpc::Responder<anyhow::Result<Balance>>,
     },
     UnloadWallet,
+    SignMessage {
+        space: String,
+        msg: protocol::Bytes,
+        resp: crate::rpc::Responder<anyhow::Result<SignedMessage>>,
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, ValueEnum)]
@@ -374,6 +380,20 @@ impl RpcWallet {
             }
             WalletCommand::Sell { space, price, resp } => {
                 _ = resp.send(wallet.sell::<Sha256>(state, &space, Amount::from_sat(price)));
+            }
+            WalletCommand::SignMessage { space, msg, resp } => {
+                match wallet.sign_message::<Sha256>(state, &space, msg.as_slice()) {
+                    Ok(signature) => {
+                        _ = resp.send(Ok(SignedMessage {
+                            space,
+                            message: msg,
+                            signature,
+                        }));
+                    }
+                    Err(err) => {
+                        _ = resp.send(Err(err));
+                    }
+                }
             }
         }
         Ok(())
@@ -1167,6 +1187,22 @@ impl RpcWallet {
                 space,
                 resp,
                 price,
+            })
+            .await?;
+        resp_rx.await?
+    }
+
+    pub async fn send_sign_message(
+        &self,
+        space: &str,
+        msg: protocol::Bytes
+    ) -> anyhow::Result<SignedMessage> {
+        let (resp, resp_rx) = oneshot::channel();
+        self.sender
+            .send(WalletCommand::SignMessage {
+                space: space.to_string(),
+                msg,
+                resp,
             })
             .await?;
         resp_rx.await?

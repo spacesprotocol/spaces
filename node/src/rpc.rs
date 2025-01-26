@@ -15,26 +15,18 @@ use bdk::{
 };
 use jsonrpsee::{core::async_trait, proc_macros::rpc, server::Server, types::ErrorObjectOwned};
 use log::info;
-use protocol::{
-    bitcoin,
-    bitcoin::{
-        bip32::Xpriv,
-        Network::{Regtest, Testnet},
-        OutPoint,
-    },
-    constants::ChainAnchor,
-    hasher::{BaseHash, KeyHasher, SpaceKey},
-    prepare::DataSource,
-    slabel::SLabel,
-    validate::TxChangeSet,
-    FullSpaceOut, SpaceOut,
-};
+use protocol::{bitcoin, bitcoin::{
+    bip32::Xpriv,
+    Network::{Regtest, Testnet},
+    OutPoint,
+}, constants::ChainAnchor, hasher::{BaseHash, KeyHasher, SpaceKey}, prepare::DataSource, slabel::SLabel, validate::TxChangeSet, Bytes, FullSpaceOut, SpaceOut};
 use serde::{Deserialize, Serialize};
 use tokio::{
     select,
     sync::{broadcast, mpsc, oneshot, RwLock},
     task::JoinSet,
 };
+use protocol::bitcoin::secp256k1;
 use wallet::{bdk_wallet as bdk, bdk_wallet::template::Bip86, bitcoin::hashes::Hash, export::WalletExport, Balance, DoubleUtxo, Listing, SpacesWallet, WalletConfig, WalletDescriptors, WalletInfo, WalletOutput};
 
 use crate::{
@@ -56,6 +48,13 @@ pub(crate) type Responder<T> = oneshot::Sender<T>;
 pub struct ServerInfo {
     pub chain: ExtendedNetwork,
     pub tip: ChainAnchor,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignedMessage {
+    pub space: String,
+    pub message: protocol::Bytes,
+    pub signature: secp256k1::schnorr::Signature,
 }
 
 pub enum ChainStateCommand {
@@ -97,6 +96,10 @@ pub enum ChainStateCommand {
     },
     VerifyListing {
         listing: Listing,
+        resp: Responder<anyhow::Result<()>>,
+    },
+    VerifyMessage {
+        msg: SignedMessage,
         resp: Responder<anyhow::Result<()>>,
     },
 }
@@ -152,6 +155,12 @@ pub trait Rpc {
 
     #[method(name = "walletimport")]
     async fn wallet_import(&self, wallet: WalletExport) -> Result<(), ErrorObjectOwned>;
+
+    #[method(name = "verifymessage")]
+    async fn verify_message(&self, msg: SignedMessage) -> Result<(), ErrorObjectOwned>;
+
+    #[method(name = "walletsignmessage")]
+    async fn wallet_sign_message(&self, wallet: &str, space: &str, msg: protocol::Bytes) -> Result<SignedMessage, ErrorObjectOwned>;
 
     #[method(name = "walletgetinfo")]
     async fn wallet_get_info(&self, name: &str) -> Result<WalletInfo, ErrorObjectOwned>;
@@ -797,9 +806,24 @@ impl RpcServer for RpcServerImpl {
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
     }
 
+    async fn wallet_sign_message(&self, wallet: &str, space: &str, msg: Bytes) -> Result<SignedMessage, ErrorObjectOwned> {
+        self.wallet(&wallet)
+            .await?
+            .send_sign_message(space, msg)
+            .await
+            .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
+    }
+
     async fn verify_listing(&self, listing: Listing) -> Result<(), ErrorObjectOwned> {
         self.store
             .verify_listing(listing)
+            .await
+            .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
+    }
+
+    async fn verify_message(&self, msg: SignedMessage) -> Result<(), ErrorObjectOwned> {
+        self.store
+            .verify_message(msg)
             .await
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
     }
@@ -1006,6 +1030,11 @@ impl AsyncChainState {
             ChainStateCommand::VerifyListing { listing, resp } => {
                 _ = resp.send(SpacesWallet::verify_listing::<Sha256>(chain_state, &listing).map(|_| ()));
             }
+            ChainStateCommand::VerifyMessage { msg, resp } => {
+                _ = resp.send(SpacesWallet::verify_message::<Sha256>(
+                    chain_state, &msg.space, msg.message.as_slice(), &msg.signature
+                ).map(|_| ()));
+            }
         }
     }
 
@@ -1043,6 +1072,14 @@ impl AsyncChainState {
         let (resp, resp_rx) = oneshot::channel();
         self.sender
             .send(ChainStateCommand::VerifyListing { listing, resp })
+            .await?;
+        resp_rx.await?
+    }
+
+    pub async fn verify_message(&self, msg: SignedMessage) -> anyhow::Result<()> {
+        let (resp, resp_rx) = oneshot::channel();
+        self.sender
+            .send(ChainStateCommand::VerifyMessage { msg, resp })
             .await?;
         resp_rx.await?
     }
