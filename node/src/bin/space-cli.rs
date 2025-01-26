@@ -22,6 +22,7 @@ use spaced::{
     store::Sha256,
     wallets::AddressKind,
 };
+use spaced::rpc::SignedMessage;
 use wallet::bitcoin::secp256k1::schnorr::Signature;
 use wallet::export::WalletExport;
 use wallet::Listing;
@@ -192,6 +193,27 @@ enum Commands {
         /// Fee rate to use in sat/vB
         #[arg(long, short)]
         fee_rate: Option<u64>,
+    },
+    /// Sign a message using the owner address of the specified space
+    #[command(name = "signmessage")]
+    SignMessage {
+        /// The space to use
+        space: String,
+        /// The message to sign
+        message: String,
+    },
+    /// Verify a message using the owner address of the specified space
+    #[command(name = "verifymessage")]
+    VerifyMessage {
+        /// The space to verify
+        space: String,
+
+        /// The message to verify
+        message: String,
+
+        /// The signature to verify
+        #[arg(long)]
+        signature: String,
     },
     /// List a space you own for sale
     #[command(name = "sell")]
@@ -698,6 +720,25 @@ async fn handle_commands(
             let result = cli
                 .client
                 .verify_listing(listing).await?;
+            println!("{}", serde_json::to_string_pretty(&result).expect("result"));
+        }
+        Commands::SignMessage { mut space, message } => {
+            space = normalize_space(&space);
+            let result = cli.client
+                .wallet_sign_message(&cli.wallet, &space, protocol::Bytes::new(message.as_bytes().to_vec())).await?;
+            println!("{}", result.signature);
+        }
+        Commands::VerifyMessage { mut space, message, signature } => {
+            space = normalize_space(&space);
+            let raw = hex::decode(signature)
+                .map_err(|_| ClientError::Custom("Invalid signature".to_string()))?;
+            let signature = Signature::from_slice(raw.as_slice())
+                .map_err(|_| ClientError::Custom("Invalid signature".to_string()))?;
+            let result = cli.client.verify_message(SignedMessage {
+                space,
+                message: protocol::Bytes::new(message.as_bytes().to_vec()),
+                signature,
+            }).await?;
             println!("{}", serde_json::to_string_pretty(&result).expect("result"));
         }
     }

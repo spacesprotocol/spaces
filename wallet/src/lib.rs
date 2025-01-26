@@ -11,8 +11,13 @@ use bdk_wallet::{chain, chain::BlockId, coin_selection::{CoinSelectionAlgorithm,
 use bdk_wallet::chain::{ChainPosition, Indexer};
 use bdk_wallet::chain::local_chain::{CannotConnectError, LocalChain};
 use bdk_wallet::chain::tx_graph::CalculateFeeError;
+use bdk_wallet::keys::DescriptorSecretKey;
 use bincode::config;
-use bitcoin::{absolute::{Height, LockTime}, key::rand::RngCore, psbt, psbt::raw::ProprietaryKey, script, sighash::{Prevouts, SighashCache}, taproot, taproot::LeafVersion, Amount, Block, BlockHash, FeeRate, Network, OutPoint, Psbt, Sequence, TapLeafHash, TapSighashType, Transaction, TxIn, TxOut, Txid, Weight, Witness};
+use bitcoin::{absolute::{Height, LockTime}, key::rand::RngCore, psbt, psbt::raw::ProprietaryKey, script, sighash::{Prevouts, SighashCache}, taproot, taproot::LeafVersion, Amount, Block, BlockHash, FeeRate, Network, OutPoint, Psbt, Sequence, TapLeafHash, TapSighashType, Transaction, TxIn, TxOut, Txid, VarInt, Weight, Witness};
+use bitcoin::bip32::{ChildNumber};
+use bitcoin::consensus::Encodable;
+use bitcoin::hashes::{sha256d, Hash, HashEngine};
+use bitcoin::key::{TapTweak, TweakedKeypair};
 use bitcoin::transaction::Version;
 use secp256k1::{schnorr, Message};
 use secp256k1::schnorr::Signature;
@@ -45,6 +50,8 @@ pub mod builder;
 pub mod export;
 mod rusqlite_impl;
 pub mod tx_event;
+
+pub const SPACES_SIGNED_MSG_PREFIX: &[u8] = b"\x17Spaces Signed Message:\n";
 
 pub struct SpacesWallet {
     pub config: WalletConfig,
@@ -339,6 +346,61 @@ impl SpacesWallet {
         TxEvent::get_latest_events(&db_tx).context("could not read latest events")
     }
 
+    pub fn sign_message<H: KeyHasher>(&mut self, src: &mut impl DataSource, space: &str, msg: impl AsRef<[u8]>) -> anyhow::Result<Signature> {
+        let label = SLabel::from_str(space)?;
+        let space_key = SpaceKey::from(H::hash(label.as_ref()));
+        let outpoint = match src.get_space_outpoint(&space_key)? {
+            None => return Err(anyhow::anyhow!("Space not found")),
+            Some(outpoint) => outpoint,
+        };
+        let utxo = match self.get_utxo(outpoint) {
+            None => return Err(anyhow::anyhow!("Space not owned by wallet")),
+            Some(utxo) => utxo,
+        };
+
+        let keypair = self.get_taproot_keypair(utxo.keychain, utxo.derivation_index)
+            .context("Could not derive taproot keypair to sign message")?;
+
+        let msg_hash = signed_msg_hash(msg);
+        let msg_to_sign = secp256k1::Message::from_digest(msg_hash.to_byte_array());
+        let ctx = secp256k1::Secp256k1::new();
+        Ok(ctx.sign_schnorr(&msg_to_sign, &keypair.to_inner()))
+    }
+
+    pub fn verify_message<H : KeyHasher>(
+        src: &mut impl DataSource,
+        space: &str,
+        msg: impl AsRef<[u8]>,
+        signature: &Signature
+    ) -> anyhow::Result<()> {
+        let label = SLabel::from_str(space)?;
+        let space_key = SpaceKey::from(H::hash(label.as_ref()));
+        let outpoint = match src.get_space_outpoint(&space_key)? {
+            None => return Err(anyhow::anyhow!("Space not found")),
+            Some(outpoint) => outpoint,
+        };
+        let spaceout = match src.get_spaceout(&outpoint)? {
+            None => return Err(anyhow::anyhow!("Space not found")),
+            Some(spaceout) => spaceout,
+        };
+        if !spaceout.script_pubkey.is_witness_program() {
+            return Err(anyhow::anyhow!("Cannot verify non-taproot spaces"))
+        }
+
+        let script_bytes = spaceout.script_pubkey.as_bytes();
+        if script_bytes.len() != secp256k1::constants::SCHNORR_PUBLIC_KEY_SIZE + 2 {
+            return Err(anyhow::anyhow!("Expected a schnorr public key"));
+        }
+
+        let pubkey = XOnlyPublicKey::from_slice(&script_bytes[2..])?;
+        let ctx = secp256k1::Secp256k1::new();
+        let msg_hash = signed_msg_hash(msg);
+        let msg_to_sign = Message::from_digest(msg_hash.to_byte_array());
+
+        ctx.verify_schnorr(signature, &msg_to_sign, &pubkey)?;
+        Ok(())
+    }
+
     pub fn list_unspent_with_details(&mut self, store: &mut impl DataSource) -> anyhow::Result<Vec<WalletOutput>> {
         let mut wallet_outputs = Vec::new();
         for output in self.internal.list_unspent() {
@@ -581,7 +643,7 @@ impl SpacesWallet {
     }
 
     pub fn buy<H: KeyHasher>(&mut self, src: &mut impl DataSource, listing: &Listing, fee_rate: FeeRate) -> anyhow::Result<Transaction> {
-        let (seller,spaceout) = Self::verify_listing::<H>(src, &listing)?;
+        let (seller, spaceout) = Self::verify_listing::<H>(src, &listing)?;
 
         let mut witness = Witness::new();
         witness.push(
@@ -646,7 +708,7 @@ impl SpacesWallet {
             return Err(anyhow!("No associated space"));
         }
         if !matches!(spaceout.space.as_ref().unwrap().covenant, Covenant::Transfer { ..}) {
-            return Err(anyhow::anyhow!("Space not registered"))
+            return Err(anyhow::anyhow!("Space not registered"));
         }
 
         let recipient = Self::verify_listing_signature(&listing, outpoint, TxOut {
@@ -714,7 +776,7 @@ impl SpacesWallet {
             Some(spaceout) => spaceout,
         };
         if !matches!(spaceout.space.as_ref().unwrap().covenant, Covenant::Transfer { ..}) {
-            return Err(anyhow::anyhow!("Space not registered"))
+            return Err(anyhow::anyhow!("Space not registered"));
         }
 
         let utxo = match self.internal.get_utxo(space_outpoint) {
@@ -862,6 +924,26 @@ impl SpacesWallet {
             subtype: 0u8,
             key: key.as_bytes().to_vec(),
         }
+    }
+
+    pub fn get_taproot_keypair(&self, keychain: KeychainKind, derivation_index: u32) -> anyhow::Result<TweakedKeypair> {
+        let secret = match self.internal.get_signers(keychain)
+            .signers()
+            .iter()
+            .filter_map(|s| s.descriptor_secret_key()).next() {
+            None => return Err(anyhow::anyhow!("No secret key found in signer")),
+            Some(secret) => secret,
+        };
+        let descriptor_x_key = match secret {
+            DescriptorSecretKey::XPrv(xprv) => xprv,
+            _ => return Err(anyhow::anyhow!("No xprv found")),
+        };
+        let full_path = descriptor_x_key.derivation_path
+            .child(ChildNumber::Normal { index: derivation_index });
+        let ctx = secp256k1::Secp256k1::new();
+        let xprv = descriptor_x_key.xkey.derive_priv(&ctx, &full_path)?;
+        let keypair = UntweakedKeypair::from_secret_key(&ctx, &xprv.private_key);
+        Ok(keypair.tap_tweak(&ctx, None))
     }
 
     pub fn sign(
@@ -1173,4 +1255,13 @@ impl<'de> Deserialize<'de> for SpaceScriptSigningInfo {
 
         deserializer.deserialize_seq(OpenSigningInfoVisitor)
     }
+}
+
+pub fn signed_msg_hash(msg: impl AsRef<[u8]>) -> sha256d::Hash {
+    let msg_bytes = msg.as_ref();
+    let mut engine = sha256d::Hash::engine();
+    engine.input(SPACES_SIGNED_MSG_PREFIX);
+    VarInt::from(msg_bytes.len()).consensus_encode(&mut engine).expect("varint serialization");
+    engine.input(msg_bytes);
+    sha256d::Hash::from_engine(engine)
 }
