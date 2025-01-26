@@ -273,16 +273,18 @@ pub enum RpcWalletRequest {
     Register(RegisterParams),
     #[serde(rename = "execute")]
     Execute(ExecuteParams),
-    #[serde(rename = "sendspaces")]
+    #[serde(rename = "transfer")]
     Transfer(TransferSpacesParams),
-    #[serde(rename = "sendcoins")]
+    #[serde(rename = "send")]
     SendCoins(SendCoinsParams),
 }
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct TransferSpacesParams {
     pub spaces: Vec<String>,
-    pub to: String,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

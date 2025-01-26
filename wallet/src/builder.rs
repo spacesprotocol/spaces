@@ -119,7 +119,7 @@ pub struct RegisterRequest {
 #[derive(Debug, Clone)]
 pub struct SpaceTransfer {
     pub space: FullSpaceOut,
-    pub recipient: Address,
+    pub recipient: SpaceAddress,
 }
 
 #[derive(Debug, Clone)]
@@ -555,17 +555,31 @@ impl Iterator for BuilderIterator<'_> {
                 if !params.transfers.is_empty() {
                     // TODO: resolved address recipient
                     for transfer in &params.transfers {
-                        detailed_tx.add_transfer(
-                            transfer
-                                .space
-                                .spaceout
-                                .space
-                                .as_ref()
-                                .expect("space")
-                                .name
-                                .to_string(),
-                            transfer.recipient.script_pubkey(),
-                        );
+                        if self.wallet.is_mine(transfer.recipient.script_pubkey()) {
+                            detailed_tx.add_renew(
+                                transfer
+                                    .space
+                                    .spaceout
+                                    .space
+                                    .as_ref()
+                                    .expect("space")
+                                    .name
+                                    .to_string(),
+                                transfer.recipient.script_pubkey(),
+                            );
+                        } else {
+                            detailed_tx.add_transfer(
+                                transfer
+                                    .space
+                                    .spaceout
+                                    .space
+                                    .as_ref()
+                                    .expect("space")
+                                    .name
+                                    .to_string(),
+                                transfer.recipient.script_pubkey(),
+                            );
+                        }
                     }
                 }
                 if !params.sends.is_empty() {
@@ -783,7 +797,7 @@ impl Builder {
                     };
                     transfers.push(SpaceTransfer {
                         space: params.space,
-                        recipient: to.0,
+                        recipient: to,
                     })
                 }
                 StackRequest::Send(send) => sends.push(send),
