@@ -182,7 +182,7 @@ impl RpcWallet {
         let (_, fullspaceout) = SpacesWallet::verify_listing::<Sha256>(state, &listing)?;
 
         let space = fullspaceout.spaceout.space.as_ref().expect("space").name.to_string();
-        let foreign_input = fullspaceout.outpoint();
+        let previous_spaceout = fullspaceout.outpoint();
         let tx = wallet.buy::<Sha256>(state, &listing, fee_rate)?;
 
         if !skip_tx_check {
@@ -197,7 +197,7 @@ impl RpcWallet {
         let tx_record = TxRecord::new_with_events(tx, vec![TxEvent {
             kind: TxEventKind::Buy,
             space: Some(space),
-            foreign_input: Some(foreign_input),
+            previous_spaceout: Some(previous_spaceout),
             details: None,
         }]);
 
@@ -599,7 +599,7 @@ impl RpcWallet {
                     continue;
                 }
 
-                if event.foreign_input.is_some_and(|input| input == space.outpoint()) {
+                if event.previous_spaceout.is_some_and(|input| input == space.outpoint()) {
                     continue;
                 }
                 res.outbid.push(space);
