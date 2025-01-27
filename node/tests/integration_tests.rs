@@ -1,5 +1,5 @@
 use std::{path::PathBuf, str::FromStr};
-use protocol::{bitcoin::{Amount, FeeRate}, constants::RENEWAL_INTERVAL, script::SpaceScript, Covenant};
+use protocol::{bitcoin::{Amount, FeeRate}, constants::RENEWAL_INTERVAL, script::SpaceScript, Bytes, Covenant};
 use spaced::{
     rpc::{
         BidParams, ExecuteParams, OpenParams, RegisterParams, RpcClient, RpcWalletRequest,
@@ -364,7 +364,7 @@ async fn it_should_allow_batch_transfers_refreshing_expire_height(
         ALICE,
         vec![RpcWalletRequest::Transfer(TransferSpacesParams {
             spaces: registered_spaces.clone(),
-            to: space_address,
+            to: Some(space_address),
         })],
         false,
     )
@@ -781,7 +781,7 @@ async fn it_should_not_allow_register_or_transfer_to_same_space_multiple_times(r
         ALICE,
         vec![RpcWalletRequest::Transfer(TransferSpacesParams {
             spaces: vec![transfer.clone()],
-            to: bob_address.clone(),
+            to: Some(bob_address.clone()),
         })],
         false,
     ).await.expect("send request");
@@ -792,7 +792,7 @@ async fn it_should_not_allow_register_or_transfer_to_same_space_multiple_times(r
         ALICE,
         vec![RpcWalletRequest::Transfer(TransferSpacesParams {
             spaces: vec![transfer],
-            to: bob_address,
+            to: Some(bob_address),
         })],
         false,
     ).await.expect_err("there's already a transfer submitted");
@@ -849,7 +849,7 @@ async fn it_can_batch_txs(rig: &TestRig) -> anyhow::Result<()> {
         vec![
             RpcWalletRequest::Transfer(TransferSpacesParams {
                 spaces: vec!["@test9996".to_string()],
-                to: bob_address,
+                to: Some(bob_address),
             }),
             RpcWalletRequest::Bid(BidParams {
                 name: "@test100".to_string(),
@@ -1025,6 +1025,34 @@ async fn it_should_allow_buy_sell(rig: &TestRig) -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn it_should_allow_sign_verify_messages(rig: &TestRig) -> anyhow::Result<()> {
+    rig.wait_until_wallet_synced(BOB).await.expect("synced");
+
+    let alice_spaces = rig.spaced.client.wallet_list_spaces(BOB).await.expect("bob spaces");
+    let space = alice_spaces.owned.first().expect("bob should have at least 1 space");
+
+    let space_name = space.spaceout.space.as_ref().unwrap().name.to_string();
+
+    let msg = Bytes::new(b"hello world".to_vec());
+    let signed = rig.spaced.client.wallet_sign_message(BOB, &space_name, msg.clone()).await.expect("sign");
+
+    println!("signed\n{}", serde_json::to_string_pretty(&signed).unwrap());
+    assert_eq!(signed.space, space_name, "bad signer");
+    assert_eq!(signed.message.as_slice(), msg.as_slice(), "msg content must match");
+
+    rig.spaced.client.verify_message(signed.clone()).await.expect("verify");
+
+    let mut bad_signer = signed.clone();
+    bad_signer.space = "@nothanks".to_string();
+    rig.spaced.client.verify_message(bad_signer).await.expect_err("bad signer");
+
+    let mut bad_msg = signed.clone();
+    bad_msg.message = Bytes::new(b"hello world 2".to_vec());
+    rig.spaced.client.verify_message(bad_msg).await.expect_err("bad msg");
+
+    Ok(())
+}
+
 async fn it_should_handle_reorgs(rig: &TestRig) -> anyhow::Result<()> {
     rig.wait_until_wallet_synced(ALICE).await.expect("synced");
     const NAME: &str = "hello_world";
@@ -1066,10 +1094,11 @@ async fn run_auction_tests() -> anyhow::Result<()> {
         .expect("should not allow register/transfer multiple times");
     it_can_batch_txs(&rig).await.expect("bump fee");
     it_can_use_reserved_op_codes(&rig).await.expect("should use reserved opcodes");
-    it_should_allow_buy_sell(&rig).await.expect("should use reserved opcodes");
+    it_should_allow_buy_sell(&rig).await.expect("should allow buy sell");
+    it_should_allow_sign_verify_messages(&rig).await.expect("should sign verify");
 
     // keep reorgs last as it can drop some txs from mempool and mess up wallet state
-    it_should_handle_reorgs(&rig).await.expect("should make wallet");
+    it_should_handle_reorgs(&rig).await.expect("should handle reorgs wallet");
     Ok(())
 }
 

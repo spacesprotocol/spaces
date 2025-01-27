@@ -22,6 +22,7 @@ use wallet::{address::SpaceAddress, bdk_wallet::{
 use crate::{checker::TxChecker, config::ExtendedNetwork, node::BlockSource, rpc::{RpcWalletRequest, RpcWalletTxBuilder, WalletLoadRequest}, source::{
     BitcoinBlockSource, BitcoinRpc, BitcoinRpcError, BlockEvent, BlockFetchError, BlockFetcher,
 }, std_wait, store::{ChainState, LiveSnapshot, Sha256}};
+use crate::rpc::SignedMessage;
 
 const MEMPOOL_CHECK_INTERVAL: Duration = Duration::from_millis(
     if cfg!(debug_assertions) { 500 } else { 10_000 }
@@ -111,6 +112,11 @@ pub enum WalletCommand {
         resp: crate::rpc::Responder<anyhow::Result<Balance>>,
     },
     UnloadWallet,
+    SignMessage {
+        space: String,
+        msg: protocol::Bytes,
+        resp: crate::rpc::Responder<anyhow::Result<SignedMessage>>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, ValueEnum)]
@@ -178,7 +184,7 @@ impl RpcWallet {
         let space = fullspaceout.spaceout.space.as_ref().expect("space").name.to_string();
         let foreign_input = fullspaceout.outpoint();
         let tx = wallet.buy::<Sha256>(state, &listing, fee_rate)?;
-        
+
         if !skip_tx_check {
             let tip = wallet.local_chain().tip().height();
             let mut checker = TxChecker::new(state);
@@ -199,7 +205,7 @@ impl RpcWallet {
 
         // Incrementing last_seen by 1 ensures eviction of older tx
         // in cases with same-second/last seen replacement.
-        wallet.apply_unconfirmed_tx_record(tx_record, last_seen+1)?;
+        wallet.apply_unconfirmed_tx_record(tx_record, last_seen + 1)?;
         wallet.commit()?;
 
         Ok(TxResponse {
@@ -242,7 +248,7 @@ impl RpcWallet {
 
         // Incrementing last_seen by 1 ensures eviction of older tx
         // in cases with same-second/last seen replacement.
-        wallet.apply_unconfirmed_tx_record(tx_record, last_seen+1)?;
+        wallet.apply_unconfirmed_tx_record(tx_record, last_seen + 1)?;
         wallet.commit()?;
 
         Ok(vec![TxResponse {
@@ -374,6 +380,20 @@ impl RpcWallet {
             }
             WalletCommand::Sell { space, price, resp } => {
                 _ = resp.send(wallet.sell::<Sha256>(state, &space, Amount::from_sat(price)));
+            }
+            WalletCommand::SignMessage { space, msg, resp } => {
+                match wallet.sign_message::<Sha256>(state, &space, msg.as_slice()) {
+                    Ok(signature) => {
+                        _ = resp.send(Ok(SignedMessage {
+                            space,
+                            message: msg,
+                            signature,
+                        }));
+                    }
+                    Err(err) => {
+                        _ = resp.send(Err(err));
+                    }
+                }
             }
         }
         Ok(())
@@ -553,7 +573,7 @@ impl RpcWallet {
 
     fn list_spaces(
         wallet: &mut SpacesWallet,
-        state: &mut LiveSnapshot
+        state: &mut LiveSnapshot,
     ) -> anyhow::Result<ListSpacesResponse> {
         let unspent = wallet.list_unspent_with_details(state)?;
         let recent_events = wallet.list_recent_events()?;
@@ -768,14 +788,20 @@ impl RpcWallet {
                         .filter_map(|space| SLabel::from_str(space).ok())
                         .collect();
                     if spaces.len() != params.spaces.len() {
-                        return Err(anyhow!("sendspaces: some names were malformed"));
+                        return Err(anyhow!("transfer: some names were malformed"));
                     }
-                    let recipient = match Self::resolve(network, store, &params.to, true)? {
-                        None => {
-                            return Err(anyhow!("sendspaces: could not resolve '{}'", params.to))
+
+                    let recipient = if let Some(to) = params.to {
+                        match Self::resolve(network, store, &to, true)? {
+                            None => {
+                                return Err(anyhow!("transfer: could not resolve '{}'", to))
+                            }
+                            Some(r) => Some(r),
                         }
-                        Some(r) => r,
+                    } else {
+                        None
                     };
+
                     for space in spaces {
                         let spacehash = SpaceKey::from(Sha256::hash(space.as_ref()));
                         match store.get_space_info(&spacehash)? {
@@ -797,6 +823,18 @@ impl RpcWallet {
                             }
 
                             Some(full) => {
+                                let recipient = match recipient.clone() {
+                                    None => {
+                                        SpaceAddress(
+                                            Address::from_script(
+                                                full.spaceout.script_pubkey.as_script(),
+                                                wallet.config.network,
+                                            ).expect("valid script")
+                                        )
+                                    }
+                                    Some(addr) => SpaceAddress(addr)
+                                };
+
                                 builder = builder.add_transfer(SpaceTransfer {
                                     space: full,
                                     recipient: recipient.clone(),
@@ -918,7 +956,7 @@ impl RpcWallet {
                         let address = wallet.next_unused_space_address();
                         spaces.push(SpaceTransfer {
                             space: spaceout,
-                            recipient: address.0,
+                            recipient: address,
                         });
                     }
 
@@ -1172,6 +1210,22 @@ impl RpcWallet {
         resp_rx.await?
     }
 
+    pub async fn send_sign_message(
+        &self,
+        space: &str,
+        msg: protocol::Bytes,
+    ) -> anyhow::Result<SignedMessage> {
+        let (resp, resp_rx) = oneshot::channel();
+        self.sender
+            .send(WalletCommand::SignMessage {
+                space: space.to_string(),
+                msg,
+                resp,
+            })
+            .await?;
+        resp_rx.await?
+    }
+
     pub async fn send_list_transactions(
         &self,
         count: usize,
@@ -1183,7 +1237,6 @@ impl RpcWallet {
             .await?;
         resp_rx.await?
     }
-
 
 
     pub async fn send_force_spend(
