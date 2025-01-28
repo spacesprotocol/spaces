@@ -25,8 +25,8 @@ use crate::{checker::TxChecker, config::ExtendedNetwork, node::BlockSource, rpc:
 }, std_wait, store::{ChainState, LiveSnapshot, Sha256}};
 use crate::rpc::SignedMessage;
 
-const MEMPOOL_CHECK_INTERVAL: Duration = Duration::from_millis(
-    if cfg!(debug_assertions) { 500 } else { 10_000 }
+const MEMPOOL_CHECK_INTERVAL: Duration = Duration::from_secs(
+    if cfg!(debug_assertions) { 1 } else { 5 * 60 }
 );
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
