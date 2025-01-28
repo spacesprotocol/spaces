@@ -702,7 +702,8 @@ async fn handle_commands(
             }, cli.format
             );
         }
-        Commands::Sell { space, price,  } => {
+        Commands::Sell { mut space, price,  } => {
+            space = normalize_space(&space);
             let result = cli
                 .client
                 .wallet_sell(
