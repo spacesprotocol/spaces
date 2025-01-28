@@ -3,6 +3,7 @@ extern crate core;
 use std::{fs, path::PathBuf, str::FromStr};
 
 use clap::{Parser, Subcommand};
+use colored::{Color, Colorize};
 use jsonrpsee::{
     core::{client::Error, ClientError},
     http_client::{HttpClient, HttpClientBuilder},
@@ -12,7 +13,6 @@ use protocol::{
     hasher::KeyHasher,
     slabel::SLabel,
 };
-use serde::{Deserialize, Serialize};
 use spaced::{
     config::{default_spaces_rpc_port, ExtendedNetwork},
     rpc::{
@@ -22,7 +22,9 @@ use spaced::{
     store::Sha256,
     wallets::AddressKind,
 };
+use spaced::format::{print_error_rpc_response, print_list_bidouts, print_list_spaces_response, print_list_transactions, print_list_unspent, print_server_info, print_wallet_balance_response, print_wallet_info, print_wallet_response, Format};
 use spaced::rpc::SignedMessage;
+use spaced::wallets::WalletResponse;
 use wallet::bitcoin::secp256k1::schnorr::Signature;
 use wallet::export::WalletExport;
 use wallet::Listing;
@@ -33,6 +35,8 @@ pub struct Args {
     /// Bitcoin network to use
     #[arg(long, env = "SPACED_CHAIN", default_value = "mainnet")]
     chain: ExtendedNetwork,
+    #[arg(long, default_value = "text")]
+    output_format: Format,
     /// Spaced RPC URL [default: based on specified chain]
     #[arg(long)]
     spaced_rpc_url: Option<String>,
@@ -187,6 +191,14 @@ enum Commands {
         #[arg(long, short)]
         fee_rate: u64,
     },
+    /// List a space you own for sale
+    #[command(name = "sell")]
+    Sell {
+        /// The space to sell
+        space: String,
+        /// Amount in satoshis
+        price: u64,
+    },
     /// Buy a space from the specified listing
     #[command(name = "buy")]
     Buy {
@@ -225,14 +237,7 @@ enum Commands {
         #[arg(long)]
         signature: String,
     },
-    /// List a space you own for sale
-    #[command(name = "sell")]
-    Sell {
-        /// The space to sell
-        space: String,
-        /// Amount in satoshis
-        price: u64,
-    },
+
     /// Verify a listing
     #[command(name = "verifylisting")]
     VerifyListing {
@@ -263,8 +268,7 @@ enum Commands {
         #[arg(default_value = "0")]
         target_interval: usize,
     },
-    /// Associate the specified data with a given space (not recommended use Fabric instead)
-    /// If for whatever reason it's not possible to use other protocols, then you may use this.
+    /// Associate on-chain record data with a space as a fallback to P2P options like Fabric.
     #[command(name = "setrawfallback")]
     SetRawFallback {
         /// Space name
@@ -302,13 +306,6 @@ enum Commands {
     /// compatible with most bitcoin wallets
     #[command(name = "getnewaddress")]
     GetCoinAddress,
-    /// Force spend an output owned by wallet (for testing only)
-    #[command(name = "forcespend")]
-    ForceSpend {
-        outpoint: OutPoint,
-        #[arg(long, short)]
-        fee_rate: u64,
-    },
     /// DNS encodes the space and calculates the SHA-256 hash
     #[command(name = "hashspace")]
     HashSpace { space: String },
@@ -316,6 +313,7 @@ enum Commands {
 
 struct SpaceCli {
     wallet: String,
+    format: Format,
     dust: Option<Amount>,
     force: bool,
     skip_tx_check: bool,
@@ -335,6 +333,7 @@ impl SpaceCli {
         Ok((
             Self {
                 wallet: args.wallet.clone(),
+                format: args.output_format,
                 dust: args.dust.map(|d| Amount::from_sat(d)),
                 force: args.force,
                 skip_tx_check: args.skip_tx_check,
@@ -373,10 +372,8 @@ impl SpaceCli {
             )
             .await?;
 
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&result).expect("serialize")
-        );
+
+        print_wallet_response(self.network.fallback_network(), result, self.format);
         Ok(())
     }
 }
@@ -390,11 +387,7 @@ fn normalize_space(space: &str) -> String {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct RpcError {
-    code: i32,
-    message: String,
-}
+
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -405,14 +398,7 @@ async fn main() -> anyhow::Result<()> {
         Ok(_) => {}
         Err(error) => match ClientError::from(error) {
             Error::Call(rpc) => {
-                let error = RpcError {
-                    code: rpc.code(),
-                    message: rpc.message().to_string(),
-                };
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&error).expect("serialize")
-                );
+                print_error_rpc_response(rpc.code(), rpc.message().to_string(), cli.format);
             }
             Error::Transport(err) => {
                 println!(
@@ -506,11 +492,11 @@ async fn handle_commands(
         }
         Commands::GetWalletInfo => {
             let result = cli.client.wallet_get_info(&cli.wallet).await?;
-            println!("{}", serde_json::to_string_pretty(&result).expect("result"));
+            print_wallet_info(result, cli.format);
         }
         Commands::GetServerInfo => {
             let result = cli.client.get_server_info().await?;
-            println!("{}", serde_json::to_string_pretty(&result).expect("result"));
+            print_server_info(result, cli.format);
         }
         Commands::Open {
             ref space,
@@ -640,27 +626,28 @@ async fn handle_commands(
                 .await?;
         }
         Commands::ListUnspent => {
-            let spaces = cli.client.wallet_list_unspent(&cli.wallet).await?;
-            println!("{}", serde_json::to_string_pretty(&spaces)?);
+            let utxos = cli.client.wallet_list_unspent(&cli.wallet).await?;
+            print_list_unspent(utxos, cli.format);
         }
         Commands::ListBidOuts => {
-            let spaces = cli.client.wallet_list_bidouts(&cli.wallet).await?;
-            println!("{}", serde_json::to_string_pretty(&spaces)?);
+            let bidouts = cli.client.wallet_list_bidouts(&cli.wallet).await?;
+            print_list_bidouts(bidouts, cli.format);
         }
         Commands::ListTransactions { count, skip } => {
             let txs = cli
                 .client
                 .wallet_list_transactions(&cli.wallet, count, skip)
                 .await?;
-            println!("{}", serde_json::to_string_pretty(&txs)?);
+            print_list_transactions(txs, cli.format);
         }
         Commands::ListSpaces => {
+            let tip = cli.client.get_server_info().await?;
             let spaces = cli.client.wallet_list_spaces(&cli.wallet).await?;
-            println!("{}", serde_json::to_string_pretty(&spaces)?);
+            print_list_spaces_response(tip.tip.height, spaces, cli.format);
         }
         Commands::Balance => {
             let balance = cli.client.wallet_get_balance(&cli.wallet).await?;
-            println!("{}", serde_json::to_string_pretty(&balance)?);
+            print_wallet_balance_response(balance, cli.format);
         }
         Commands::GetCoinAddress => {
             let response = cli
@@ -682,18 +669,10 @@ async fn handle_commands(
                 .client
                 .wallet_bump_fee(&cli.wallet, txid, fee_rate, cli.skip_tx_check)
                 .await?;
-            println!("{}", serde_json::to_string_pretty(&response)?);
-        }
-        Commands::ForceSpend { outpoint, fee_rate } => {
-            let result = cli
-                .client
-                .wallet_force_spend(
-                    &cli.wallet,
-                    outpoint,
-                    FeeRate::from_sat_per_vb(fee_rate).unwrap(),
-                )
-                .await?;
-            println!("{}", serde_json::to_string_pretty(&result).expect("result"));
+            print_wallet_response(
+                cli.network.fallback_network(), WalletResponse {
+                result: response,
+            }, cli.format);
         }
         Commands::HashSpace { space } => {
             println!(
@@ -718,7 +697,10 @@ async fn handle_commands(
                     fee_rate.map(|rate| FeeRate::from_sat_per_vb(rate).expect("valid fee rate")),
                     cli.skip_tx_check,
                 ).await?;
-            println!("{}", serde_json::to_string_pretty(&result).expect("result"));
+            print_wallet_response(cli.network.fallback_network(), WalletResponse {
+                result: vec![result],
+            }, cli.format
+            );
         }
         Commands::Sell { space, price,  } => {
             let result = cli
@@ -740,10 +722,9 @@ async fn handle_commands(
                     .map_err(|_| ClientError::Custom("Invalid signature".to_string()))?,
             };
 
-            let result = cli
-                .client
+            cli.client
                 .verify_listing(listing).await?;
-            println!("{}", serde_json::to_string_pretty(&result).expect("result"));
+            println!("{} Listing verified", "✓".color(Color::Green));
         }
         Commands::SignMessage { mut space, message } => {
             space = normalize_space(&space);
@@ -757,12 +738,12 @@ async fn handle_commands(
                 .map_err(|_| ClientError::Custom("Invalid signature".to_string()))?;
             let signature = Signature::from_slice(raw.as_slice())
                 .map_err(|_| ClientError::Custom("Invalid signature".to_string()))?;
-            let result = cli.client.verify_message(SignedMessage {
+            cli.client.verify_message(SignedMessage {
                 space,
                 message: protocol::Bytes::new(message.as_bytes().to_vec()),
                 signature,
             }).await?;
-            println!("{}", serde_json::to_string_pretty(&result).expect("result"));
+            println!("{} Message verified", "✓".color(Color::Green));
         }
 
     }
