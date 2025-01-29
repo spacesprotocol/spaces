@@ -14,7 +14,11 @@ Spaces are sovereign Bitcoin identities. They leverage the existing infrastructu
 
 ## Quick Start
 
-Check out the [documentation](https://docs.spacesprotocol.org) 
+Install the latest version:
+```bash
+curl -sSf https://raw.githubusercontent.com/spacesprotocol/spaces/main/install.sh | sudo sh
+```
+
 
 ## Development setup on testnet4
 
