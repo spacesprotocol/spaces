@@ -12,7 +12,6 @@ use bitcoin::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    constants::RESERVED_SPACES,
     hasher::{KeyHasher, SpaceKey},
     prepare::DataSource,
     slabel::{SLabel, SLabelRef},
@@ -140,10 +139,7 @@ impl SpaceScript {
         }
         let name = name.unwrap();
 
-        if RESERVED_SPACES
-            .iter()
-            .any(|reserved| *reserved == name.as_ref())
-        {
+        if name.is_reserved() {
             return Ok(Err(ScriptError::ReservedName));
         }
 
