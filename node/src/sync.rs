@@ -171,7 +171,8 @@ impl Spaced {
                                 return Err(e);
                             }
                             warn!("Restore: {} - retrying in 1s", e);
-                            std_wait(|| shutdown_signal.try_recv().is_ok(), Duration::from_secs(1));
+                            let mut wait_recv = shutdown.subscribe();
+                            std_wait(|| wait_recv.try_recv().is_ok(), Duration::from_secs(1));
                         }
                         // Even if we couldn't restore just attempt to re-sync
                         let new_tip = self.chain.state.tip.read().expect("read").clone();
@@ -179,7 +180,8 @@ impl Spaced {
                     }
                     BlockEvent::Error(e) => {
                         warn!("Fetcher: {} - retrying in 1s", e);
-                        std_wait(|| shutdown_signal.try_recv().is_ok(), Duration::from_secs(1));
+                        let mut wait_recv = shutdown.subscribe();
+                        std_wait(|| wait_recv.try_recv().is_ok(), Duration::from_secs(1));
                         // Even if we couldn't restore just attempt to re-sync
                         let new_tip = self.chain.state.tip.read().expect("read").clone();
                         fetcher.restart(new_tip, &receiver);

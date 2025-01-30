@@ -10,6 +10,7 @@ use log::{info, warn};
 use protocol::{bitcoin::Txid, constants::ChainAnchor, hasher::{KeyHasher, SpaceKey}, script::SpaceScript, slabel::SLabel, FullSpaceOut, SpaceOut};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use tabled::Tabled;
 use tokio::{
     select,
     sync::{broadcast, mpsc, mpsc::Receiver, oneshot},
@@ -24,8 +25,8 @@ use crate::{checker::TxChecker, config::ExtendedNetwork, node::BlockSource, rpc:
 }, std_wait, store::{ChainState, LiveSnapshot, Sha256}};
 use crate::rpc::SignedMessage;
 
-const MEMPOOL_CHECK_INTERVAL: Duration = Duration::from_millis(
-    if cfg!(debug_assertions) { 500 } else { 10_000 }
+const MEMPOOL_CHECK_INTERVAL: Duration = Duration::from_secs(
+    if cfg!(debug_assertions) { 1 } else { 5 * 60 }
 );
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,14 +46,35 @@ pub struct ListSpacesResponse {
     pub owned: Vec<FullSpaceOut>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+
+#[derive(Tabled, Debug, Clone, Serialize, Deserialize)]
+#[tabled(rename_all = "UPPERCASE")]
 pub struct TxInfo {
     pub txid: Txid,
     pub confirmed: bool,
     pub sent: Amount,
     pub received: Amount,
+    #[tabled(display_with = "display_fee")]
     pub fee: Option<Amount>,
+    #[tabled(rename = "DETAILS", display_with = "display_events")]
     pub events: Vec<TxEvent>,
+}
+
+fn display_fee(fee: &Option<Amount>) -> String {
+    match fee {
+        None => "--".to_string(),
+        Some(fee) => fee.to_string()
+    }
+}
+
+fn display_events(events: &Vec<TxEvent>) -> String {
+    events
+        .iter()
+        .map(|e|
+            format!("{} {}",
+                    e.kind,
+                    e.space.as_ref().map(|s| s.clone()).unwrap_or("".to_string())))
+        .collect::<Vec<String>>().join("\n")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -182,7 +204,7 @@ impl RpcWallet {
         let (_, fullspaceout) = SpacesWallet::verify_listing::<Sha256>(state, &listing)?;
 
         let space = fullspaceout.spaceout.space.as_ref().expect("space").name.to_string();
-        let foreign_input = fullspaceout.outpoint();
+        let previous_spaceout = fullspaceout.outpoint();
         let tx = wallet.buy::<Sha256>(state, &listing, fee_rate)?;
 
         if !skip_tx_check {
@@ -197,7 +219,7 @@ impl RpcWallet {
         let tx_record = TxRecord::new_with_events(tx, vec![TxEvent {
             kind: TxEventKind::Buy,
             space: Some(space),
-            foreign_input: Some(foreign_input),
+            previous_spaceout: Some(previous_spaceout),
             details: None,
         }]);
 
@@ -429,7 +451,7 @@ impl RpcWallet {
         mut state: LiveSnapshot,
         mut wallet: SpacesWallet,
         mut commands: Receiver<WalletCommand>,
-        mut shutdown: broadcast::Receiver<()>,
+        shutdown: broadcast::Sender<()>,
         num_workers: usize,
     ) -> anyhow::Result<()> {
         let (fetcher, receiver) = BlockFetcher::new(source.clone(), num_workers);
@@ -442,11 +464,12 @@ impl RpcWallet {
             }
         };
 
+        let mut shutdown_recv = shutdown.subscribe();
         fetcher.start(wallet_tip);
         let mut synced_at_least_once = false;
         let mut last_mempool_check = Instant::now();
         loop {
-            if shutdown.try_recv().is_ok() {
+            if shutdown_recv.try_recv().is_ok() {
                 info!("Shutting down wallet sync");
                 break;
             }
@@ -542,7 +565,8 @@ impl RpcWallet {
                     }
                     BlockEvent::Error(e) => {
                         warn!("Fetcher: {} - retrying in 1s", e);
-                        std_wait(|| shutdown.try_recv().is_ok(), Duration::from_secs(1));
+                        let mut wait_recv = shutdown.subscribe();
+                        std_wait(|| wait_recv.try_recv().is_ok(), Duration::from_secs(1));
                         fetcher.restart(wallet_tip, &receiver);
                     }
                 }
@@ -599,7 +623,7 @@ impl RpcWallet {
                     continue;
                 }
 
-                if event.foreign_input.is_some_and(|input| input == space.outpoint()) {
+                if event.previous_spaceout.is_some_and(|input| input == space.outpoint()) {
                     continue;
                 }
                 res.outbid.push(space);
@@ -1091,7 +1115,7 @@ impl RpcWallet {
                         let wallet_name = loaded.export.label.clone();
                         let wallet_chain = store.clone();
                         let rpc = rpc.clone();
-                        let wallet_shutdown = shutdown.subscribe();
+                        let wallet_shutdown = shutdown.clone();
                         let (tx, rx) = oneshot::channel();
 
                         std::thread::spawn(move || {

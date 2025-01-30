@@ -551,7 +551,7 @@ impl SpacesWallet {
                 txid,
                 event.kind,
                 event.space,
-                event.foreign_input,
+                event.previous_spaceout,
                 event.details,
             ).context("could not insert tx event into wallet db")?;
         }
