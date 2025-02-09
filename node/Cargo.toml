@@ -31,7 +31,7 @@ env_logger = "0.11.3"
 serde_json = "1.0.116"
 bincode = {version = "2.0.0-rc.3", features = ["serde", "derive"]}
 protocol = { path = "../protocol", version = "*", features = ["std"]}
-spacedb = { git = "https://github.com/spacesprotocol/spacedb", tag = "0.0.2" }
+spacedb = { git = "https://github.com/spacesprotocol/spacedb", rev = "e07259ac6fc9cea1b06ee2cfdbb93d8c3039658a" }
 base64 = "0.22.1"
 futures = "0.3.30"
 reqwest = { version = "0.12.5", default-features = false, features = ["json", "blocking", "rustls-tls"] }

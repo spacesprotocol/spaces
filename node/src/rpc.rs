@@ -1,8 +1,8 @@
 use std::{
     collections::BTreeMap, fs, io::Write, net::SocketAddr, path::PathBuf, str::FromStr, sync::Arc,
 };
-
 use anyhow::{anyhow, Context};
+use base64::Engine;
 use bdk::{
     bitcoin::{Amount, BlockHash, FeeRate, Network, Txid},
     chain::BlockId,
@@ -14,20 +14,23 @@ use bdk::{
     KeychainKind,
 };
 use jsonrpsee::{core::async_trait, proc_macros::rpc, server::Server, types::ErrorObjectOwned};
-use log::info;
+use log::{info};
 use protocol::{bitcoin, bitcoin::{
     bip32::Xpriv,
     Network::{Regtest, Testnet},
     OutPoint,
 }, constants::ChainAnchor, hasher::{BaseHash, KeyHasher, SpaceKey}, prepare::DataSource, slabel::SLabel, validate::TxChangeSet, Bytes, FullSpaceOut, SpaceOut};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use spacedb::encode::SubTreeEncoder;
+use spacedb::tx::ProofType;
 use tokio::{
     select,
     sync::{broadcast, mpsc, oneshot, RwLock},
     task::JoinSet,
 };
 use protocol::bitcoin::secp256k1;
-use wallet::{bdk_wallet as bdk, bdk_wallet::template::Bip86, bitcoin::hashes::Hash, export::WalletExport, Balance, DoubleUtxo, Listing, SpacesWallet, WalletConfig, WalletDescriptors, WalletInfo, WalletOutput};
+use protocol::hasher::{OutpointKey};
+use wallet::{bdk_wallet as bdk, bdk_wallet::template::Bip86, bitcoin::hashes::Hash as BitcoinHash, export::WalletExport, Balance, DoubleUtxo, Listing, SpacesWallet, WalletConfig, WalletDescriptors, WalletInfo, WalletOutput};
 
 use crate::{
     checker::TxChecker,
@@ -55,6 +58,17 @@ pub struct SignedMessage {
     pub space: String,
     pub message: protocol::Bytes,
     pub signature: secp256k1::schnorr::Signature,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrustAnchor {
+    #[serde(
+        serialize_with = "serialize_hash",
+        deserialize_with = "deserialize_hash"
+    )]
+    pub state_root: protocol::hasher::Hash,
+    pub block_hash: BlockHash,
+    pub block_height: u32,
 }
 
 pub enum ChainStateCommand {
@@ -102,6 +116,17 @@ pub enum ChainStateCommand {
         msg: SignedMessage,
         resp: Responder<anyhow::Result<()>>,
     },
+    ProveSpaceout {
+        outpoint: OutPoint,
+        resp: Responder<anyhow::Result<ProofResult>>
+    },
+    ProveSpaceOutpoint {
+        space_or_hash: String,
+        resp: Responder<anyhow::Result<ProofResult>>
+    },
+    GetAnchor {
+        resp: Responder<anyhow::Result<TrustAnchor>>
+    }
 }
 
 #[derive(Clone)]
@@ -217,6 +242,15 @@ pub trait Rpc {
         listing: Listing,
     ) -> Result<(), ErrorObjectOwned>;
 
+    #[method(name = "provespaceout")]
+    async fn prove_spaceout(&self, outpoint: OutPoint) -> Result<ProofResult, ErrorObjectOwned>;
+
+    #[method(name = "provespaceoutpoint")]
+    async fn prove_space_outpoint(&self, space_or_hash: &str) -> Result<ProofResult, ErrorObjectOwned>;
+
+    #[method(name = "getanchor")]
+    async fn get_anchor(&self) -> Result<TrustAnchor, ErrorObjectOwned>;
+
     #[method(name = "walletlisttransactions")]
     async fn wallet_list_transactions(
         &self,
@@ -330,6 +364,64 @@ pub struct RpcServerImpl {
     store: AsyncChainState,
     client: reqwest::Client,
 }
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ProofResult(
+    #[serde(
+        serialize_with = "serialize_base64",
+        deserialize_with = "deserialize_base64"
+    )]
+    Vec<u8>
+);
+
+fn serialize_base64<S>(bytes: &Vec<u8>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    if serializer.is_human_readable() {
+        serializer.serialize_str(&base64::prelude::BASE64_STANDARD.encode(bytes))
+    } else {
+        serializer.serialize_bytes(bytes)
+    }
+}
+
+fn deserialize_base64<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    if deserializer.is_human_readable() {
+        let s = String::deserialize(deserializer)?;
+        base64::prelude::BASE64_STANDARD.decode(&s).map_err(serde::de::Error::custom)
+    } else {
+        Vec::<u8>::deserialize(deserializer)
+    }
+}
+
+fn serialize_hash<S>(bytes: &protocol::hasher::Hash, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    if serializer.is_human_readable() {
+        serializer.serialize_str(&hex::encode(bytes))
+    } else {
+        serializer.serialize_bytes(bytes)
+    }
+}
+
+fn deserialize_hash<'de, D>(deserializer: D) -> Result<protocol::hasher::Hash, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let mut bytes = [0u8; 32];
+    if deserializer.is_human_readable() {
+        let s = String::deserialize(deserializer)?;
+        hex::decode_to_slice(s, &mut bytes).map_err(serde::de::Error::custom)?;
+    } else {
+        protocol::hasher::Hash::deserialize(deserializer)?;
+    }
+    Ok(bytes)
+}
+
 
 #[derive(Clone)]
 pub struct WalletManager {
@@ -830,6 +922,27 @@ impl RpcServer for RpcServerImpl {
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
     }
 
+    async fn prove_spaceout(&self, outpoint: OutPoint) -> Result<ProofResult, ErrorObjectOwned> {
+        self.store
+            .prove_spaceout(outpoint)
+            .await
+            .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
+    }
+
+    async fn prove_space_outpoint(&self, space_or_hash: &str) -> Result<ProofResult, ErrorObjectOwned> {
+        self.store
+            .prove_space_outpoint(space_or_hash)
+            .await
+            .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
+    }
+
+    async fn get_anchor(&self) -> Result<TrustAnchor, ErrorObjectOwned> {
+        self.store
+            .get_anchor()
+            .await
+            .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
+    }
+
     async fn wallet_list_transactions(
         &self,
         wallet: &str,
@@ -893,6 +1006,8 @@ impl RpcServer for RpcServerImpl {
             .await
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
     }
+
+
 }
 
 impl AsyncChainState {
@@ -1037,7 +1152,57 @@ impl AsyncChainState {
                     chain_state, &msg.space, msg.message.as_slice(), &msg.signature
                 ).map(|_| ()));
             }
+            ChainStateCommand::ProveSpaceout { outpoint, resp } => {
+                _ = resp.send(Self::handle_prove_spaceout(chain_state, outpoint));
+            }
+            ChainStateCommand::ProveSpaceOutpoint { space_or_hash, resp } => {
+                _ = resp.send(Self::handle_prove_space_outpoint(chain_state, &space_or_hash));
+            }
+            ChainStateCommand::GetAnchor { resp } => {
+                _ = resp.send(Self::handle_get_anchor(chain_state));
+            }
         }
+    }
+
+    fn handle_get_anchor(state: &mut LiveSnapshot) -> anyhow::Result<TrustAnchor> {
+        let snapshot = state.inner()?;
+        let root = snapshot.compute_root()?;
+        let meta : ChainAnchor = snapshot.metadata().try_into()?;
+        Ok(TrustAnchor {
+            state_root: root,
+            block_hash: meta.hash,
+            block_height: meta.height,
+        })
+    }
+
+    fn handle_prove_space_outpoint(state: &mut LiveSnapshot, space_or_hash: &str) -> anyhow::Result<ProofResult> {
+        let key = get_space_key(space_or_hash)?;
+        let snapshot = state.inner()?;
+
+        // warm up hash cache
+        _ = snapshot.compute_root()?;
+        let proof = snapshot.prove(&[key.into()], ProofType::Standard)?;
+
+        let mut buf = vec![0u8;4096];
+        let offset = proof.write_to_slice(&mut buf)?;
+        buf.truncate(offset);
+
+        Ok(ProofResult(buf))
+    }
+
+    fn handle_prove_spaceout(state: &mut LiveSnapshot, outpoint: OutPoint) -> anyhow::Result<ProofResult> {
+        let key = OutpointKey::from_outpoint::<Sha256>(outpoint);
+        let snapshot = state.inner()?;
+
+        // warm up hash cache
+        _ = snapshot.compute_root()?;
+        let proof = snapshot.prove(&[key.into()], ProofType::Standard)?;
+
+        let mut buf = vec![0u8;4096];
+        let offset = proof.write_to_slice(&mut buf)?;
+        buf.truncate(offset);
+
+        Ok(ProofResult(buf))
     }
 
     pub async fn handler(
@@ -1082,6 +1247,30 @@ impl AsyncChainState {
         let (resp, resp_rx) = oneshot::channel();
         self.sender
             .send(ChainStateCommand::VerifyMessage { msg, resp })
+            .await?;
+        resp_rx.await?
+    }
+
+    pub async fn prove_spaceout(&self, outpoint: OutPoint) -> anyhow::Result<ProofResult> {
+        let (resp, resp_rx) = oneshot::channel();
+        self.sender
+            .send(ChainStateCommand::ProveSpaceout { outpoint, resp })
+            .await?;
+        resp_rx.await?
+    }
+
+    pub async fn prove_space_outpoint(&self, space_or_hash: &str) -> anyhow::Result<ProofResult> {
+        let (resp, resp_rx) = oneshot::channel();
+        self.sender
+            .send(ChainStateCommand::ProveSpaceOutpoint { space_or_hash: space_or_hash.to_string(), resp })
+            .await?;
+        resp_rx.await?
+    }
+
+    pub async fn get_anchor(&self) -> anyhow::Result<TrustAnchor> {
+        let (resp, resp_rx) = oneshot::channel();
+        self.sender
+            .send(ChainStateCommand::GetAnchor { resp })
             .await?;
         resp_rx.await?
     }

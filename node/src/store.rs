@@ -211,7 +211,7 @@ impl LiveSnapshot {
         };
     }
 
-    pub fn inner(&mut self) -> anyhow::Result<&ReadTx> {
+    pub fn inner(&mut self) -> anyhow::Result<&mut ReadTx> {
         {
             let rlock = self.staged.read().expect("acquire lock");
             let version = rlock.snapshot_version;
@@ -219,7 +219,7 @@ impl LiveSnapshot {
 
             self.update_snapshot(version)?;
         }
-        Ok(&self.snapshot.1)
+        Ok(&mut self.snapshot.1)
     }
 
     pub fn insert<K: KeyHash + Into<Hash>, T: Encode>(&self, key: K, value: T) {
