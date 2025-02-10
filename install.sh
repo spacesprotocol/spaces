@@ -16,11 +16,13 @@ FLAGS:
 
 OPTIONS:
     --tag VERSION   Specific version to install (e.g., 0.0.6a), defaults to latest release
-    --to LOCATION   Where to install the binaries [default: /usr/local/bin]
+    --to LOCATION   Where to install the binaries (default: auto-detected based on OS)
+                   For macOS: ~/.local/bin if exists, else ~/bin
+                   For Linux: ~/.local/bin
 
 NOTES:
-    Installing to /usr/local/bin requires root privileges.
-    Either run with sudo or specify a different location with --to.
+    The script will automatically choose an appropriate user-writable location.
+    The chosen directory will be added to your PATH if needed.
 EOF
 }
 
@@ -43,14 +45,62 @@ need() {
   fi
 }
 
-check_write_permission() {
-  if [ ! -w "$1" ]; then
-    err "no write permission for $1
-    Either:
-    1. Run this script with sudo
-    2. Use --to to specify a different location for executables (e.g., --to ~/.local/bin)
-    3. Grant write permission to $1"
+add_to_path() {
+  local install_dir="$1"
+  local shell_rc
+  local reload_needed=false
+
+  # Detect shell configuration file
+  if [ -n "${ZSH_VERSION-}" ]; then
+    shell_rc="$HOME/.zshrc"
+    shell_type="zsh"
+  else
+    shell_type="bash"
+    shell_rc="$HOME/.bashrc"
+    [ "$(uname -s)" = "Darwin" ] && shell_rc="$HOME/.bash_profile"
   fi
+
+  if ! echo "$PATH" | tr ':' '\n' | grep -Fq "$install_dir"; then
+    say "Adding $install_dir to PATH in $shell_rc"
+    echo "export PATH=\"$install_dir:\$PATH\"" >> "$shell_rc"
+    reload_needed=true
+  fi
+  
+  # Return whether reload is needed
+  [ "$reload_needed" = true ] && echo "reload" || echo "noreload"
+}
+
+determine_install_dir() {
+  local os="$1"
+  local specified_dir="$2"
+  local install_dir
+
+  if [ -n "$specified_dir" ]; then
+    install_dir="$specified_dir"
+  else
+    case "$os" in
+      darwin)
+        if [ -d "$HOME/.local/bin" ]; then
+          install_dir="$HOME/.local/bin"
+        else
+          install_dir="$HOME/bin"
+        fi
+        ;;
+      linux)
+        install_dir="$HOME/.local/bin"
+        ;;
+      *)
+        err "unsupported operating system: $os"
+        ;;
+    esac
+  fi
+
+  # Create directory if it doesn't exist
+  if [ ! -d "$install_dir" ]; then
+    mkdir -p "$install_dir" || err "failed to create $install_dir"
+  fi
+
+  echo "$install_dir"
 }
 
 download() {
@@ -70,7 +120,7 @@ download() {
 # Initialize default values
 force=false
 verbose=false
-dest="/usr/local/bin"
+dest=""
 tag=""
 td=""
 
@@ -120,11 +170,9 @@ case "$arch" in
   *) err "unsupported architecture: $arch" ;;
 esac
 
-# Verify OS support
-case "$os" in
-  darwin|linux) ;; # supported
-  *) err "unsupported operating system: $os" ;;
-esac
+# Determine installation directory
+dest=$(determine_install_dir "$os" "$dest")
+[ "$verbose" = true ] && say "installing to: $dest"
 
 # Get latest version if not specified
 if [ -z "$tag" ]; then
@@ -148,7 +196,7 @@ check_tag="v$tag_without_v"  # Add 'v' prefix for consistency
 [ "$verbose" = true ] && say "verifying tag $check_tag exists..."
 api_response=$(download "https://api.github.com/repos/spacesprotocol/spaces/releases/tags/$check_tag" - || echo "failed")
 if [ "$api_response" = "failed" ] || echo "$api_response" | grep -q "Not Found"; then
-  err "release tag '$check_tag' not found, visit https://github.com/spacesprotocol/spaces/releases to see available versions"
+  err "release tag '$check_tag' not found"
 fi
 
 [ -z "$tag_without_v" ] && err "could not determine version to install"
@@ -158,23 +206,6 @@ fi
 # Create temporary directory
 td=$(mktemp -d || mktemp -d -t tmp)
 trap 'rm -rf "$td"' EXIT
-
-# Verify destination directory
-if [ ! -d "$dest" ]; then
-  if [ "$force" = true ]; then
-    if ! mkdir -p "$dest" 2>/dev/null; then
-      err "failed to create $dest
-    Either:
-    1. Run this script with sudo
-    2. Use --to to specify a different location (e.g., --to ~/.local/bin)"
-    fi
-  else
-    err "destination directory does not exist: $dest (use --force to create it)"
-  fi
-fi
-
-# Check write permissions before proceeding
-check_write_permission "$dest"
 
 # Construct download URL
 download_url="https://github.com/spacesprotocol/spaces/releases/download/$check_tag/spaces-$check_tag-${os}-${arch}.tar.gz"
@@ -188,7 +219,7 @@ tar xzf "$td/spaces.tar.gz" -C "$td" || err "failed to extract archive"
 # Install binaries
 for binary in spaced space-cli; do
   if [ -f "$dest/$binary" ] && [ "$force" = false ]; then
-    err "$dest/$binary already exists (use --force to overwrite)"
+    err "Found existing spaces executables at $dest. Use --force flag to overwrite"
   fi
   
   binary_path="$dest/$binary"
@@ -210,14 +241,23 @@ for binary in spaced space-cli; do
   fi
 done
 
+# Add to PATH if needed and get reload status
+reload_status=$(add_to_path "$dest")
+
 # Final instructions
-say "Successfully intalled spaces $check_tag"
-if ! echo "$PATH" | grep -q "$dest"; then
-  say "note: add $dest to your PATH if not already done"
+say "Successfully installed spaces $check_tag to $dest"
+
+# Reload shell if needed
+if [ "$reload_status" = "reload" ]; then
+  if [ -n "${ZSH_VERSION-}" ]; then
+    exec zsh
+  else
+    exec bash
+  fi
 fi
 
 # Show versions if verbose
 if [ "$verbose" = true ]; then
-  say "installed versions:"
+  say "installed version:"
   "$dest/spaced" --version
 fi
