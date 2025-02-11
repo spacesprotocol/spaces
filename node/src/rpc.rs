@@ -57,6 +57,33 @@ pub struct SignedMessage {
     pub signature: secp256k1::schnorr::Signature,
 }
 
+#[derive(Debug, Serialize)]
+pub enum BlockIdentifier {
+    Hash(BlockHash),
+    Height(u32),
+}
+impl<'de> Deserialize<'de> for BlockIdentifier {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum RawIdentifier {
+            String(String),
+            Number(u32),
+        }
+        match RawIdentifier::deserialize(deserializer)? {
+            RawIdentifier::String(s) => {
+                BlockHash::from_str(&s)
+                    .map(BlockIdentifier::Hash)
+                    .map_err(serde::de::Error::custom)
+            }
+            RawIdentifier::Number(n) => Ok(BlockIdentifier::Height(n)),
+        }
+    }
+}
+
 pub enum ChainStateCommand {
     CheckPackage {
         txs: Vec<String>,
@@ -83,7 +110,7 @@ pub enum ChainStateCommand {
         resp: Responder<anyhow::Result<Option<TxEntry>>>,
     },
     GetBlockMeta {
-        block_hash: BlockHash,
+        block_identifier: BlockIdentifier,
         resp: Responder<anyhow::Result<Option<BlockMeta>>>,
     },
     EstimateBid {
@@ -144,7 +171,7 @@ pub trait Rpc {
     #[method(name = "getblockmeta")]
     async fn get_block_meta(
         &self,
-        block_hash: BlockHash,
+        block_identifier: BlockIdentifier,
     ) -> Result<Option<BlockMeta>, ErrorObjectOwned>;
 
     #[method(name = "gettxmeta")]
@@ -502,19 +529,6 @@ impl WalletManager {
         Ok(())
     }
 
-    pub async fn get_block_hash(
-        &self,
-        client: &reqwest::Client,
-        height: u32,
-    ) -> anyhow::Result<BlockId> {
-        let hash = self
-            .rpc
-            .send_json(&client, &self.rpc.get_block_hash(height))
-            .await?;
-
-        Ok(BlockId { height, hash })
-    }
-
     async fn get_wallet_start_block(&self, client: &reqwest::Client) -> anyhow::Result<BlockId> {
         let count: i32 = self
             .rpc
@@ -689,11 +703,11 @@ impl RpcServer for RpcServerImpl {
 
     async fn get_block_meta(
         &self,
-        block_hash: BlockHash,
+        block_identifier: BlockIdentifier,
     ) -> Result<Option<BlockMeta>, ErrorObjectOwned> {
         let data = self
             .store
-            .get_block_meta(block_hash)
+            .get_block_meta(block_identifier)
             .await
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))?;
 
@@ -916,7 +930,7 @@ impl AsyncChainState {
             BlockHash::from_str(info.get("blockhash").and_then(|t| t.as_str()).ok_or_else(
                 || anyhow!("Could not retrieve block hash for tx (is it in the mempool?)"),
             )?)?;
-        let block = Self::get_indexed_block(index, &block_hash, client, rpc, chain_state).await?;
+        let block = Self::get_indexed_block(index, BlockIdentifier::Hash(block_hash), client, rpc, chain_state).await?;
 
         if let Some(block) = block {
             return Ok(block
@@ -929,7 +943,7 @@ impl AsyncChainState {
 
     async fn get_indexed_block(
         index: &mut Option<LiveSnapshot>,
-        block_hash: &BlockHash,
+        block_identifier: BlockIdentifier,
         client: &reqwest::Client,
         rpc: &BitcoinRpc,
         chain_state: &mut LiveSnapshot,
@@ -937,6 +951,13 @@ impl AsyncChainState {
         let index = index
             .as_mut()
             .ok_or_else(|| anyhow!("block index must be enabled"))?;
+        let block_hash = match block_identifier {
+            BlockIdentifier::Hash(hash) => hash,
+            BlockIdentifier::Height(height) => rpc
+            .send_json(client, &rpc.get_block_hash(height))
+            .await
+            .map_err(|e| anyhow!("Could not retrieve block hash ({})", e))?
+        };
         let hash = BaseHash::from_slice(block_hash.as_ref());
         let block: Option<BlockMeta> = index
             .get(hash)
@@ -947,7 +968,7 @@ impl AsyncChainState {
         }
 
         let info: serde_json::Value = rpc
-            .send_json(client, &rpc.get_block_header(block_hash))
+            .send_json(client, &rpc.get_block_header(&block_hash))
             .await
             .map_err(|e| anyhow!("Could not retrieve block ({})", e))?;
 
@@ -1011,9 +1032,9 @@ impl AsyncChainState {
                     .context("could not fetch spaceout");
                 let _ = resp.send(result);
             }
-            ChainStateCommand::GetBlockMeta { block_hash, resp } => {
+            ChainStateCommand::GetBlockMeta { block_identifier, resp } => {
                 let res =
-                    Self::get_indexed_block(block_index, &block_hash, client, rpc, chain_state)
+                    Self::get_indexed_block(block_index, block_identifier, client, rpc, chain_state)
                         .await;
                 let _ = resp.send(res);
             }
@@ -1135,10 +1156,10 @@ impl AsyncChainState {
         resp_rx.await?
     }
 
-    pub async fn get_block_meta(&self, block_hash: BlockHash) -> anyhow::Result<Option<BlockMeta>> {
+    pub async fn get_block_meta(&self, block_identifier: BlockIdentifier) -> anyhow::Result<Option<BlockMeta>> {
         let (resp, resp_rx) = oneshot::channel();
         self.sender
-            .send(ChainStateCommand::GetBlockMeta { block_hash, resp })
+            .send(ChainStateCommand::GetBlockMeta { block_identifier, resp })
             .await?;
         resp_rx.await?
     }
