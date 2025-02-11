@@ -3,7 +3,7 @@ use std::sync::Arc;
 use anyhow::anyhow;
 use env_logger::Env;
 use log::error;
-use spaced::{
+use spaces_client::{
     config::{safe_exit, Args},
     rpc::{AsyncChainState, RpcServerImpl, WalletLoadRequest, WalletManager},
     source::{BitcoinBlockSource, BitcoinRpc},

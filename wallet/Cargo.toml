@@ -1,9 +1,10 @@
 [package]
-name = "wallet"
+name = "spaces_wallet"
 version = "0.0.6"
 edition = "2021"
 
 [dependencies]
+spaces_protocol = { path = "../protocol", features = ["std"], version = "*" }
 bitcoin = { version = "0.32.2", features = ["base64", "serde"] }
 # bdk version 1.0.0-beta.6 + hard coded patch for double spend fix from PR https://github.com/bitcoindevkit/bdk/pull/1765
 bdk_wallet = { git = "https://github.com/buffrr/bdk.git", rev= "43bca8643dec6fdda99e4a29bf88709729af349e", features = ["keys-bip39", "rusqlite"] }
@@ -14,7 +15,6 @@ serde = { version = "^1.0", features = ["derive"] }
 serde_json = "1.0"
 bincode = { version = "2.0.0-rc.3", features = ["serde"] }
 jsonrpc = "0.18.0"
-protocol = { path = "../protocol", features = ["std"], version = "*" }
 ctrlc = "3.4.4"
 hex = "0.4.3"
 log = "0.4.21"

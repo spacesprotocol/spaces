@@ -8,26 +8,26 @@ use jsonrpsee::{
     core::{client::Error, ClientError},
     http_client::{HttpClient, HttpClientBuilder},
 };
-use protocol::{
+use spaces_client::{
+    config::{default_spaces_rpc_port, ExtendedNetwork},
+    format::{
+        print_error_rpc_response, print_list_bidouts, print_list_spaces_response,
+        print_list_transactions, print_list_unspent, print_server_info,
+        print_wallet_balance_response, print_wallet_info, print_wallet_response, Format,
+    },
+    rpc::{
+        BidParams, ExecuteParams, OpenParams, RegisterParams, RpcClient, RpcWalletRequest,
+        RpcWalletTxBuilder, SendCoinsParams, SignedMessage, TransferSpacesParams,
+    },
+    store::Sha256,
+    wallets::{AddressKind, WalletResponse},
+};
+use spaces_protocol::{
     bitcoin::{Amount, FeeRate, OutPoint, Txid},
     hasher::KeyHasher,
     slabel::SLabel,
 };
-use spaced::{
-    config::{default_spaces_rpc_port, ExtendedNetwork},
-    rpc::{
-        BidParams, ExecuteParams, OpenParams, RegisterParams, RpcClient, RpcWalletRequest,
-        RpcWalletTxBuilder, SendCoinsParams, TransferSpacesParams,
-    },
-    store::Sha256,
-    wallets::AddressKind,
-};
-use spaced::format::{print_error_rpc_response, print_list_bidouts, print_list_spaces_response, print_list_transactions, print_list_unspent, print_server_info, print_wallet_balance_response, print_wallet_info, print_wallet_response, Format};
-use spaced::rpc::SignedMessage;
-use spaced::wallets::WalletResponse;
-use wallet::bitcoin::secp256k1::schnorr::Signature;
-use wallet::export::WalletExport;
-use wallet::Listing;
+use spaces_wallet::{bitcoin::secp256k1::schnorr::Signature, export::WalletExport, Listing};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -138,7 +138,7 @@ enum Commands {
         fee_rate: Option<u64>,
     },
     /// Renew ownership of a space
-    #[command(name = "renew", )]
+    #[command(name = "renew")]
     Renew {
         /// Spaces to renew
         #[arg(display_order = 0)]
@@ -372,7 +372,6 @@ impl SpaceCli {
             )
             .await?;
 
-
         print_wallet_response(self.network.fallback_network(), result, self.format);
         Ok(())
     }
@@ -386,8 +385,6 @@ fn normalize_space(space: &str) -> String {
         format!("@{}", lowercase)
     }
 }
-
-
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -512,7 +509,7 @@ async fn handle_commands(
                 fee_rate,
                 false,
             )
-                .await?
+            .await?
         }
         Commands::Bid {
             space,
@@ -529,7 +526,7 @@ async fn handle_commands(
                 fee_rate,
                 confirmed_only,
             )
-                .await?
+            .await?
         }
         Commands::CreateBidOuts { pairs, fee_rate } => {
             cli.send_request(None, Some(pairs), fee_rate, false).await?
@@ -548,7 +545,7 @@ async fn handle_commands(
                 fee_rate,
                 false,
             )
-                .await?
+            .await?
         }
         Commands::Renew { spaces, fee_rate } => {
             let spaces: Vec<_> = spaces.into_iter().map(|s| normalize_space(&s)).collect();
@@ -561,7 +558,7 @@ async fn handle_commands(
                 fee_rate,
                 false,
             )
-                .await?
+            .await?
         }
         Commands::Transfer {
             spaces,
@@ -578,7 +575,7 @@ async fn handle_commands(
                 fee_rate,
                 false,
             )
-                .await?
+            .await?
         }
         Commands::SendCoins {
             amount,
@@ -594,7 +591,7 @@ async fn handle_commands(
                 fee_rate,
                 false,
             )
-                .await?
+            .await?
         }
         Commands::SetRawFallback {
             mut space,
@@ -612,7 +609,8 @@ async fn handle_commands(
                 }
             };
 
-            let space_script = protocol::script::SpaceScript::create_set_fallback(data.as_slice());
+            let space_script =
+                spaces_protocol::script::SpaceScript::create_set_fallback(data.as_slice());
 
             cli.send_request(
                 Some(RpcWalletRequest::Execute(ExecuteParams {
@@ -623,7 +621,7 @@ async fn handle_commands(
                 fee_rate,
                 false,
             )
-                .await?;
+            .await?;
         }
         Commands::ListUnspent => {
             let utxos = cli.client.wallet_list_unspent(&cli.wallet).await?;
@@ -670,9 +668,10 @@ async fn handle_commands(
                 .wallet_bump_fee(&cli.wallet, txid, fee_rate, cli.skip_tx_check)
                 .await?;
             print_wallet_response(
-                cli.network.fallback_network(), WalletResponse {
-                result: response,
-            }, cli.format);
+                cli.network.fallback_network(),
+                WalletResponse { result: response },
+                cli.format,
+            );
         }
         Commands::HashSpace { space } => {
             println!(
@@ -680,14 +679,25 @@ async fn handle_commands(
                 hash_space(&space).map_err(|e| ClientError::Custom(e.to_string()))?
             );
         }
-        Commands::Buy { space, price, signature, seller, fee_rate } => {
+        Commands::Buy {
+            space,
+            price,
+            signature,
+            seller,
+            fee_rate,
+        } => {
             let listing = Listing {
                 space: normalize_space(&space),
                 price,
                 seller,
-                signature: Signature::from_slice(hex::decode(signature)
-                    .map_err(|_| ClientError::Custom("Signature must be in hex format".to_string()))?.as_slice())
-                    .map_err(|_| ClientError::Custom("Invalid signature".to_string()))?,
+                signature: Signature::from_slice(
+                    hex::decode(signature)
+                        .map_err(|_| {
+                            ClientError::Custom("Signature must be in hex format".to_string())
+                        })?
+                        .as_slice(),
+                )
+                .map_err(|_| ClientError::Custom("Invalid signature".to_string()))?,
             };
             let result = cli
                 .client
@@ -696,57 +706,75 @@ async fn handle_commands(
                     listing,
                     fee_rate.map(|rate| FeeRate::from_sat_per_vb(rate).expect("valid fee rate")),
                     cli.skip_tx_check,
-                ).await?;
-            print_wallet_response(cli.network.fallback_network(), WalletResponse {
-                result: vec![result],
-            }, cli.format
+                )
+                .await?;
+            print_wallet_response(
+                cli.network.fallback_network(),
+                WalletResponse {
+                    result: vec![result],
+                },
+                cli.format,
             );
         }
-        Commands::Sell { mut space, price,  } => {
+        Commands::Sell { mut space, price } => {
             space = normalize_space(&space);
-            let result = cli
-                .client
-                .wallet_sell(
-                    &cli.wallet,
-                    space,
-                    price,
-                ).await?;
+            let result = cli.client.wallet_sell(&cli.wallet, space, price).await?;
             println!("{}", serde_json::to_string_pretty(&result).expect("result"));
         }
-        Commands::VerifyListing { space, price, signature, seller  } => {
+        Commands::VerifyListing {
+            space,
+            price,
+            signature,
+            seller,
+        } => {
             let listing = Listing {
                 space: normalize_space(&space),
                 price,
                 seller,
-                signature: Signature::from_slice(hex::decode(signature)
-                    .map_err(|_| ClientError::Custom("Signature must be in hex format".to_string()))?.as_slice())
-                    .map_err(|_| ClientError::Custom("Invalid signature".to_string()))?,
+                signature: Signature::from_slice(
+                    hex::decode(signature)
+                        .map_err(|_| {
+                            ClientError::Custom("Signature must be in hex format".to_string())
+                        })?
+                        .as_slice(),
+                )
+                .map_err(|_| ClientError::Custom("Invalid signature".to_string()))?,
             };
 
-            cli.client
-                .verify_listing(listing).await?;
+            cli.client.verify_listing(listing).await?;
             println!("{} Listing verified", "✓".color(Color::Green));
         }
         Commands::SignMessage { mut space, message } => {
             space = normalize_space(&space);
-            let result = cli.client
-                .wallet_sign_message(&cli.wallet, &space, protocol::Bytes::new(message.as_bytes().to_vec())).await?;
+            let result = cli
+                .client
+                .wallet_sign_message(
+                    &cli.wallet,
+                    &space,
+                    spaces_protocol::Bytes::new(message.as_bytes().to_vec()),
+                )
+                .await?;
             println!("{}", result.signature);
         }
-        Commands::VerifyMessage { mut space, message, signature } => {
+        Commands::VerifyMessage {
+            mut space,
+            message,
+            signature,
+        } => {
             space = normalize_space(&space);
             let raw = hex::decode(signature)
                 .map_err(|_| ClientError::Custom("Invalid signature".to_string()))?;
             let signature = Signature::from_slice(raw.as_slice())
                 .map_err(|_| ClientError::Custom("Invalid signature".to_string()))?;
-            cli.client.verify_message(SignedMessage {
-                space,
-                message: protocol::Bytes::new(message.as_bytes().to_vec()),
-                signature,
-            }).await?;
+            cli.client
+                .verify_message(SignedMessage {
+                    space,
+                    message: spaces_protocol::Bytes::new(message.as_bytes().to_vec()),
+                    signature,
+                })
+                .await?;
             println!("{} Message verified", "✓".color(Color::Green));
         }
-
     }
 
     Ok(())

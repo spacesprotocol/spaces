@@ -11,13 +11,6 @@ use std::{
 use anyhow::{Context, Result};
 use bincode::{config, Decode, Encode};
 use jsonrpsee::core::Serialize;
-use protocol::{
-    bitcoin::OutPoint,
-    constants::{ChainAnchor, ROLLOUT_BATCH_SIZE},
-    hasher::{BidKey, KeyHash, OutpointKey, SpaceKey},
-    prepare::DataSource,
-    Covenant, FullSpaceOut, SpaceOut,
-};
 use serde::Deserialize;
 use spacedb::{
     db::{Database, SnapshotIterator},
@@ -25,7 +18,13 @@ use spacedb::{
     tx::{KeyIterator, ReadTransaction, WriteTransaction},
     Configuration, Hash, NodeHasher, Sha256Hasher,
 };
-use protocol::bitcoin::BlockHash;
+use spaces_protocol::{
+    bitcoin::{BlockHash, OutPoint},
+    constants::{ChainAnchor, ROLLOUT_BATCH_SIZE},
+    hasher::{BidKey, KeyHash, OutpointKey, SpaceKey},
+    prepare::DataSource,
+    Covenant, FullSpaceOut, SpaceOut,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RolloutEntry {
@@ -157,7 +156,7 @@ pub trait ChainState {
 
     fn get_space_info(
         &mut self,
-        space_hash: &protocol::hasher::SpaceKey,
+        space_hash: &spaces_protocol::hasher::SpaceKey,
     ) -> anyhow::Result<Option<FullSpaceOut>>;
 }
 
@@ -235,8 +234,8 @@ impl LiveSnapshot {
             Some(value) => {
                 let (decoded, _): (T, _) = bincode::decode_from_slice(&value, config::standard())
                     .map_err(|e| {
-                        spacedb::Error::IO(io::Error::new(ErrorKind::Other, e.to_string()))
-                    })?;
+                    spacedb::Error::IO(io::Error::new(ErrorKind::Other, e.to_string()))
+                })?;
                 Ok(Some(decoded))
             }
             None => Ok(None),
@@ -428,24 +427,27 @@ impl DataSource for LiveSnapshot {
     fn get_space_outpoint(
         &mut self,
         space_hash: &SpaceKey,
-    ) -> protocol::errors::Result<Option<OutPoint>> {
-        let result: Option<EncodableOutpoint> = self
-            .get(*space_hash)
-            .map_err(|err| protocol::errors::Error::IO(format!("getspaceoutpoint: {}", err.to_string())))?;
+    ) -> spaces_protocol::errors::Result<Option<OutPoint>> {
+        let result: Option<EncodableOutpoint> = self.get(*space_hash).map_err(|err| {
+            spaces_protocol::errors::Error::IO(format!("getspaceoutpoint: {}", err.to_string()))
+        })?;
         Ok(result.map(|out| out.into()))
     }
 
-    fn get_spaceout(&mut self, outpoint: &OutPoint) -> protocol::errors::Result<Option<SpaceOut>> {
+    fn get_spaceout(
+        &mut self,
+        outpoint: &OutPoint,
+    ) -> spaces_protocol::errors::Result<Option<SpaceOut>> {
         let h = OutpointKey::from_outpoint::<Sha256>(*outpoint);
-        let result = self
-            .get(h)
-            .map_err(|err| protocol::errors::Error::IO(format!("getspaceout: {}", err.to_string())))?;
+        let result = self.get(h).map_err(|err| {
+            spaces_protocol::errors::Error::IO(format!("getspaceout: {}", err.to_string()))
+        })?;
         Ok(result)
     }
 }
 
-impl protocol::hasher::KeyHasher for Sha256 {
-    fn hash(data: &[u8]) -> protocol::hasher::Hash {
+impl spaces_protocol::hasher::KeyHasher for Sha256 {
+    fn hash(data: &[u8]) -> spaces_protocol::hasher::Hash {
         Sha256Hasher::hash(data)
     }
 }
@@ -503,8 +505,8 @@ impl Iterator for KeyRolloutIterator {
 
 struct MergingIterator<I1, I2>
 where
-    I1: Iterator<Item=Result<(BidKey, SpaceKey)>>,
-    I2: Iterator<Item=Result<(BidKey, SpaceKey)>>,
+    I1: Iterator<Item = Result<(BidKey, SpaceKey)>>,
+    I2: Iterator<Item = Result<(BidKey, SpaceKey)>>,
 {
     iter1: std::iter::Peekable<I1>,
     iter2: std::iter::Peekable<I2>,
@@ -512,8 +514,8 @@ where
 
 impl<I1, I2> MergingIterator<I1, I2>
 where
-    I1: Iterator<Item=Result<(BidKey, SpaceKey)>>,
-    I2: Iterator<Item=Result<(BidKey, SpaceKey)>>,
+    I1: Iterator<Item = Result<(BidKey, SpaceKey)>>,
+    I2: Iterator<Item = Result<(BidKey, SpaceKey)>>,
 {
     fn new(iter1: I1, iter2: I2) -> Self {
         MergingIterator {
@@ -525,8 +527,8 @@ where
 
 impl<I1, I2> Iterator for MergingIterator<I1, I2>
 where
-    I1: Iterator<Item=Result<(BidKey, SpaceKey)>>,
-    I2: Iterator<Item=Result<(BidKey, SpaceKey)>>,
+    I1: Iterator<Item = Result<(BidKey, SpaceKey)>>,
+    I2: Iterator<Item = Result<(BidKey, SpaceKey)>>,
 {
     type Item = Result<(BidKey, SpaceKey)>;
 

@@ -2,14 +2,22 @@ use std::{net::SocketAddr, path::PathBuf, time::Duration};
 
 use anyhow::{anyhow, Context};
 use log::{info, warn};
-use protocol::{
+use spaces_protocol::{
     bitcoin::{hashes::Hash, Block, BlockHash},
     constants::ChainAnchor,
     hasher::BaseHash,
 };
 use tokio::sync::broadcast;
-use crate::{config::ExtendedNetwork, node::{BlockMeta, BlockSource, Node}, source::{BitcoinBlockSource, BitcoinRpc, BlockEvent, BlockFetchError, BlockFetcher}, std_wait, store::LiveStore};
-use crate::source::BitcoinRpcError;
+
+use crate::{
+    client::{BlockMeta, BlockSource, Client},
+    config::ExtendedNetwork,
+    source::{
+        BitcoinBlockSource, BitcoinRpc, BitcoinRpcError, BlockEvent, BlockFetchError, BlockFetcher,
+    },
+    std_wait,
+    store::LiveStore,
+};
 
 // https://internals.rust-lang.org/t/nicer-static-assertions/15986
 macro_rules! const_assert {
@@ -20,7 +28,7 @@ macro_rules! const_assert {
 
 const COMMIT_BLOCK_INTERVAL: u32 = 36;
 const_assert!(
-    protocol::constants::ROLLOUT_BLOCK_INTERVAL % COMMIT_BLOCK_INTERVAL == 0,
+    spaces_protocol::constants::ROLLOUT_BLOCK_INTERVAL % COMMIT_BLOCK_INTERVAL == 0,
     "commit and rollout intervals must be aligned"
 );
 
@@ -104,7 +112,7 @@ impl Spaced {
 
     pub fn handle_block(
         &mut self,
-        node: &mut Node,
+        node: &mut Client,
         id: ChainAnchor,
         block: Block,
     ) -> anyhow::Result<()> {
@@ -143,7 +151,7 @@ impl Spaced {
         shutdown: broadcast::Sender<()>,
     ) -> anyhow::Result<()> {
         let start_block: ChainAnchor = { self.chain.state.tip.read().expect("read").clone() };
-        let mut node = Node::new(self.block_index_full);
+        let mut node = Client::new(self.block_index_full);
 
         info!(
             "Start block={} height={}",

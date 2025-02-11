@@ -7,14 +7,14 @@ pub extern crate log;
 use std::time::{Duration, Instant};
 
 mod checker;
+pub mod client;
 pub mod config;
-pub mod node;
+pub mod format;
 pub mod rpc;
 pub mod source;
 pub mod store;
 pub mod sync;
 pub mod wallets;
-pub mod format;
 
 fn std_wait<F>(mut predicate: F, wait: Duration)
 where

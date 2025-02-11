@@ -1,4 +1,4 @@
 [workspace]
 
 resolver = "2"
-members = [ "node", "protocol", "testutil", "wallet"]
+members = [ "client", "protocol", "testutil", "wallet"]

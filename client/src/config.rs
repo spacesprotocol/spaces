@@ -15,8 +15,8 @@ use clap::{
 use directories::ProjectDirs;
 use jsonrpsee::core::Serialize;
 use log::error;
-use protocol::bitcoin::Network;
 use serde::Deserialize;
+use spaces_protocol::bitcoin::Network;
 use toml::Value;
 
 use crate::{
