@@ -17,7 +17,7 @@ use crate::{
 #[derive(Debug, Clone)]
 pub struct Validator {}
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "bincode", derive(Encode, Decode))]
 /// A `TxChangeSet` captures all resulting state changes.
