@@ -44,7 +44,7 @@ pub struct BlockMeta {
     pub tx_meta: Vec<TxEntry>,
 }
 
-#[derive(Clone, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
 pub struct TxEntry {
     #[serde(flatten)]
     pub changeset: TxChangeSet,
@@ -52,7 +52,7 @@ pub struct TxEntry {
     pub tx: Option<TxData>,
 }
 
-#[derive(Clone, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
 pub struct TxData {
     pub position: u32,
     pub raw: Bytes,
