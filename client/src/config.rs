@@ -76,6 +76,9 @@ pub struct Args {
     /// Index blocks including the full transaction data
     #[arg(long, env = "SPACED_BLOCK_INDEX_FULL", default_value = "false")]
     block_index_full: bool,
+    /// Whether to maintain a trust anchors file
+    #[arg(long, env = "SPACED_BUILD_ANCHORS", default_value = "false")]
+    build_anchors: bool,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug, ValueEnum, Serialize, Deserialize)]
@@ -176,6 +179,10 @@ impl Args {
             store: chain_store,
         };
 
+        let build_anchors = match args.build_anchors {
+            true => Some(data_dir.join("trust_anchors.json")),
+            false => None,
+        };
         let block_index_enabled = args.block_index || args.block_index_full;
         let block_index = if block_index_enabled {
             let block_db_path = data_dir.join("block_index.sdb");
@@ -212,6 +219,8 @@ impl Args {
             block_index,
             block_index_full: args.block_index_full,
             num_workers: args.jobs as usize,
+            anchors_path: build_anchors,
+            synced: false,
         })
     }
 

@@ -9,6 +9,8 @@ use spaces_protocol::{
 };
 use tokio::sync::broadcast;
 
+pub const TRUST_ANCHORS_COUNT: u32 = 120;
+
 use crate::{
     client::{BlockMeta, BlockSource, Client},
     config::ExtendedNetwork,
@@ -26,7 +28,7 @@ macro_rules! const_assert {
     }
 }
 
-const COMMIT_BLOCK_INTERVAL: u32 = 36;
+pub const COMMIT_BLOCK_INTERVAL: u32 = 36;
 const_assert!(
     spaces_protocol::constants::ROLLOUT_BLOCK_INTERVAL % COMMIT_BLOCK_INTERVAL == 0,
     "commit and rollout intervals must be aligned"
@@ -41,6 +43,8 @@ pub struct Spaced {
     pub data_dir: PathBuf,
     pub bind: Vec<SocketAddr>,
     pub num_workers: usize,
+    pub anchors_path: Option<PathBuf>,
+    pub synced: bool
 }
 
 impl Spaced {
@@ -110,6 +114,25 @@ impl Spaced {
         Ok(())
     }
 
+    pub fn update_anchors(&self) -> anyhow::Result<()> {
+        if !self.synced {
+            return Ok(()) ;
+        }
+        info!("Updating trust anchors ...");
+        let anchors_path = match self.anchors_path.as_ref() {
+            None => return Ok(()),
+            Some(path) => path,
+        };
+
+        let result = self.chain.store.update_anchors(anchors_path, TRUST_ANCHORS_COUNT)
+            .or_else(|e| Err(anyhow!("Could not update trust anchors: {}",e)))?;
+
+        if let Some(result) = result.first() {
+            info!("Latest trust anchor root {} (height: {})", hex::encode(result.root), result.block.height)
+        }
+        Ok(())
+    }
+
     pub fn handle_block(
         &mut self,
         node: &mut Client,
@@ -140,6 +163,7 @@ impl Spaced {
                 let tx = index.store.write().expect("write handle");
                 index.state.commit(state_meta, tx)?;
             }
+            self.update_anchors()?;
         }
 
         Ok(())
@@ -168,7 +192,12 @@ impl Spaced {
             }
             match receiver.try_recv() {
                 Ok(event) => match event {
-                    BlockEvent::Tip(_) => {}
+                    BlockEvent::Tip(_) => {
+                        self.synced = true;
+                        if self.anchors_path.as_ref().is_some_and(|file| !file.exists()) {
+                            self.update_anchors()?;
+                        }
+                    },
                     BlockEvent::Block(id, block) => {
                         self.handle_block(&mut node, id, block)?;
                         info!("block={} height={}", id.hash, id.height);

@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeMap, fs, io::Write, net::SocketAddr, path::PathBuf, str::FromStr, sync::Arc,
 };
-
+use std::fs::File;
 use anyhow::{anyhow, Context};
 use base64::Engine;
 use bdk::{
@@ -18,21 +18,12 @@ use jsonrpsee::{core::async_trait, proc_macros::rpc, server::Server, types::Erro
 use log::info;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use spacedb::{encode::SubTreeEncoder, tx::ProofType};
-use spaces_protocol::{
-    bitcoin,
-    bitcoin::{
-        bip32::Xpriv,
-        secp256k1,
-        Network::{Regtest, Testnet},
-        OutPoint,
-    },
-    constants::ChainAnchor,
-    hasher::{BaseHash, KeyHasher, OutpointKey, SpaceKey},
-    prepare::DataSource,
-    slabel::SLabel,
-    validate::TxChangeSet,
-    Bytes, FullSpaceOut, SpaceOut,
-};
+use spaces_protocol::{bitcoin, bitcoin::{
+    bip32::Xpriv,
+    secp256k1,
+    Network::{Regtest, Testnet},
+    OutPoint,
+}, constants::ChainAnchor, hasher::{BaseHash, KeyHasher, OutpointKey, SpaceKey}, prepare::DataSource, slabel::SLabel, validate::TxChangeSet, Bytes, Covenant, FullSpaceOut, SpaceOut};
 use spaces_wallet::{
     bdk_wallet as bdk, bdk_wallet::template::Bip86, bitcoin::hashes::Hash as BitcoinHash,
     export::WalletExport, Balance, DoubleUtxo, Listing, SpacesWallet, WalletConfig,
@@ -55,6 +46,7 @@ use crate::{
         WalletResponse,
     },
 };
+use crate::sync::{TRUST_ANCHORS_COUNT, COMMIT_BLOCK_INTERVAL};
 
 pub(crate) type Responder<T> = oneshot::Sender<T>;
 
@@ -77,9 +69,8 @@ pub struct TrustAnchor {
         serialize_with = "serialize_hash",
         deserialize_with = "deserialize_hash"
     )]
-    pub state_root: spaces_protocol::hasher::Hash,
-    pub block_hash: BlockHash,
-    pub block_height: u32,
+    pub root: spaces_protocol::hasher::Hash,
+    pub block: ChainAnchor
 }
 
 pub enum ChainStateCommand {
@@ -94,7 +85,6 @@ pub enum ChainStateCommand {
         hash: SpaceKey,
         resp: Responder<anyhow::Result<Option<FullSpaceOut>>>,
     },
-
     GetSpaceout {
         outpoint: OutPoint,
         resp: Responder<anyhow::Result<Option<SpaceOut>>>,
@@ -129,14 +119,15 @@ pub enum ChainStateCommand {
     },
     ProveSpaceout {
         outpoint: OutPoint,
+        oldest: bool,
         resp: Responder<anyhow::Result<ProofResult>>,
     },
     ProveSpaceOutpoint {
         space_or_hash: String,
         resp: Responder<anyhow::Result<ProofResult>>,
     },
-    GetAnchor {
-        resp: Responder<anyhow::Result<TrustAnchor>>,
+    GetTrustAnchors {
+        resp: Responder<anyhow::Result<Vec<TrustAnchor>>>,
     },
 }
 
@@ -256,7 +247,7 @@ pub trait Rpc {
     async fn verify_listing(&self, listing: Listing) -> Result<(), ErrorObjectOwned>;
 
     #[method(name = "provespaceout")]
-    async fn prove_spaceout(&self, outpoint: OutPoint) -> Result<ProofResult, ErrorObjectOwned>;
+    async fn prove_spaceout(&self, outpoint: OutPoint, oldest: bool) -> Result<ProofResult, ErrorObjectOwned>;
 
     #[method(name = "provespaceoutpoint")]
     async fn prove_space_outpoint(
@@ -264,8 +255,8 @@ pub trait Rpc {
         space_or_hash: &str,
     ) -> Result<ProofResult, ErrorObjectOwned>;
 
-    #[method(name = "getanchor")]
-    async fn get_anchor(&self) -> Result<TrustAnchor, ErrorObjectOwned>;
+    #[method(name = "gettrustanchors")]
+    async fn get_trust_anchors(&self) -> Result<Vec<TrustAnchor>, ErrorObjectOwned>;
 
     #[method(name = "walletlisttransactions")]
     async fn wallet_list_transactions(
@@ -384,13 +375,15 @@ pub struct RpcServerImpl {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-pub struct ProofResult(
+pub struct ProofResult {
+    root: Bytes,
     #[serde(
         serialize_with = "serialize_base64",
         deserialize_with = "deserialize_base64"
     )]
-    Vec<u8>,
-);
+    proof: Vec<u8>,
+
+}
 
 fn serialize_base64<S>(bytes: &Vec<u8>, serializer: S) -> Result<S::Ok, S::Error>
 where
@@ -960,9 +953,9 @@ impl RpcServer for RpcServerImpl {
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
     }
 
-    async fn prove_spaceout(&self, outpoint: OutPoint) -> Result<ProofResult, ErrorObjectOwned> {
+    async fn prove_spaceout(&self, outpoint: OutPoint, oldest: bool) -> Result<ProofResult, ErrorObjectOwned> {
         self.store
-            .prove_spaceout(outpoint)
+            .prove_spaceout(outpoint, oldest)
             .await
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
     }
@@ -977,9 +970,9 @@ impl RpcServer for RpcServerImpl {
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
     }
 
-    async fn get_anchor(&self) -> Result<TrustAnchor, ErrorObjectOwned> {
+    async fn get_trust_anchors(&self) -> Result<Vec<TrustAnchor>, ErrorObjectOwned> {
         self.store
-            .get_anchor()
+            .get_trust_anchors()
             .await
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
     }
@@ -1124,6 +1117,7 @@ impl AsyncChainState {
     pub async fn handle_command(
         client: &reqwest::Client,
         rpc: &BitcoinRpc,
+        anchors_path: &Option<PathBuf>,
         chain_state: &mut LiveSnapshot,
         block_index: &mut Option<LiveSnapshot>,
         cmd: ChainStateCommand,
@@ -1196,11 +1190,11 @@ impl AsyncChainState {
                         msg.message.as_slice(),
                         &msg.signature,
                     )
-                    .map(|_| ()),
+                        .map(|_| ()),
                 );
             }
-            ChainStateCommand::ProveSpaceout { outpoint, resp } => {
-                _ = resp.send(Self::handle_prove_spaceout(chain_state, outpoint));
+            ChainStateCommand::ProveSpaceout { oldest, outpoint, resp } => {
+                _ = resp.send(Self::handle_prove_spaceout(chain_state, outpoint, oldest));
             }
             ChainStateCommand::ProveSpaceOutpoint {
                 space_or_hash,
@@ -1211,21 +1205,30 @@ impl AsyncChainState {
                     &space_or_hash,
                 ));
             }
-            ChainStateCommand::GetAnchor { resp } => {
-                _ = resp.send(Self::handle_get_anchor(chain_state));
+            ChainStateCommand::GetTrustAnchors { resp } => {
+                _ = resp.send(Self::handle_get_anchor(anchors_path, chain_state));
             }
         }
     }
 
-    fn handle_get_anchor(state: &mut LiveSnapshot) -> anyhow::Result<TrustAnchor> {
+    fn handle_get_anchor(anchors_path: &Option<PathBuf>, state: &mut LiveSnapshot) -> anyhow::Result<Vec<TrustAnchor>> {
+        if let Some(anchors_path) = anchors_path {
+            let anchors: Vec<TrustAnchor> = serde_json::from_reader(File::open(anchors_path)
+                .or_else(|e| Err(anyhow!("Could not open anchors file: {}", e)))?)
+                .or_else(|e| Err(anyhow!("Could not read anchors file: {}", e)))?;
+            return Ok(anchors);
+        }
+
         let snapshot = state.inner()?;
         let root = snapshot.compute_root()?;
         let meta: ChainAnchor = snapshot.metadata().try_into()?;
-        Ok(TrustAnchor {
-            state_root: root,
-            block_hash: meta.hash,
-            block_height: meta.height,
-        })
+        Ok(vec![TrustAnchor {
+            root,
+            block: ChainAnchor {
+                hash: meta.hash,
+                height: meta.height,
+            },
+        }])
     }
 
     fn handle_prove_space_outpoint(
@@ -1236,37 +1239,88 @@ impl AsyncChainState {
         let snapshot = state.inner()?;
 
         // warm up hash cache
-        _ = snapshot.compute_root()?;
+        let root = snapshot.compute_root()?;
         let proof = snapshot.prove(&[key.into()], ProofType::Standard)?;
 
         let mut buf = vec![0u8; 4096];
         let offset = proof.write_to_slice(&mut buf)?;
         buf.truncate(offset);
 
-        Ok(ProofResult(buf))
+        Ok(ProofResult{ proof: buf, root: Bytes::new(root.to_vec()) })
+    }
+
+    /// Determines the optimal snapshot block height for creating a Merkle proof.
+    ///
+    /// This function finds a suitable historical snapshot that:
+    /// 1. Is not older than when the space was last updated.
+    /// 2. Falls within [TRUST_ANCHORS_COUNT] range (for proof verification)
+    /// 3. Skips the oldest trust anchors to prevent the proof from becoming stale too quickly.
+    ///
+    /// Parameters:
+    /// - last_update: Block height when the space was last updated
+    /// - tip: Current blockchain tip height
+    ///
+    /// Returns: Target block height aligned to [COMMIT_BLOCK_INTERVAL]
+    fn compute_target_snapshot(last_update: u32, tip: u32) -> u32 {
+        const SAFETY_MARGIN: u32 = 8; // Skip oldest trust anchors to prevent proof staleness
+        const USABLE_ANCHORS: u32 = TRUST_ANCHORS_COUNT - SAFETY_MARGIN;
+
+        // Align block heights to commit intervals
+        let last_update_aligned = last_update.div_ceil(COMMIT_BLOCK_INTERVAL)
+            * COMMIT_BLOCK_INTERVAL;
+        let current_tip_aligned = (tip / COMMIT_BLOCK_INTERVAL)
+            * COMMIT_BLOCK_INTERVAL;
+
+        // Calculate the oldest allowed snapshot while maintaining safety margin
+        let lookback_window = USABLE_ANCHORS * COMMIT_BLOCK_INTERVAL;
+        let oldest_allowed_snapshot = current_tip_aligned.saturating_sub(lookback_window);
+
+        // Choose the most recent of last update or oldest allowed snapshot
+        // to ensure both data freshness and proof verifiability
+        std::cmp::max(last_update_aligned, oldest_allowed_snapshot)
     }
 
     fn handle_prove_spaceout(
         state: &mut LiveSnapshot,
         outpoint: OutPoint,
+        oldest: bool,
     ) -> anyhow::Result<ProofResult> {
         let key = OutpointKey::from_outpoint::<Sha256>(outpoint);
-        let snapshot = state.inner()?;
 
-        // warm up hash cache
-        _ = snapshot.compute_root()?;
-        let proof = snapshot.prove(&[key.into()], ProofType::Standard)?;
+        let proof = if oldest {
+            let spaceout = match state.get_spaceout(&outpoint)? {
+                Some(spaceot) => spaceot,
+                None => return Err(anyhow!("Cannot find older proofs for a non-existent utxo (try with oldest: false)")),
+            };
+            let target_snapshot = match spaceout.space.as_ref() {
+                None => return Ok(ProofResult { proof: vec![], root: Bytes::new(vec![]) }),
+                Some(space) => match space.covenant {
+                    Covenant::Transfer { expire_height, .. } => {
+                        let tip = state.tip.read().expect("read lock").height;
+                        let last_update = expire_height.saturating_sub(spaces_protocol::constants::RENEWAL_INTERVAL);
+                        Self::compute_target_snapshot(last_update, tip)
+                    },
+                    _ => return Err(anyhow!("Cannot find older proofs for a non-registered space (try with oldest: false)")),
+                }
+            };
+            state.prove_with_snapshot(&[key.into()], target_snapshot)?
+        } else {
+            let snapshot = state.inner()?;
+            snapshot.prove(&[key.into()], ProofType::Standard)?
+        };
 
+        let root = proof.compute_root()?.to_vec();
         let mut buf = vec![0u8; 4096];
         let offset = proof.write_to_slice(&mut buf)?;
         buf.truncate(offset);
 
-        Ok(ProofResult(buf))
+        Ok(ProofResult { proof: buf, root:Bytes::new(root)})
     }
 
     pub async fn handler(
         client: &reqwest::Client,
         rpc: BitcoinRpc,
+        anchors_path: Option<PathBuf>,
         mut chain_state: LiveSnapshot,
         mut block_index: Option<LiveSnapshot>,
         mut rx: mpsc::Receiver<ChainStateCommand>,
@@ -1278,7 +1332,7 @@ impl AsyncChainState {
                      break;
                 }
                 Some(cmd) = rx.recv() => {
-                    Self::handle_command(client, &rpc, &mut chain_state, &mut block_index, cmd).await;
+                    Self::handle_command(client, &rpc, &anchors_path, &mut chain_state, &mut block_index, cmd).await;
                 }
             }
         }
@@ -1310,10 +1364,10 @@ impl AsyncChainState {
         resp_rx.await?
     }
 
-    pub async fn prove_spaceout(&self, outpoint: OutPoint) -> anyhow::Result<ProofResult> {
+    pub async fn prove_spaceout(&self, outpoint: OutPoint, oldest: bool) -> anyhow::Result<ProofResult> {
         let (resp, resp_rx) = oneshot::channel();
         self.sender
-            .send(ChainStateCommand::ProveSpaceout { outpoint, resp })
+            .send(ChainStateCommand::ProveSpaceout { outpoint, oldest, resp })
             .await?;
         resp_rx.await?
     }
@@ -1329,10 +1383,10 @@ impl AsyncChainState {
         resp_rx.await?
     }
 
-    pub async fn get_anchor(&self) -> anyhow::Result<TrustAnchor> {
+    pub async fn get_trust_anchors(&self) -> anyhow::Result<Vec<TrustAnchor>> {
         let (resp, resp_rx) = oneshot::channel();
         self.sender
-            .send(ChainStateCommand::GetAnchor { resp })
+            .send(ChainStateCommand::GetTrustAnchors { resp })
             .await?;
         resp_rx.await?
     }

@@ -1,14 +1,7 @@
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    fs::OpenOptions,
-    io,
-    io::ErrorKind,
-    mem,
-    path::PathBuf,
-    sync::{Arc, RwLock},
-};
-
-use anyhow::{Context, Result};
+use std::{collections::{BTreeMap, BTreeSet}, fs, fs::OpenOptions, io, io::ErrorKind, mem, path::PathBuf, sync::{Arc, RwLock}};
+use std::collections::HashMap;
+use std::path::Path;
+use anyhow::{anyhow, Context, Result};
 use bincode::{config, Decode, Encode};
 use jsonrpsee::core::Serialize;
 use serde::Deserialize;
@@ -18,13 +11,10 @@ use spacedb::{
     tx::{KeyIterator, ReadTransaction, WriteTransaction},
     Configuration, Hash, NodeHasher, Sha256Hasher,
 };
-use spaces_protocol::{
-    bitcoin::{BlockHash, OutPoint},
-    constants::{ChainAnchor, ROLLOUT_BATCH_SIZE},
-    hasher::{BidKey, KeyHash, OutpointKey, SpaceKey},
-    prepare::DataSource,
-    Covenant, FullSpaceOut, SpaceOut,
-};
+use spacedb::subtree::SubTree;
+use spacedb::tx::ProofType;
+use spaces_protocol::{bitcoin::{BlockHash, OutPoint}, constants::{ChainAnchor, ROLLOUT_BATCH_SIZE}, hasher::{BidKey, KeyHash, OutpointKey, SpaceKey}, prepare::DataSource, Covenant, FullSpaceOut, SpaceOut};
+use crate::rpc::TrustAnchor;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RolloutEntry {
@@ -63,6 +53,7 @@ pub struct Staged {
     memory: WriteMemory,
 }
 
+
 impl Store {
     pub fn open(path: PathBuf) -> Result<Self> {
         let db = Self::open_db(path)?;
@@ -91,6 +82,38 @@ impl Store {
 
     pub fn write(&self) -> Result<WriteTx> {
         Ok(self.0.begin_write()?)
+    }
+
+    pub fn update_anchors(&self, file_path: &Path, count: u32) -> Result<Vec<TrustAnchor>> {
+        let previous: Vec<TrustAnchor> = match fs::read(file_path) {
+            Ok(bytes) => serde_json::from_slice(&bytes)?,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
+            Err(e) => return Err(e.into()),
+        };
+        let prev_map: HashMap<(BlockHash, u32), TrustAnchor> = previous
+            .into_iter()
+            .map(|anchor| ((anchor.block.hash, anchor.block.height), anchor))
+            .collect();
+
+        let mut anchors = Vec::new();
+        for snap in self.0.iter().take(count as _) {
+            let mut snap = snap?;
+            let anchor: ChainAnchor = snap.metadata().try_into()?;
+
+            if let Some(existing) = prev_map.get(&(anchor.hash, anchor.height)) {
+                anchors.push(existing.clone());
+            } else {
+                let root = snap.compute_root()?;
+                anchors.push(TrustAnchor {
+                    root,
+                    block: anchor,
+                });
+            }
+        }
+
+        let updated = serde_json::to_vec_pretty(&anchors)?;
+        fs::write(file_path, updated)?;
+        Ok(anchors)
     }
 
     pub fn begin(&self, genesis_block: &ChainAnchor) -> Result<LiveSnapshot> {
@@ -208,6 +231,22 @@ impl LiveSnapshot {
             snapshot_version,
             memory: BTreeMap::new(),
         };
+    }
+
+    pub fn prove_with_snapshot(&self, keys: &[Hash], snapshot_block_height: u32) -> Result<SubTree<Sha256Hasher>> {
+        let snapshot = self.db.iter()
+            .filter_map(|s| s.ok()).find(|s| {
+            let anchor: ChainAnchor = match s.metadata().try_into() {
+                Ok(a) => a,
+                _ => return false,
+            };
+            anchor.height == snapshot_block_height
+        });
+        if let Some(mut snapshot) = snapshot {
+            return snapshot.prove(keys, ProofType::Standard)
+                .or_else(|err| Err(anyhow!("Could not prove: {}", err)))
+        }
+        Err(anyhow!("Older snapshot targeting block {} could not be found", snapshot_block_height))
     }
 
     pub fn inner(&mut self) -> anyhow::Result<&mut ReadTx> {
