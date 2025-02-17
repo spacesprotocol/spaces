@@ -16,6 +16,8 @@ pub struct ChainAnchor {
     pub height: u32,
 }
 
+pub const SPACES_SIGNED_MSG_PREFIX: &[u8] = b"\x17Spaces Signed Message:\n";
+
 pub const RESERVED_SPACES: [&'static [u8]; 3] = [b"\x07example", b"\x04test", b"\x05local"];
 
 /// The number of blocks between each rollout of new spaces for auction.
@@ -100,7 +102,8 @@ impl ChainAnchor {
 
 #[cfg(feature = "bincode")]
 pub mod bincode_impl {
-    use alloc::vec::Vec;
+    use crate::alloc::borrow::ToOwned;
+use alloc::vec::Vec;
 
     use bincode::{
         config,

@@ -9,6 +9,10 @@ use alloc::{vec, vec::Vec};
 
 #[cfg(feature = "bincode")]
 use bincode::{Decode, Encode};
+
+#[cfg(feature = "serde")]
+use serde::{Deserialize, Serialize};
+
 use bitcoin::{
     psbt,
     secp256k1::{schnorr, Message},
@@ -17,8 +21,6 @@ use bitcoin::{
     transaction::Version,
     Amount, OutPoint, ScriptBuf, Transaction, TxIn, TxOut, Txid, Witness,
 };
-#[cfg(feature = "serde")]
-use serde::{Deserialize, Serialize};
 
 use crate::{
     constants::{BID_PSBT_INPUT_SEQUENCE, BID_PSBT_TX_LOCK_TIME, BID_PSBT_TX_VERSION},
@@ -32,6 +34,7 @@ pub mod prepare;
 pub mod script;
 pub mod slabel;
 pub mod validate;
+
 
 #[derive(Clone, PartialEq, Debug)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
@@ -214,6 +217,7 @@ pub mod serde_bytes_impl {
 
 #[cfg(feature = "bincode")]
 pub mod bincode_bytes_impl {
+    use alloc::vec::Vec;
     use bincode::{
         de::Decoder,
         enc::Encoder,
