@@ -721,6 +721,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fea41bba32d969b513997752735605054bc0dfa92b4c56bf1189f2e174be7a10"
 
 [[package]]
+name = "domain"
+version = "0.10.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "64008666d9f3b6a88a63cd28ad8f3a5a859b8037e11bfb680c1b24945ea1c28d"
+dependencies = [
+ "bytes",
+ "octseq",
+ "serde",
+ "time",
+]
+
+[[package]]
 name = "either"
 version = "1.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -738,9 +750,9 @@ dependencies = [
 
 [[package]]
 name = "env_logger"
-version = "0.11.3"
+version = "0.11.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "38b35839ba51819680ba087cd351788c9a3c476841207e0b8cee0b04722343b9"
+checksum = "dcaee3d8e3cfc3fd92428d477bc97fc29ec8716d180c0d74c643bb26166660e0"
 dependencies = [
  "anstream",
  "anstyle",
@@ -930,13 +942,15 @@ dependencies = [
 
 [[package]]
 name = "getrandom"
-version = "0.2.12"
+version = "0.2.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "190092ea657667030ac6a35e305e62fc4dd69fd98ac98631e5d3a2b1575a12b5"
+checksum = "c4567c8db10ae91089c99af84c68c38da3ec2f087c3f82960bcdbf3656b6f4d7"
 dependencies = [
  "cfg-if",
+ "js-sys",
  "libc",
  "wasi",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -944,6 +958,18 @@ name = "gimli"
 version = "0.28.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4271d37baee1b8c7e4b708028c57d816cf9d2434acb33a549475f78c181f6253"
+
+[[package]]
+name = "gloo-timers"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbb143cf96099802033e0d4f4963b19fd2e0b728bcf076cd9cf7f6634f092994"
+dependencies = [
+ "futures-channel",
+ "futures-core",
+ "js-sys",
+ "wasm-bindgen",
+]
 
 [[package]]
 name = "h2"
@@ -1278,10 +1304,11 @@ dependencies = [
 
 [[package]]
 name = "js-sys"
-version = "0.3.69"
+version = "0.3.77"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "29c15563dc2726973df627357ce0c9ddddbea194836909d655df6a75d2cf296d"
+checksum = "1cfaf33c695fc6e08064efbc1f72ec937429614f25eef83af942d0e227c3a28f"
 dependencies = [
+ "once_cell",
  "wasm-bindgen",
 ]
 
@@ -1573,6 +1600,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "octseq"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "126c3ca37c9c44cec575247f43a3e4374d8927684f129d2beeb0d2cef262fe12"
+dependencies = [
+ "bytes",
+ "serde",
+]
+
+[[package]]
 name = "once_cell"
 version = "1.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1777,18 +1814,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e835ff2298f5721608eb1a980ecaee1aef2c132bf95ecc026a11b7bf3c01c02e"
 dependencies = [
  "unicode-ident",
-]
-
-[[package]]
-name = "protocol"
-version = "0.0.6"
-dependencies = [
- "bincode",
- "bitcoin",
- "log",
- "rand",
- "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -2130,6 +2155,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustversion"
+version = "1.0.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f7c45b9784283f1b2e7fb61b42047c2fd678ef0960d4f6f1eba131594cc369d4"
+
+[[package]]
 name = "ryu"
 version = "1.0.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2354,7 +2385,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "spaced"
+name = "spacedb"
+version = "0.0.4"
+source = "git+https://github.com/spacesprotocol/spacedb?rev=e07259ac6fc9cea1b06ee2cfdbb93d8c3039658a#e07259ac6fc9cea1b06ee2cfdbb93d8c3039658a"
+dependencies = [
+ "bincode",
+ "hex",
+ "libc",
+ "sha2 0.11.0-pre.4",
+]
+
+[[package]]
+name = "spaces_client"
 version = "0.0.6"
 dependencies = [
  "anyhow",
@@ -2365,34 +2407,86 @@ dependencies = [
  "colored",
  "ctrlc",
  "directories",
+ "domain",
  "env_logger",
  "futures",
  "hex",
  "jsonrpsee",
  "log",
  "predicates",
- "protocol",
  "reqwest",
  "serde",
  "serde_json",
  "spacedb",
+ "spaces_protocol",
+ "spaces_testutil",
+ "spaces_wallet",
  "tabled",
- "testutil",
  "threadpool",
  "tokio",
  "toml",
- "wallet",
+ "tower",
 ]
 
 [[package]]
-name = "spacedb"
-version = "0.0.4"
-source = "git+https://github.com/spacesprotocol/spacedb?rev=e07259ac6fc9cea1b06ee2cfdbb93d8c3039658a#e07259ac6fc9cea1b06ee2cfdbb93d8c3039658a"
+name = "spaces_protocol"
+version = "0.0.6"
 dependencies = [
  "bincode",
+ "bitcoin",
+ "log",
+ "rand",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "spaces_testutil"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "assert_cmd",
+ "bitcoind",
+ "spaces_client",
+ "zip",
+]
+
+[[package]]
+name = "spaces_veritas"
+version = "0.0.1"
+dependencies = [
+ "base64 0.22.1",
+ "bincode",
+ "env_logger",
+ "getrandom",
+ "gloo-timers",
  "hex",
- "libc",
- "sha2 0.11.0-pre.4",
+ "js-sys",
+ "log",
+ "ring",
+ "spacedb",
+ "spaces_protocol",
+ "wasm-bindgen",
+]
+
+[[package]]
+name = "spaces_wallet"
+version = "0.0.6"
+dependencies = [
+ "anyhow",
+ "bdk_wallet",
+ "bech32",
+ "bincode",
+ "bitcoin",
+ "ctrlc",
+ "hex",
+ "jsonrpc",
+ "log",
+ "secp256k1",
+ "serde",
+ "serde_json",
+ "spaces_protocol",
+ "tempfile",
 ]
 
 [[package]]
@@ -2493,17 +2587,6 @@ name = "termtree"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3369f5ac52d5eb6ab48c6b4ffdc8efbcad6b89c765749064ba298f2c68a16a76"
-
-[[package]]
-name = "testutil"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "assert_cmd",
- "bitcoind",
- "spaced",
- "zip",
-]
 
 [[package]]
 name = "thiserror"
@@ -2840,26 +2923,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "wallet"
-version = "0.0.6"
-dependencies = [
- "anyhow",
- "bdk_wallet",
- "bech32",
- "bincode",
- "bitcoin",
- "ctrlc",
- "hex",
- "jsonrpc",
- "log",
- "protocol",
- "secp256k1",
- "serde",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
 name = "want"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2876,23 +2939,24 @@ checksum = "9c8d87e72b64a3b4db28d11ce29237c246188f4f51057d65a7eab63b7987e423"
 
 [[package]]
 name = "wasm-bindgen"
-version = "0.2.92"
+version = "0.2.100"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4be2531df63900aeb2bca0daaaddec08491ee64ceecbee5076636a3b026795a8"
+checksum = "1edc8929d7499fc4e8f0be2262a241556cfc54a0bea223790e71446f2aab1ef5"
 dependencies = [
  "cfg-if",
+ "once_cell",
+ "rustversion",
  "wasm-bindgen-macro",
 ]
 
 [[package]]
 name = "wasm-bindgen-backend"
-version = "0.2.92"
+version = "0.2.100"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "614d787b966d3989fa7bb98a654e369c762374fd3213d212cfc0251257e747da"
+checksum = "2f0a0651a5c2bc21487bde11ee802ccaf4c51935d0d3d42a6101f98161700bc6"
 dependencies = [
  "bumpalo",
  "log",
- "once_cell",
  "proc-macro2",
  "quote",
  "syn 2.0.52",
@@ -2913,9 +2977,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-macro"
-version = "0.2.92"
+version = "0.2.100"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a1f8823de937b71b9460c0c34e25f3da88250760bec0ebac694b49997550d726"
+checksum = "7fe63fc6d09ed3792bd0897b314f53de8e16568c2b3f7982f468c0bf9bd0b407"
 dependencies = [
  "quote",
  "wasm-bindgen-macro-support",
@@ -2923,9 +2987,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-macro-support"
-version = "0.2.92"
+version = "0.2.100"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e94f17b526d0a461a191c78ea52bbce64071ed5c04c9ffe424dcb38f74171bb7"
+checksum = "8ae87ea40c9f689fc23f209965b6fb8a99ad69aeeb0231408be24920604395de"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2936,9 +3000,12 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-shared"
-version = "0.2.92"
+version = "0.2.100"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "af190c94f2773fdb3729c55b007a722abb5384da03bc0986df4c289bf5567e96"
+checksum = "1a05d73b933a847d6cccdda8f838a22ff101ad9bf93e33684f39c1f5f0eece3d"
+dependencies = [
+ "unicode-ident",
+]
 
 [[package]]
 name = "web-sys"

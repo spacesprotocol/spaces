@@ -1,0 +1,31 @@
+[package]
+name = "spaces_veritas"
+version = "0.0.1"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+spaces_protocol = { path = "../protocol", default-features = false, features = ["std"]}
+bincode = { version = "2.0.0-rc.3", default-features = false, features = ["alloc"]}
+spacedb = { git = "https://github.com/spacesprotocol/spacedb", rev = "e07259ac6fc9cea1b06ee2cfdbb93d8c3039658a", default-features = false }
+
+# optional wasm feature
+wasm-bindgen = { version ="0.2.100", optional = true }
+js-sys = { version = "0.3.77", optional = true }
+
+# Compatibility to compile to WASM
+getrandom = { version = "0.2.15", features = ["js"] }
+ring = { version = "0.17.8", features = ["wasm32_unknown_unknown_js"] }
+gloo-timers = { version = "0.3.0", features = ["futures"] }
+
+[dev-dependencies]
+base64 = {version = "0.22.1", features = ["alloc"], default-features = false}
+hex = "0.4.3"
+log = "0.4.22"
+env_logger = "0.11.6"
+
+[features]
+std = []
+wasm = ["wasm-bindgen", "js-sys"]
