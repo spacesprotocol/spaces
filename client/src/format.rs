@@ -2,16 +2,26 @@ use clap::ValueEnum;
 use colored::{Color, Colorize};
 use jsonrpsee::core::Serialize;
 use serde::Deserialize;
+use spaces_protocol::{
+    bitcoin::{Amount, Network, OutPoint},
+    Covenant,
+};
+use spaces_wallet::{
+    address::SpaceAddress,
+    bdk_wallet::KeychainKind,
+    bitcoin::{Address, Txid},
+    tx_event::{
+        BidEventDetails, BidoutEventDetails, OpenEventDetails, SendEventDetails,
+        TransferEventDetails, TxEventKind,
+    },
+    Balance, DoubleUtxo, WalletInfo, WalletOutput,
+};
 use tabled::{Table, Tabled};
-use protocol::bitcoin::{Amount, Network, OutPoint};
-use protocol::{Covenant};
-use wallet::address::SpaceAddress;
-use wallet::{Balance, DoubleUtxo, WalletInfo, WalletOutput};
-use wallet::bdk_wallet::KeychainKind;
-use wallet::bitcoin::{Address, Txid};
-use wallet::tx_event::{BidEventDetails, BidoutEventDetails, OpenEventDetails, SendEventDetails, TransferEventDetails, TxEventKind};
-use crate::rpc::ServerInfo;
-use crate::wallets::{ListSpacesResponse, TxInfo, TxResponse, WalletResponse};
+
+use crate::{
+    rpc::ServerInfo,
+    wallets::{ListSpacesResponse, TxInfo, TxResponse, WalletResponse},
+};
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug, ValueEnum, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -56,7 +66,7 @@ struct RegisteredSpaces {
     #[tabled(rename = "DAYS LEFT")]
     days_left: String,
     #[tabled(rename = "UTXO")]
-    utxo: OutPoint
+    utxo: OutPoint,
 }
 
 #[derive(Tabled)]
@@ -91,17 +101,19 @@ fn format_days_left(current_block: u32, claim_height: Option<u32>) -> String {
 pub fn print_list_bidouts(bidouts: Vec<DoubleUtxo>, format: Format) {
     match format {
         Format::Text => {
-            let all : Vec<_> = bidouts.into_iter().map(|out| Bidout {
-                txid: out.spend.outpoint.txid,
-                vout_1: out.spend.outpoint.vout,
-                vout_2: out.auction.outpoint.vout,
-                confirmed: out.confirmed,
-            }).collect();
+            let all: Vec<_> = bidouts
+                .into_iter()
+                .map(|out| Bidout {
+                    txid: out.spend.outpoint.txid,
+                    vout_1: out.spend.outpoint.vout,
+                    vout_2: out.auction.outpoint.vout,
+                    confirmed: out.confirmed,
+                })
+                .collect();
             println!("{}", ascii_table(all));
         }
         Format::Json => {
             println!("{}", serde_json::to_string_pretty(&bidouts).unwrap());
-
         }
     }
 }
@@ -117,17 +129,18 @@ pub fn print_list_transactions(txs: Vec<TxInfo>, format: Format) {
     }
 }
 
-
-
 pub fn print_list_unspent(utxos: Vec<WalletOutput>, format: Format) {
     match format {
         Format::Text => {
-            let utxos : Vec<_> = utxos.iter().map(|utxo| UnspentOutput {
-                outpoint: utxo.output.outpoint,
-                confirmed: utxo.output.chain_position.is_confirmed(),
-                value: utxo.output.txout.value,
-                external: utxo.output.keychain == KeychainKind::External,
-            }).collect();
+            let utxos: Vec<_> = utxos
+                .iter()
+                .map(|utxo| UnspentOutput {
+                    outpoint: utxo.output.outpoint,
+                    confirmed: utxo.output.chain_position.is_confirmed(),
+                    value: utxo.output.txout.value,
+                    external: utxo.output.keychain == KeychainKind::External,
+                })
+                .collect();
             println!("{}", ascii_table(utxos))
         }
         Format::Json => {
@@ -153,10 +166,7 @@ pub fn print_wallet_info(info: WalletInfo, format: Format) {
     match format {
         Format::Text => {
             println!("WALLET: {}", info.label);
-            println!("  Tip {}\n  Birthday {}",
-                     info.tip,
-                     info.start_block
-            );
+            println!("  Tip {}\n  Birthday {}", info.tip, info.start_block);
 
             println!("  Public descriptors");
             for desc in info.descriptors {
@@ -184,9 +194,18 @@ pub fn print_wallet_balance_response(balance: Balance, format: Format) {
     match format {
         Format::Text => {
             println!("Balance: {}", balance.balance.to_sat());
-            println!("  Confirmed         {:>14}", balance.details.balance.confirmed.to_sat());
-            println!("  Trusted pending   {:>14}", balance.details.balance.trusted_pending.to_sat());
-            println!("  Untrusted pending {:>14}", balance.details.balance.untrusted_pending.to_sat());
+            println!(
+                "  Confirmed         {:>14}",
+                balance.details.balance.confirmed.to_sat()
+            );
+            println!(
+                "  Trusted pending   {:>14}",
+                balance.details.balance.trusted_pending.to_sat()
+            );
+            println!(
+                "  Untrusted pending {:>14}",
+                balance.details.balance.untrusted_pending.to_sat()
+            );
             println!("  Dust & in-auction {:>14}", balance.details.dust.to_sat());
         }
         Format::Json => {
@@ -195,7 +214,11 @@ pub fn print_wallet_balance_response(balance: Balance, format: Format) {
     }
 }
 
-pub fn print_list_spaces_response(current_block: u32, response: ListSpacesResponse, format: Format) {
+pub fn print_list_spaces_response(
+    current_block: u32,
+    response: ListSpacesResponse,
+    format: Format,
+) {
     match format {
         Format::Text => {
             let mut outbids = Vec::new();
@@ -209,7 +232,11 @@ pub fn print_list_spaces_response(current_block: u32, response: ListSpacesRespon
                     days_left: "".to_string(),
                 };
                 match space.covenant {
-                    Covenant::Bid { total_burned, claim_height, .. } => {
+                    Covenant::Bid {
+                        total_burned,
+                        claim_height,
+                        ..
+                    } => {
                         outbid.last_confirmed_bid = total_burned.to_sat();
                         outbid.days_left = format_days_left(current_block, claim_height);
                     }
@@ -227,9 +254,15 @@ pub fn print_list_spaces_response(current_block: u32, response: ListSpacesRespon
                     claim_at: "--".to_string(),
                 };
                 match space.covenant {
-                    Covenant::Bid { total_burned, claim_height, .. } => {
+                    Covenant::Bid {
+                        total_burned,
+                        claim_height,
+                        ..
+                    } => {
                         winning.bid = total_burned.to_sat();
-                        winning.claim_at = claim_height.map(|h| h.to_string()).unwrap_or("--".to_string());
+                        winning.claim_at = claim_height
+                            .map(|h| h.to_string())
+                            .unwrap_or("--".to_string());
                         winning.days_left = format_days_left(current_block, claim_height);
                         if winning.days_left == "0.00" {
                             winning.days_left = "Ready to claim".to_string();
@@ -250,13 +283,13 @@ pub fn print_list_spaces_response(current_block: u32, response: ListSpacesRespon
                 match &space.covenant {
                     Covenant::Transfer { expire_height, .. } => {
                         registered.expire_at = *expire_height as _;
-                        registered.days_left = format_days_left(current_block, Some(*expire_height));
+                        registered.days_left =
+                            format_days_left(current_block, Some(*expire_height));
                     }
                     _ => {}
                 }
                 owned.push(registered);
             }
-
 
             if !outbids.is_empty() {
                 println!("⚠️ OUTBID ({} spaces): ", outbids.len().to_string().bold());
@@ -265,13 +298,21 @@ pub fn print_list_spaces_response(current_block: u32, response: ListSpacesRespon
             }
 
             if !winnings.is_empty() {
-                println!("{} WINNING ({} spaces):","✓".color(Color::Green), winnings.len().to_string().bold());
+                println!(
+                    "{} WINNING ({} spaces):",
+                    "✓".color(Color::Green),
+                    winnings.len().to_string().bold()
+                );
                 let table = ascii_table(winnings);
                 println!("{}", table);
             }
 
             if !owned.is_empty() {
-                println!("{} ({} spaces): ", "🔑 OWNED", owned.len().to_string().bold());
+                println!(
+                    "{} ({} spaces): ",
+                    "🔑 OWNED",
+                    owned.len().to_string().bold()
+                );
                 let table = ascii_table(owned);
                 println!("{}", table);
             }
@@ -292,13 +333,19 @@ pub fn print_wallet_response_text(network: Network, response: WalletResponse) {
 
     for tx in response.result {
         if tx.events.iter().any(|event| match event.kind {
-            TxEventKind::Open | TxEventKind::Bid | TxEventKind::Register |
-            TxEventKind::Transfer | TxEventKind::Send | TxEventKind::Renew | TxEventKind::Buy
-            => true,
+            TxEventKind::Open
+            | TxEventKind::Bid
+            | TxEventKind::Register
+            | TxEventKind::Transfer
+            | TxEventKind::Send
+            | TxEventKind::Renew
+            | TxEventKind::Buy => true,
             _ => false,
         }) {
             main_txs.push(tx);
-        } else { secondary_txs.push(tx); }
+        } else {
+            secondary_txs.push(tx);
+        }
     }
 
     for tx in main_txs {
@@ -328,7 +375,7 @@ pub fn print_error_rpc_response(code: i32, message: String, format: Format) {
 fn print_tx_response(network: Network, response: TxResponse) {
     match response.error {
         None => {
-            println!("{} Transaction {}","✓".color(Color::Green), response.txid);
+            println!("{} Transaction {}", "✓".color(Color::Green), response.txid);
         }
         Some(errors) => {
             println!("⚠️ Transaction failed to broadcast");
@@ -341,51 +388,57 @@ fn print_tx_response(network: Network, response: TxResponse) {
     }
 
     for event in response.events {
-        println!(" - {} {}", capitalize(event.kind.to_string()), event.space.unwrap_or("".to_string()));
+        println!(
+            " - {} {}",
+            capitalize(event.kind.to_string()),
+            event.space.unwrap_or("".to_string())
+        );
 
         match event.kind {
             TxEventKind::Open => {
-                let open_details: OpenEventDetails = serde_json::from_value(
-                    event.details.expect("details"))
-                    .expect("deserialize open event");
+                let open_details: OpenEventDetails =
+                    serde_json::from_value(event.details.expect("details"))
+                        .expect("deserialize open event");
 
                 println!("   Initial bid: {}", open_details.initial_bid.to_sat());
             }
             TxEventKind::Bid => {
-                let bid_details: BidEventDetails = serde_json::from_value(
-                    event.details.expect("details"))
-                    .expect("deserialize bid event");
-                println!("   New bid: {} (previous {})",
-                         bid_details.current_bid.to_sat(),
-                         bid_details.previous_bid.to_sat()
+                let bid_details: BidEventDetails =
+                    serde_json::from_value(event.details.expect("details"))
+                        .expect("deserialize bid event");
+                println!(
+                    "   New bid: {} (previous {})",
+                    bid_details.current_bid.to_sat(),
+                    bid_details.previous_bid.to_sat()
                 );
             }
             TxEventKind::Send => {
-                let send_details: SendEventDetails = serde_json::from_value(
-                    event.details.expect("details"))
-                    .expect("deserialize send event");
+                let send_details: SendEventDetails =
+                    serde_json::from_value(event.details.expect("details"))
+                        .expect("deserialize send event");
 
-                let addr = Address::from_script(send_details.recipient_script_pubkey.as_script(), network)
-                    .expect("valid address");
+                let addr =
+                    Address::from_script(send_details.recipient_script_pubkey.as_script(), network)
+                        .expect("valid address");
 
                 println!("   Amount: {}", send_details.amount.to_sat());
                 println!("   Recipient: {}", addr);
             }
             TxEventKind::Transfer => {
-                let transfer_details: TransferEventDetails = serde_json::from_value(
-                    event.details.expect("details"))
-                    .expect("deserialize transfer event");
+                let transfer_details: TransferEventDetails =
+                    serde_json::from_value(event.details.expect("details"))
+                        .expect("deserialize transfer event");
 
                 let addr = SpaceAddress(
                     Address::from_script(transfer_details.script_pubkey.as_script(), network)
-                        .expect("valid address")
+                        .expect("valid address"),
                 );
                 println!("   Recipient: {}", addr);
             }
             TxEventKind::Bidout => {
-                let bidout: BidoutEventDetails = serde_json::from_value(
-                    event.details.expect("details"))
-                    .expect("deserialize bidout event");
+                let bidout: BidoutEventDetails =
+                    serde_json::from_value(event.details.expect("details"))
+                        .expect("deserialize bidout event");
                 println!("   Count: {}", bidout.count);
             }
             _ => {}

@@ -1,11 +1,12 @@
-pub extern crate protocol;
 pub extern crate spacedb;
+pub extern crate spaces_protocol;
 
 use std::{error::Error, fmt};
 
 use anyhow::{anyhow, Result};
 use bincode::{Decode, Encode};
-use protocol::{
+use serde::{Deserialize, Serialize};
+use spaces_protocol::{
     bitcoin::{Amount, Block, BlockHash, OutPoint, Txid},
     constants::{ChainAnchor, ROLLOUT_BATCH_SIZE, ROLLOUT_BLOCK_INTERVAL},
     hasher::{BidKey, KeyHasher, OutpointKey, SpaceKey},
@@ -13,8 +14,7 @@ use protocol::{
     validate::{TxChangeSet, UpdateKind, Validator},
     Bytes, Covenant, FullSpaceOut, RevokeReason, SpaceOut,
 };
-use serde::{Deserialize, Serialize};
-use wallet::bitcoin::Transaction;
+use spaces_wallet::bitcoin::Transaction;
 
 use crate::{
     source::BitcoinRpcError,
@@ -31,7 +31,7 @@ pub trait BlockSource {
 }
 
 #[derive(Debug, Clone)]
-pub struct Node {
+pub struct Client {
     validator: Validator,
     tx_data: bool,
 }
@@ -76,7 +76,7 @@ impl fmt::Display for SyncError {
 
 impl Error for SyncError {}
 
-impl Node {
+impl Client {
     pub fn new(tx_data: bool) -> Self {
         Self {
             validator: Validator::new(),
@@ -122,9 +122,9 @@ impl Node {
                     tx: if self.tx_data {
                         Some(TxData {
                             position: 0,
-                            raw: Bytes::new(protocol::bitcoin::consensus::encode::serialize(
-                                &coinbase,
-                            )),
+                            raw: Bytes::new(
+                                spaces_protocol::bitcoin::consensus::encode::serialize(&coinbase),
+                            ),
                         })
                     } else {
                         None
@@ -147,9 +147,9 @@ impl Node {
                         tx: if self.tx_data {
                             Some(TxData {
                                 position: position as u32,
-                                raw: Bytes::new(protocol::bitcoin::consensus::encode::serialize(
-                                    &tx,
-                                )),
+                                raw: Bytes::new(
+                                    spaces_protocol::bitcoin::consensus::encode::serialize(&tx),
+                                ),
                             })
                         } else {
                             None

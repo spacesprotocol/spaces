@@ -66,12 +66,12 @@ spaced --chain testnet4 --bitcoin-rpc-user testnet4 --bitcoin-rpc-password testn
 
 ## Project Structure
 
-| Package  | Requires std     | Description                                    |
-|----------|------------------|------------------------------------------------|
-| node     | Yes              | Daemon and wallet service                      |
-| wallet   | Yes (no-std WIP) | wallet library for building spaces transactions|
-| protocol | No               | Protocol consensus library                     |
-
+| Package  | Requires std    | Description                                                                                     |
+|----------|-----------------|-------------------------------------------------------------------------------------------------|
+| client   | Yes             | Bitcoin consensus client and wallet service                                                     |
+| wallet   | Yes (no-std WIP) | Wallet library for building spaces transactions                                                 |
+| protocol | No              | Protocol consensus library                                                                      |
+| veritas  | No              | Stateless verifier library for mobile and other resource constrained devices with wasm support. | 
 
 ## License
 

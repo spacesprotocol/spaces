@@ -1,5 +1,11 @@
 use std::{path::PathBuf, str::FromStr};
-use protocol::{bitcoin::{Amount, FeeRate}, constants::RENEWAL_INTERVAL, script::SpaceScript, Bytes, Covenant};
+
+use protocol::{
+    bitcoin::{Amount, FeeRate},
+    constants::RENEWAL_INTERVAL,
+    script::SpaceScript,
+    Bytes, Covenant,
+};
 use spaced::{
     rpc::{
         BidParams, ExecuteParams, OpenParams, RegisterParams, RpcClient, RpcWalletRequest,
@@ -8,8 +14,7 @@ use spaced::{
     wallets::{AddressKind, WalletResponse},
 };
 use testutil::TestRig;
-use wallet::export::WalletExport;
-use wallet::tx_event::TxEventKind;
+use wallet::{export::WalletExport, tx_event::TxEventKind};
 
 const ALICE: &str = "wallet_99";
 const BOB: &str = "wallet_98";
@@ -30,8 +35,8 @@ async fn it_should_open_a_space_for_auction(rig: &TestRig) -> anyhow::Result<()>
         })],
         false,
     )
-        .await
-        .expect("send request");
+    .await
+    .expect("send request");
 
     println!("{}", serde_json::to_string_pretty(&response).unwrap());
 
@@ -87,8 +92,8 @@ async fn it_should_allow_outbidding(rig: &TestRig) -> anyhow::Result<()> {
         })],
         false,
     )
-        .await
-        .expect("send request");
+    .await
+    .expect("send request");
 
     println!("{}", serde_json::to_string_pretty(&result).unwrap());
     rig.mine_blocks(1, None).await?;
@@ -150,16 +155,20 @@ async fn it_should_allow_outbidding(rig: &TestRig) -> anyhow::Result<()> {
     Ok(())
 }
 
-
 async fn it_should_insert_txout_for_bids(rig: &TestRig) -> anyhow::Result<()> {
     rig.wait_until_synced().await?;
     rig.wait_until_wallet_synced(BOB).await?;
 
-    let tx = rig.spaced.client
-        .wallet_list_transactions(BOB, 10, 0).await?.iter()
+    let tx = rig
+        .spaced
+        .client
+        .wallet_list_transactions(BOB, 10, 0)
+        .await?
+        .iter()
         .filter(|tx| tx.events.iter().any(|event| event.kind == TxEventKind::Bid))
         .next()
-        .expect("a bid").clone();
+        .expect("a bid")
+        .clone();
 
     assert!(tx.fee.is_some(), "must be able to calculate fees");
     Ok(())
@@ -195,11 +204,11 @@ async fn it_should_only_accept_forced_zero_value_bid_increments_and_revoke(
             vec![RpcWalletRequest::Bid(BidParams {
                 name: TEST_SPACE.to_string(),
                 amount: last_bid.to_sat(),
-            }), ],
+            }),],
             false
         )
-            .await
-            .is_err(),
+        .await
+        .is_err(),
         "shouldn't be able to bid with same value unless forced"
     );
 
@@ -214,7 +223,7 @@ async fn it_should_only_accept_forced_zero_value_bid_increments_and_revoke(
                     requests: vec![RpcWalletRequest::Bid(BidParams {
                         name: TEST_SPACE.to_string(),
                         amount: last_bid.to_sat(),
-                    }), ],
+                    }),],
                     fee_rate: Some(FeeRate::from_sat_per_vb(1).expect("fee")),
                     dust: None,
                     force: true,
@@ -314,8 +323,8 @@ async fn it_should_allow_claim_on_or_after_claim_height(rig: &TestRig) -> anyhow
         })],
         false,
     )
-        .await
-        .expect("send request");
+    .await
+    .expect("send request");
 
     println!("{}", serde_json::to_string_pretty(&result).unwrap());
     rig.mine_blocks(1, None).await?;
@@ -324,7 +333,11 @@ async fn it_should_allow_claim_on_or_after_claim_height(rig: &TestRig) -> anyhow
     rig.wait_until_wallet_synced(wallet).await?;
     let all_spaces_2 = rig.spaced.client.wallet_list_spaces(wallet).await?;
 
-    assert_eq!(all_spaces.owned.len() + 1, all_spaces_2.owned.len(), "must be equal");
+    assert_eq!(
+        all_spaces.owned.len() + 1,
+        all_spaces_2.owned.len(),
+        "must be equal"
+    );
 
     let space = rig
         .spaced
@@ -368,8 +381,8 @@ async fn it_should_allow_batch_transfers_refreshing_expire_height(
         })],
         false,
     )
-        .await
-        .expect("send request");
+    .await
+    .expect("send request");
 
     println!("{}", serde_json::to_string_pretty(&result).unwrap());
 
@@ -380,7 +393,11 @@ async fn it_should_allow_batch_transfers_refreshing_expire_height(
     rig.wait_until_wallet_synced(ALICE).await?;
     let all_spaces_2 = rig.spaced.client.wallet_list_spaces(ALICE).await?;
 
-    assert_eq!(all_spaces.owned.len(), all_spaces_2.owned.len(), "must be equal");
+    assert_eq!(
+        all_spaces.owned.len(),
+        all_spaces_2.owned.len(),
+        "must be equal"
+    );
 
     let _ = all_spaces_2.owned.iter().for_each(|s| {
         let space = s.spaceout.space.as_ref().expect("space");
@@ -408,8 +425,11 @@ async fn it_should_allow_applying_script_in_batch(rig: &TestRig) -> anyhow::Resu
     rig.wait_until_wallet_synced(ALICE).await?;
     rig.wait_until_synced().await?;
     let all_spaces = rig.spaced.client.wallet_list_spaces(ALICE).await?;
-    let registered_spaces: Vec<_> = all_spaces.owned.iter().map(|out|
-        out.spaceout.space.as_ref().expect("space").name.to_string()).collect();
+    let registered_spaces: Vec<_> = all_spaces
+        .owned
+        .iter()
+        .map(|out| out.spaceout.space.as_ref().expect("space").name.to_string())
+        .collect();
 
     let result = wallet_do(
         rig,
@@ -423,11 +443,12 @@ async fn it_should_allow_applying_script_in_batch(rig: &TestRig) -> anyhow::Resu
             RpcWalletRequest::Execute(ExecuteParams {
                 context: registered_spaces.clone(),
                 space_script: SpaceScript::create_set_fallback(&[0xDE, 0xAD, 0xBE, 0xEF]),
-            })],
+            }),
+        ],
         false,
     )
-        .await
-        .expect("send request");
+    .await
+    .expect("send request");
 
     println!("{}", serde_json::to_string_pretty(&result).unwrap());
 
@@ -438,8 +459,16 @@ async fn it_should_allow_applying_script_in_batch(rig: &TestRig) -> anyhow::Resu
     rig.wait_until_wallet_synced(ALICE).await?;
     let all_spaces_2 = rig.spaced.client.wallet_list_spaces(ALICE).await?;
 
-    assert_eq!(all_spaces.owned.len(), all_spaces_2.owned.len(), "must be equal");
-    assert_eq!(all_spaces.winning.len(), all_spaces_2.winning.len(), "must be equal");
+    assert_eq!(
+        all_spaces.owned.len(),
+        all_spaces_2.owned.len(),
+        "must be equal"
+    );
+    assert_eq!(
+        all_spaces.winning.len(),
+        all_spaces_2.winning.len(),
+        "must be equal"
+    );
 
     all_spaces_2.owned.iter().for_each(|s| {
         let space = s.spaceout.space.as_ref().expect("space");
@@ -474,8 +503,13 @@ async fn it_should_replace_mempool_bids(rig: &TestRig) -> anyhow::Result<()> {
     rig.wait_until_wallet_synced(EVE).await?;
 
     // make sure Bob runs out of confirmed bidouts
-    let bob_bidout_count = rig.spaced.client.wallet_list_bidouts(BOB)
-        .await.expect("get bidouts").len();
+    let bob_bidout_count = rig
+        .spaced
+        .client
+        .wallet_list_bidouts(BOB)
+        .await
+        .expect("get bidouts")
+        .len();
     for i in 0..bob_bidout_count {
         wallet_do(
             rig,
@@ -486,7 +520,8 @@ async fn it_should_replace_mempool_bids(rig: &TestRig) -> anyhow::Result<()> {
             })],
             false,
         )
-            .await.expect("bob makes a bid");
+        .await
+        .expect("bob makes a bid");
     }
 
     // create some confirmed bid outs for Alice and Eve
@@ -504,7 +539,8 @@ async fn it_should_replace_mempool_bids(rig: &TestRig) -> anyhow::Result<()> {
                 skip_tx_check: false,
             },
         )
-        .await.expect("send request");
+        .await
+        .expect("send request");
     rig.spaced
         .client
         .wallet_send_request(
@@ -519,7 +555,8 @@ async fn it_should_replace_mempool_bids(rig: &TestRig) -> anyhow::Result<()> {
                 skip_tx_check: false,
             },
         )
-        .await.expect("send request");
+        .await
+        .expect("send request");
     rig.mine_blocks(1, None).await?;
 
     rig.wait_until_synced().await?;
@@ -536,7 +573,8 @@ async fn it_should_replace_mempool_bids(rig: &TestRig) -> anyhow::Result<()> {
         })],
         false,
     )
-        .await.expect("send request");
+    .await
+    .expect("send request");
 
     let response = serde_json::to_string_pretty(&response).unwrap();
     println!("Alice bid on @test2 (unconf): {}", response);
@@ -551,7 +589,8 @@ async fn it_should_replace_mempool_bids(rig: &TestRig) -> anyhow::Result<()> {
         })],
         false,
     )
-        .await.expect("send request");
+    .await
+    .expect("send request");
 
     let response = serde_json::to_string_pretty(&response).unwrap();
 
@@ -580,8 +619,8 @@ async fn it_should_replace_mempool_bids(rig: &TestRig) -> anyhow::Result<()> {
                 skip_tx_check: false,
             },
         )
-        .await.expect("send request");
-
+        .await
+        .expect("send request");
 
     let response = serde_json::to_string_pretty(&replacement).unwrap();
     println!("{}", response);
@@ -614,15 +653,21 @@ async fn it_should_replace_mempool_bids(rig: &TestRig) -> anyhow::Result<()> {
                 skip_tx_check: false,
             },
         )
-        .await.expect("send request");
+        .await
+        .expect("send request");
 
-    let eve_replacement_txid = replacement.result.iter().filter_map(|tx| {
-        if tx.events.iter().any(|event| event.kind == TxEventKind::Bid) {
-            Some(tx.txid)
-        } else {
-            None
-        }
-    }).next().expect("should have eve replacement txid");
+    let eve_replacement_txid = replacement
+        .result
+        .iter()
+        .filter_map(|tx| {
+            if tx.events.iter().any(|event| event.kind == TxEventKind::Bid) {
+                Some(tx.txid)
+            } else {
+                None
+            }
+        })
+        .next()
+        .expect("should have eve replacement txid");
 
     let response = serde_json::to_string_pretty(&replacement).unwrap();
     println!("Eve's replacement: {}", response);
@@ -642,7 +687,8 @@ async fn it_should_replace_mempool_bids(rig: &TestRig) -> anyhow::Result<()> {
         .spaced
         .client
         .wallet_list_transactions(ALICE, 1000, 0)
-        .await.expect("list transactions");
+        .await
+        .expect("list transactions");
     let unconfirmed: Vec<_> = txs.iter().filter(|tx| !tx.confirmed).collect();
     for tx in &unconfirmed {
         println!("Alice's unconfiremd: {}", tx.txid);
@@ -661,7 +707,8 @@ async fn it_should_replace_mempool_bids(rig: &TestRig) -> anyhow::Result<()> {
         .spaced
         .client
         .wallet_list_transactions(ALICE, 1000, 0)
-        .await.expect("list transactions");
+        .await
+        .expect("list transactions");
 
     assert!(
         txs.iter().all(|tx| tx.txid != eve_replacement_txid),
@@ -673,14 +720,22 @@ async fn it_should_replace_mempool_bids(rig: &TestRig) -> anyhow::Result<()> {
         .spaced
         .client
         .wallet_list_transactions(EVE, 1000, 0)
-        .await.expect("list transactions");
+        .await
+        .expect("list transactions");
 
     assert!(
-        eve_txs.iter().any(|tx| tx.txid == eve_replacement_txid && tx.confirmed),
+        eve_txs
+            .iter()
+            .any(|tx| tx.txid == eve_replacement_txid && tx.confirmed),
         "Eve's tx should be confirmed"
     );
 
-    let space = rig.spaced.client.get_space("@test2").await.expect("space")
+    let space = rig
+        .spaced
+        .client
+        .get_space("@test2")
+        .await
+        .expect("space")
         .expect("space exists");
 
     println!("Space: {}", serde_json::to_string_pretty(&space).unwrap());
@@ -707,7 +762,10 @@ async fn it_should_maintain_locktime_when_fee_bumping(rig: &TestRig) -> anyhow::
         )
         .await?;
 
-    println!("bumping fee: {}", serde_json::to_string_pretty(&response).unwrap());
+    println!(
+        "bumping fee: {}",
+        serde_json::to_string_pretty(&response).unwrap()
+    );
 
     let txid = response.result[0].txid;
     for tx_res in response.result {
@@ -727,7 +785,10 @@ async fn it_should_maintain_locktime_when_fee_bumping(rig: &TestRig) -> anyhow::
         )
         .await?;
 
-    println!("after fee bump: {}", serde_json::to_string_pretty(&bump).unwrap());
+    println!(
+        "after fee bump: {}",
+        serde_json::to_string_pretty(&bump).unwrap()
+    );
     assert_eq!(bump.len(), 1, "should only be 1 tx");
     assert!(bump[0].error.is_none(), "should be no errors");
 
@@ -740,7 +801,9 @@ async fn it_should_maintain_locktime_when_fee_bumping(rig: &TestRig) -> anyhow::
     Ok(())
 }
 
-async fn it_should_not_allow_register_or_transfer_to_same_space_multiple_times(rig: &TestRig) -> anyhow::Result<()> {
+async fn it_should_not_allow_register_or_transfer_to_same_space_multiple_times(
+    rig: &TestRig,
+) -> anyhow::Result<()> {
     rig.wait_until_wallet_synced(BOB).await.expect("synced");
     rig.wait_until_wallet_synced(ALICE).await.expect("synced");
 
@@ -754,19 +817,25 @@ async fn it_should_not_allow_register_or_transfer_to_same_space_multiple_times(r
             to: None,
         })],
         false,
-    ).await.expect("send request");
+    )
+    .await
+    .expect("send request");
 
     println!("{}", serde_json::to_string_pretty(&response).unwrap());
-    assert!(wallet_do(
-        rig,
-        BOB,
-        vec![RpcWalletRequest::Register(RegisterParams {
-            name: awaiting_claim.clone(),
-            to: None,
-        })],
-        false,
-    ).await.is_err(), "should not allow register to same space multiple times");
-
+    assert!(
+        wallet_do(
+            rig,
+            BOB,
+            vec![RpcWalletRequest::Register(RegisterParams {
+                name: awaiting_claim.clone(),
+                to: None,
+            })],
+            false,
+        )
+        .await
+        .is_err(),
+        "should not allow register to same space multiple times"
+    );
 
     // Try transfer multiple times
     let bob_address = rig
@@ -784,9 +853,15 @@ async fn it_should_not_allow_register_or_transfer_to_same_space_multiple_times(r
             to: Some(bob_address.clone()),
         })],
         false,
-    ).await.expect("send request");
+    )
+    .await
+    .expect("send request");
 
-    println!("Transfer {}: {}", transfer, serde_json::to_string_pretty(&response).unwrap());
+    println!(
+        "Transfer {}: {}",
+        transfer,
+        serde_json::to_string_pretty(&response).unwrap()
+    );
     wallet_do(
         rig,
         ALICE,
@@ -795,7 +870,9 @@ async fn it_should_not_allow_register_or_transfer_to_same_space_multiple_times(r
             to: Some(bob_address),
         })],
         false,
-    ).await.expect_err("there's already a transfer submitted");
+    )
+    .await
+    .expect_err("there's already a transfer submitted");
 
     let setdata = "@test9996".to_string();
     let response = wallet_do(
@@ -806,9 +883,14 @@ async fn it_should_not_allow_register_or_transfer_to_same_space_multiple_times(r
             space_script: SpaceScript::create_set_fallback(&[0xAA, 0xAA]),
         })],
         false,
-    ).await.expect("send request");
+    )
+    .await
+    .expect("send request");
 
-    println!("Update sent {}", serde_json::to_string_pretty(&response).unwrap());
+    println!(
+        "Update sent {}",
+        serde_json::to_string_pretty(&response).unwrap()
+    );
     wallet_do(
         rig,
         ALICE,
@@ -817,19 +899,32 @@ async fn it_should_not_allow_register_or_transfer_to_same_space_multiple_times(r
             space_script: SpaceScript::create_set_fallback(&[0xDE, 0xAD]),
         })],
         false,
-    ).await.expect_err("there's already an update submitted");
+    )
+    .await
+    .expect_err("there's already an update submitted");
 
     rig.mine_blocks(1, None).await.expect("mine");
     rig.wait_until_synced().await.expect("synced");
 
-    let space = rig.spaced.client.get_space("@test9996")
-        .await.expect("space").expect("spaceout exists")
-        .spaceout.space.expect("space exists");
+    let space = rig
+        .spaced
+        .client
+        .get_space("@test9996")
+        .await
+        .expect("space")
+        .expect("spaceout exists")
+        .spaceout
+        .space
+        .expect("space exists");
 
     match space.covenant {
         Covenant::Transfer { data, .. } => {
             assert!(data.is_some(), "data must be set");
-            assert_eq!(data.unwrap().as_slice(), [0xAAu8, 0xAA].as_slice(), "data not correct");
+            assert_eq!(
+                data.unwrap().as_slice(),
+                [0xAAu8, 0xAA].as_slice(),
+                "data not correct"
+            );
         }
         _ => panic!("expected transfer covenant"),
     }
@@ -867,58 +962,120 @@ async fn it_can_batch_txs(rig: &TestRig) -> anyhow::Result<()> {
                 context: vec![
                     "@test10000".to_string(),
                     "@test9999".to_string(),
-                    "@test9998".to_string()
+                    "@test9998".to_string(),
                 ],
                 // space_script: SpaceScript::create_set_fallback(&[0xEE, 0xEE, 0x22, 0x22]),
                 space_script: SpaceScript::create_set_fallback(&[0xEE, 0xEE, 0x22, 0x22]),
             }),
         ],
         false,
-    ).await.expect("send request");
+    )
+    .await
+    .expect("send request");
 
-    println!("batch request: {}", serde_json::to_string_pretty(&res).unwrap());
-    assert!(res.result.iter().all(|tx| tx.error.is_none()), "batching should work");
+    println!(
+        "batch request: {}",
+        serde_json::to_string_pretty(&res).unwrap()
+    );
+    assert!(
+        res.result.iter().all(|tx| tx.error.is_none()),
+        "batching should work"
+    );
     assert_eq!(res.result.len(), 5, "expected 4 transactions");
 
     rig.mine_blocks(1, None).await.expect("mine");
     rig.wait_until_wallet_synced(ALICE).await.expect("synced");
     rig.wait_until_wallet_synced(BOB).await.expect("synced");
 
-    let bob_spaces = rig.spaced.client.wallet_list_spaces(BOB).await.expect("bob spaces");
-    assert!(bob_spaces.owned.iter().find(|output|
-        output.spaceout.space.as_ref().is_some_and(|s| s.name.to_string() == "@test9996")).is_some(),
-            "expected bob to own the space name"
+    let bob_spaces = rig
+        .spaced
+        .client
+        .wallet_list_spaces(BOB)
+        .await
+        .expect("bob spaces");
+    assert!(
+        bob_spaces
+            .owned
+            .iter()
+            .find(|output| output
+                .spaceout
+                .space
+                .as_ref()
+                .is_some_and(|s| s.name.to_string() == "@test9996"))
+            .is_some(),
+        "expected bob to own the space name"
     );
 
-    let alice_spaces = rig.spaced.client.wallet_list_spaces(ALICE).await.expect("alice spaces");
-    let batch1 = alice_spaces.winning.iter().find(|output|
-        output.spaceout.space.as_ref().is_some_and(|s| s.name.to_string() == "@batch1"))
-        .expect("exists").spaceout.space.clone().expect("space exists");
+    let alice_spaces = rig
+        .spaced
+        .client
+        .wallet_list_spaces(ALICE)
+        .await
+        .expect("alice spaces");
+    let batch1 = alice_spaces
+        .winning
+        .iter()
+        .find(|output| {
+            output
+                .spaceout
+                .space
+                .as_ref()
+                .is_some_and(|s| s.name.to_string() == "@batch1")
+        })
+        .expect("exists")
+        .spaceout
+        .space
+        .clone()
+        .expect("space exists");
 
     match batch1.covenant {
         Covenant::Bid { total_burned, .. } => {
             assert_eq!(total_burned.to_sat(), 1000, "incorrect burn value")
         }
-        _ => panic!("must be a bid")
+        _ => panic!("must be a bid"),
     }
-    let batch2 = alice_spaces.winning.iter().find(|output|
-        output.spaceout.space.as_ref().is_some_and(|s| s.name.to_string() == "@batch2"))
-        .expect("exists").spaceout.space.clone().expect("space exists");
+    let batch2 = alice_spaces
+        .winning
+        .iter()
+        .find(|output| {
+            output
+                .spaceout
+                .space
+                .as_ref()
+                .is_some_and(|s| s.name.to_string() == "@batch2")
+        })
+        .expect("exists")
+        .spaceout
+        .space
+        .clone()
+        .expect("space exists");
     match batch2.covenant {
         Covenant::Bid { total_burned, .. } => {
             assert_eq!(total_burned.to_sat(), 1000, "incorrect burn value")
         }
-        _ => panic!("must be a bid")
+        _ => panic!("must be a bid"),
     }
 
     for space in vec![
         "@test10000".to_string(),
         "@test9999".to_string(),
-        "@test9998".to_string()
+        "@test9998".to_string(),
     ] {
-        let space = alice_spaces.owned.iter().find(|output|
-            output.spaceout.space.as_ref().is_some_and(|s| s.name.to_string() == space))
-            .expect("exists").spaceout.space.clone().expect("space exists");
+        let space = alice_spaces
+            .owned
+            .iter()
+            .find(|output| {
+                output
+                    .spaceout
+                    .space
+                    .as_ref()
+                    .is_some_and(|s| s.name.to_string() == space)
+            })
+            .expect("exists")
+            .spaceout
+            .space
+            .clone()
+            .expect("space exists");
 
         match space.covenant {
             Covenant::Transfer { data, .. } => {
@@ -928,20 +1085,19 @@ async fn it_can_batch_txs(rig: &TestRig) -> anyhow::Result<()> {
                     "must set correct data"
                 );
             }
-            _ => panic!("must be a transfer")
+            _ => panic!("must be a transfer"),
         }
     }
 
     Ok(())
 }
 
-
 async fn it_can_use_reserved_op_codes(rig: &TestRig) -> anyhow::Result<()> {
     rig.wait_until_wallet_synced(ALICE).await.expect("synced");
     let alice_spaces = vec![
         "@test10000".to_string(),
         "@test9999".to_string(),
-        "@test9998".to_string()
+        "@test9998".to_string(),
     ];
 
     let res = rig
@@ -951,12 +1107,10 @@ async fn it_can_use_reserved_op_codes(rig: &TestRig) -> anyhow::Result<()> {
             ALICE,
             RpcWalletTxBuilder {
                 bidouts: None,
-                requests: vec![
-                    RpcWalletRequest::Execute(ExecuteParams {
-                        context: alice_spaces.clone(),
-                        space_script: SpaceScript::create_reserve()
-                    }),
-                ],
+                requests: vec![RpcWalletRequest::Execute(ExecuteParams {
+                    context: alice_spaces.clone(),
+                    space_script: SpaceScript::create_reserve(),
+                })],
                 fee_rate: Some(FeeRate::from_sat_per_vb(1).expect("fee")),
                 dust: None,
                 force: true,
@@ -964,20 +1118,34 @@ async fn it_can_use_reserved_op_codes(rig: &TestRig) -> anyhow::Result<()> {
                 skip_tx_check: true,
             },
         )
-        .await.expect("response");
+        .await
+        .expect("response");
 
-    assert!(res.result.iter().all(|tx| tx.error.is_none()), "reserve should work");
+    assert!(
+        res.result.iter().all(|tx| tx.error.is_none()),
+        "reserve should work"
+    );
     assert_eq!(res.result.len(), 2, "expected 2 transactions");
 
     rig.mine_blocks(1, None).await.expect("mine");
     rig.wait_until_wallet_synced(ALICE).await.expect("synced");
 
     for space in alice_spaces {
-        let space = rig.spaced.client.get_space(&space)
-            .await.expect("space").expect("space exists")
-            .spaceout.space.expect("space exists");
+        let space = rig
+            .spaced
+            .client
+            .get_space(&space)
+            .await
+            .expect("space")
+            .expect("space exists")
+            .spaceout
+            .space
+            .expect("space exists");
 
-        assert!(matches!(space.covenant, Covenant::Reserved), "expected a reserved space");
+        assert!(
+            matches!(space.covenant, Covenant::Reserved),
+            "expected a reserved space"
+        );
     }
 
     Ok(())
@@ -987,23 +1155,53 @@ async fn it_should_allow_buy_sell(rig: &TestRig) -> anyhow::Result<()> {
     rig.wait_until_wallet_synced(ALICE).await.expect("synced");
     rig.wait_until_wallet_synced(BOB).await.expect("synced");
 
-    let alice_spaces = rig.spaced.client.wallet_list_spaces(ALICE).await.expect("alice spaces");
-    let space = alice_spaces.owned.first().expect("alice should have at least 1 space");
+    let alice_spaces = rig
+        .spaced
+        .client
+        .wallet_list_spaces(ALICE)
+        .await
+        .expect("alice spaces");
+    let space = alice_spaces
+        .owned
+        .first()
+        .expect("alice should have at least 1 space");
 
     let space_name = space.spaceout.space.as_ref().unwrap().name.to_string();
-    let listing = rig.spaced.client.wallet_sell(ALICE, space_name.clone(), 5000).await.expect("sell");
+    let listing = rig
+        .spaced
+        .client
+        .wallet_sell(ALICE, space_name.clone(), 5000)
+        .await
+        .expect("sell");
 
-    println!("listing\n{}", serde_json::to_string_pretty(&listing).unwrap());
-
-    rig.spaced.client.verify_listing(listing.clone()).await.expect("verify");
-
-    let alice_balance = rig.spaced.client.wallet_get_balance(ALICE).await.expect("balance");
-    let buy = rig.spaced.client.wallet_buy(
-        BOB,
-        listing.clone(),
-        Some(FeeRate::from_sat_per_vb(1).expect("rate")),
-        false).await.expect("buy"
+    println!(
+        "listing\n{}",
+        serde_json::to_string_pretty(&listing).unwrap()
     );
+
+    rig.spaced
+        .client
+        .verify_listing(listing.clone())
+        .await
+        .expect("verify");
+
+    let alice_balance = rig
+        .spaced
+        .client
+        .wallet_get_balance(ALICE)
+        .await
+        .expect("balance");
+    let buy = rig
+        .spaced
+        .client
+        .wallet_buy(
+            BOB,
+            listing.clone(),
+            Some(FeeRate::from_sat_per_vb(1).expect("rate")),
+            false,
+        )
+        .await
+        .expect("buy");
 
     println!("{}", serde_json::to_string_pretty(&buy).unwrap());
 
@@ -1012,15 +1210,38 @@ async fn it_should_allow_buy_sell(rig: &TestRig) -> anyhow::Result<()> {
     rig.wait_until_wallet_synced(BOB).await.expect("synced");
     rig.wait_until_wallet_synced(ALICE).await.expect("synced");
 
-    rig.spaced.client.verify_listing(listing)
-        .await.expect_err("should no longer be valid");
+    rig.spaced
+        .client
+        .verify_listing(listing)
+        .await
+        .expect_err("should no longer be valid");
 
-    let bob_spaces = rig.spaced.client.wallet_list_spaces(BOB).await.expect("bob spaces");
+    let bob_spaces = rig
+        .spaced
+        .client
+        .wallet_list_spaces(BOB)
+        .await
+        .expect("bob spaces");
 
-    assert!(bob_spaces.owned.iter().find(|s| s.spaceout.space.as_ref().unwrap().name.to_string() == space_name).is_some(), "bob should own it now");
+    assert!(
+        bob_spaces
+            .owned
+            .iter()
+            .find(|s| s.spaceout.space.as_ref().unwrap().name.to_string() == space_name)
+            .is_some(),
+        "bob should own it now"
+    );
 
-    let alice_balance_after = rig.spaced.client.wallet_get_balance(ALICE).await.expect("balance");
-    assert_eq!(alice_balance.balance + Amount::from_sat(5666), alice_balance_after.balance);
+    let alice_balance_after = rig
+        .spaced
+        .client
+        .wallet_get_balance(ALICE)
+        .await
+        .expect("balance");
+    assert_eq!(
+        alice_balance.balance + Amount::from_sat(5666),
+        alice_balance_after.balance
+    );
 
     Ok(())
 }
@@ -1028,27 +1249,56 @@ async fn it_should_allow_buy_sell(rig: &TestRig) -> anyhow::Result<()> {
 async fn it_should_allow_sign_verify_messages(rig: &TestRig) -> anyhow::Result<()> {
     rig.wait_until_wallet_synced(BOB).await.expect("synced");
 
-    let alice_spaces = rig.spaced.client.wallet_list_spaces(BOB).await.expect("bob spaces");
-    let space = alice_spaces.owned.first().expect("bob should have at least 1 space");
+    let alice_spaces = rig
+        .spaced
+        .client
+        .wallet_list_spaces(BOB)
+        .await
+        .expect("bob spaces");
+    let space = alice_spaces
+        .owned
+        .first()
+        .expect("bob should have at least 1 space");
 
     let space_name = space.spaceout.space.as_ref().unwrap().name.to_string();
 
     let msg = Bytes::new(b"hello world".to_vec());
-    let signed = rig.spaced.client.wallet_sign_message(BOB, &space_name, msg.clone()).await.expect("sign");
+    let signed = rig
+        .spaced
+        .client
+        .wallet_sign_message(BOB, &space_name, msg.clone())
+        .await
+        .expect("sign");
 
     println!("signed\n{}", serde_json::to_string_pretty(&signed).unwrap());
     assert_eq!(signed.space, space_name, "bad signer");
-    assert_eq!(signed.message.as_slice(), msg.as_slice(), "msg content must match");
+    assert_eq!(
+        signed.message.as_slice(),
+        msg.as_slice(),
+        "msg content must match"
+    );
 
-    rig.spaced.client.verify_message(signed.clone()).await.expect("verify");
+    rig.spaced
+        .client
+        .verify_message(signed.clone())
+        .await
+        .expect("verify");
 
     let mut bad_signer = signed.clone();
     bad_signer.space = "@nothanks".to_string();
-    rig.spaced.client.verify_message(bad_signer).await.expect_err("bad signer");
+    rig.spaced
+        .client
+        .verify_message(bad_signer)
+        .await
+        .expect_err("bad signer");
 
     let mut bad_msg = signed.clone();
     bad_msg.message = Bytes::new(b"hello world 2".to_vec());
-    rig.spaced.client.verify_message(bad_msg).await.expect_err("bad msg");
+    rig.spaced
+        .client
+        .verify_message(bad_msg)
+        .await
+        .expect_err("bad msg");
 
     Ok(())
 }
@@ -1081,24 +1331,51 @@ async fn run_auction_tests() -> anyhow::Result<()> {
     load_wallet(&rig, wallets_path.clone(), BOB).await?;
     load_wallet(&rig, wallets_path, EVE).await?;
 
-    it_should_open_a_space_for_auction(&rig).await.expect("should open auction");
-    it_should_allow_outbidding(&rig).await.expect("should allow outbidding");
-    it_should_insert_txout_for_bids(&rig).await.expect("should insert txout");
-    it_should_only_accept_forced_zero_value_bid_increments_and_revoke(&rig).await.expect("should only revoke a bid");
-    it_should_allow_claim_on_or_after_claim_height(&rig).await.expect("should allow claim on or above height");
-    it_should_allow_batch_transfers_refreshing_expire_height(&rig).await.expect("should allow batch transfers refresh expire height");
-    it_should_allow_applying_script_in_batch(&rig).await.expect("should allow batch applying script");
-    it_should_replace_mempool_bids(&rig).await.expect("should replace mempool bids");
-    it_should_maintain_locktime_when_fee_bumping(&rig).await.expect("should maintain locktime");
-    it_should_not_allow_register_or_transfer_to_same_space_multiple_times(&rig).await
+    it_should_open_a_space_for_auction(&rig)
+        .await
+        .expect("should open auction");
+    it_should_allow_outbidding(&rig)
+        .await
+        .expect("should allow outbidding");
+    it_should_insert_txout_for_bids(&rig)
+        .await
+        .expect("should insert txout");
+    it_should_only_accept_forced_zero_value_bid_increments_and_revoke(&rig)
+        .await
+        .expect("should only revoke a bid");
+    it_should_allow_claim_on_or_after_claim_height(&rig)
+        .await
+        .expect("should allow claim on or above height");
+    it_should_allow_batch_transfers_refreshing_expire_height(&rig)
+        .await
+        .expect("should allow batch transfers refresh expire height");
+    it_should_allow_applying_script_in_batch(&rig)
+        .await
+        .expect("should allow batch applying script");
+    it_should_replace_mempool_bids(&rig)
+        .await
+        .expect("should replace mempool bids");
+    it_should_maintain_locktime_when_fee_bumping(&rig)
+        .await
+        .expect("should maintain locktime");
+    it_should_not_allow_register_or_transfer_to_same_space_multiple_times(&rig)
+        .await
         .expect("should not allow register/transfer multiple times");
     it_can_batch_txs(&rig).await.expect("bump fee");
-    it_can_use_reserved_op_codes(&rig).await.expect("should use reserved opcodes");
-    it_should_allow_buy_sell(&rig).await.expect("should allow buy sell");
-    it_should_allow_sign_verify_messages(&rig).await.expect("should sign verify");
+    it_can_use_reserved_op_codes(&rig)
+        .await
+        .expect("should use reserved opcodes");
+    it_should_allow_buy_sell(&rig)
+        .await
+        .expect("should allow buy sell");
+    it_should_allow_sign_verify_messages(&rig)
+        .await
+        .expect("should sign verify");
 
     // keep reorgs last as it can drop some txs from mempool and mess up wallet state
-    it_should_handle_reorgs(&rig).await.expect("should handle reorgs wallet");
+    it_should_handle_reorgs(&rig)
+        .await
+        .expect("should handle reorgs wallet");
     Ok(())
 }
 
