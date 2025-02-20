@@ -180,7 +180,7 @@ impl Args {
         };
 
         let build_anchors = match args.build_anchors {
-            true => Some(data_dir.join("trust_anchors.json")),
+            true => Some(data_dir.join("root_anchors.json")),
             false => None,
         };
         let block_index_enabled = args.block_index || args.block_index_full;

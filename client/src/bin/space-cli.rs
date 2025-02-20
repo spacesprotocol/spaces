@@ -1,33 +1,35 @@
 extern crate core;
 
-use std::{fs, path::PathBuf, str::FromStr};
-
+use std::{fs, path::PathBuf};
+use std::fs::File;
+use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
+use anyhow::anyhow;
 use clap::{Parser, Subcommand};
 use colored::{Color, Colorize};
+use domain::base::{MessageBuilder, Name, ParsedName, Record, Serial, ToName, TreeCompressor};
+use domain::base::iana::Opcode;
+use domain::dep::octseq::OctetsBuilder;
+use domain::rdata::{Soa, ZoneRecordData};
+use domain::zonefile::inplace::{Entry, ScannedRecordData, Zonefile};
 use jsonrpsee::{
     core::{client::Error, ClientError},
     http_client::{HttpClient, HttpClientBuilder},
 };
-use spaces_client::{
-    config::{default_spaces_rpc_port, ExtendedNetwork},
-    format::{
-        print_error_rpc_response, print_list_bidouts, print_list_spaces_response,
-        print_list_transactions, print_list_unspent, print_server_info,
-        print_wallet_balance_response, print_wallet_info, print_wallet_response, Format,
-    },
-    rpc::{
-        BidParams, ExecuteParams, OpenParams, RegisterParams, RpcClient, RpcWalletRequest,
-        RpcWalletTxBuilder, SendCoinsParams, SignedMessage, TransferSpacesParams,
-    },
-    store::Sha256,
-    wallets::{AddressKind, WalletResponse},
-};
-use spaces_protocol::{
-    bitcoin::{Amount, FeeRate, OutPoint, Txid},
-    hasher::KeyHasher,
-    slabel::SLabel,
-};
+use serde::{Deserialize, Serialize};
+use spaces_client::{config::{default_spaces_rpc_port, ExtendedNetwork}, serialize_base64, deserialize_base64, format::{
+    print_error_rpc_response, print_list_bidouts, print_list_spaces_response,
+    print_list_transactions, print_list_unspent, print_server_info,
+    print_wallet_balance_response, print_wallet_info, print_wallet_response, Format,
+}, rpc::{
+    BidParams, ExecuteParams, OpenParams, RegisterParams, RpcClient, RpcWalletRequest,
+    RpcWalletTxBuilder, SendCoinsParams, SignedMessage, TransferSpacesParams,
+}, wallets::{AddressKind, WalletResponse}};
+use spaces_protocol::{bitcoin::{Amount, FeeRate, OutPoint, Txid}};
+use spaces_protocol::bitcoin::consensus::Encodable;
+use spaces_protocol::bitcoin::VarInt;
 use spaces_wallet::{bitcoin::secp256k1::schnorr::Signature, export::WalletExport, Listing};
+
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -237,7 +239,6 @@ enum Commands {
         #[arg(long)]
         signature: String,
     },
-
     /// Verify a listing
     #[command(name = "verifylisting")]
     VerifyListing {
@@ -252,7 +253,27 @@ enum Commands {
         #[arg(long)]
         seller: String,
     },
-
+    /// Sign a zone file turning it into a signed DNS UPDATE packet
+    #[command(name = "signzone")]
+    SignZone {
+        /// The DNS zone file path
+        zone: PathBuf,
+        /// When set, preserves the zone serial (default is false, meaning the serial is updated automatically)
+        #[arg(long)]
+        preserve_serial: bool,
+        /// Skip including bundled Merkle proof information in the packet.
+        #[arg(long)]
+        skip_proof: bool,
+    },
+    // Verifies the DNS packet and updates authentication data
+    #[command(name = "refreshpacket")]
+    RefreshPacket {
+        /// Path to the signed .packet.json file
+        packet: PathBuf,
+        /// Prefer the most recent proof (not recommended)
+        #[arg(long)]
+        prefer_recent: bool,
+    },
     /// Get a spaceout - a Bitcoin output relevant to the Spaces protocol.
     #[command(name = "getspaceout")]
     GetSpaceOut {
@@ -306,9 +327,6 @@ enum Commands {
     /// compatible with most bitcoin wallets
     #[command(name = "getnewaddress")]
     GetCoinAddress,
-    /// DNS encodes the space and calculates the SHA-256 hash
-    #[command(name = "hashspace")]
-    HashSpace { space: String },
 }
 
 struct SpaceCli {
@@ -320,6 +338,35 @@ struct SpaceCli {
     network: ExtendedNetwork,
     rpc_url: String,
     client: HttpClient,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SignedDnsUpdate {
+    serial: u32,
+    space: String,
+    #[serde(
+        serialize_with = "serialize_base64",
+        deserialize_with = "deserialize_base64"
+    )]
+    packet: Vec<u8>,
+    signature: Signature,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    proof: Option<Base64Bytes>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Base64Bytes(
+    #[serde(
+        serialize_with = "serialize_base64",
+        deserialize_with = "deserialize_base64"
+    )]
+    Vec<u8>
+);
+
+struct DnsUpdate {
+    space: String,
+    serial: u32,
+    packet: Vec<u8>,
 }
 
 impl SpaceCli {
@@ -438,12 +485,6 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn hash_space(spaceish: &str) -> anyhow::Result<String> {
-    let space = normalize_space(&spaceish);
-    let sname = SLabel::from_str(&space)?;
-    Ok(hex::encode(Sha256::hash(sname.as_ref())))
-}
-
 async fn handle_commands(
     cli: &SpaceCli,
     command: Commands,
@@ -460,8 +501,8 @@ async fn handle_commands(
             println!("{} sat", Amount::from_sat(response).to_sat());
         }
         Commands::GetSpace { space } => {
-            let space_hash = hash_space(&space).map_err(|e| ClientError::Custom(e.to_string()))?;
-            let response = cli.client.get_space(&space_hash).await?;
+            let space = normalize_space(&space);
+            let response = cli.client.get_space(&space).await?;
             println!("{}", serde_json::to_string_pretty(&response)?);
         }
         Commands::GetSpaceOut { outpoint } => {
@@ -509,7 +550,7 @@ async fn handle_commands(
                 fee_rate,
                 false,
             )
-            .await?
+                .await?
         }
         Commands::Bid {
             space,
@@ -526,7 +567,7 @@ async fn handle_commands(
                 fee_rate,
                 confirmed_only,
             )
-            .await?
+                .await?
         }
         Commands::CreateBidOuts { pairs, fee_rate } => {
             cli.send_request(None, Some(pairs), fee_rate, false).await?
@@ -545,7 +586,7 @@ async fn handle_commands(
                 fee_rate,
                 false,
             )
-            .await?
+                .await?
         }
         Commands::Renew { spaces, fee_rate } => {
             let spaces: Vec<_> = spaces.into_iter().map(|s| normalize_space(&s)).collect();
@@ -558,7 +599,7 @@ async fn handle_commands(
                 fee_rate,
                 false,
             )
-            .await?
+                .await?
         }
         Commands::Transfer {
             spaces,
@@ -575,7 +616,7 @@ async fn handle_commands(
                 fee_rate,
                 false,
             )
-            .await?
+                .await?
         }
         Commands::SendCoins {
             amount,
@@ -591,7 +632,7 @@ async fn handle_commands(
                 fee_rate,
                 false,
             )
-            .await?
+                .await?
         }
         Commands::SetRawFallback {
             mut space,
@@ -621,7 +662,7 @@ async fn handle_commands(
                 fee_rate,
                 false,
             )
-            .await?;
+                .await?;
         }
         Commands::ListUnspent => {
             let utxos = cli.client.wallet_list_unspent(&cli.wallet).await?;
@@ -673,12 +714,6 @@ async fn handle_commands(
                 cli.format,
             );
         }
-        Commands::HashSpace { space } => {
-            println!(
-                "{}",
-                hash_space(&space).map_err(|e| ClientError::Custom(e.to_string()))?
-            );
-        }
         Commands::Buy {
             space,
             price,
@@ -697,7 +732,7 @@ async fn handle_commands(
                         })?
                         .as_slice(),
                 )
-                .map_err(|_| ClientError::Custom("Invalid signature".to_string()))?,
+                    .map_err(|_| ClientError::Custom("Invalid signature".to_string()))?,
             };
             let result = cli
                 .client
@@ -738,7 +773,7 @@ async fn handle_commands(
                         })?
                         .as_slice(),
                 )
-                .map_err(|_| ClientError::Custom("Invalid signature".to_string()))?,
+                    .map_err(|_| ClientError::Custom("Invalid signature".to_string()))?,
             };
 
             cli.client.verify_listing(listing).await?;
@@ -775,6 +810,83 @@ async fn handle_commands(
                 .await?;
             println!("{} Message verified", "✓".color(Color::Green));
         }
+        Commands::SignZone { zone, preserve_serial, skip_proof } => {
+            let update = encode_dns_update(&zone, preserve_serial)
+                .map_err(|e| ClientError::Custom(format!("Parse error: {}", e)))?;
+
+            let signable = dns_update_signable(update.serial, &update.packet);
+            let spaceout = cli.client.get_space(&update.space).await
+                .map_err(|e| ClientError::Custom(e.to_string()))?
+                .ok_or(ClientError::Custom(format!("Space not found \"{}\"", update.space)))?;
+
+            let result = cli
+                .client
+                .wallet_sign_message(
+                    &cli.wallet,
+                    &update.space,
+                    spaces_protocol::Bytes::new(signable),
+                )
+                .await?;
+
+            let proof = match skip_proof {
+                true => None,
+                false => Some(
+                    cli.client.prove_spaceout(OutPoint {
+                        txid: spaceout.txid,
+                        vout: spaceout.spaceout.n as _,
+                    }, Some(false)).await.map_err(|e| ClientError::Custom(e.to_string()))?.proof
+                ),
+            };
+
+            let signed = SignedDnsUpdate {
+                serial: update.serial,
+                space: update.space,
+                packet: update.packet,
+                signature: result.signature,
+                proof: proof.map(|p| Base64Bytes(p)),
+            };
+
+            let out = serde_json::to_vec_pretty(&signed).unwrap();
+            let path = zone.with_extension("packet.json");
+            fs::write(&path, out).map_err(|e| ClientError::Custom(e.to_string()))?;
+            println!("{} DNS Packet signed: {} (serial: {})", "✓".color(Color::Green), path.as_path().display(), signed.serial);
+        }
+        Commands::RefreshPacket { packet: packet_path, prefer_recent } => {
+            let (soa_owner, mut signed) =
+                parse_packet_and_soa_owner(&packet_path)
+                    .map_err(|e| ClientError::Custom(e.to_string()))?;
+
+            if soa_owner != signed.space {
+                return Err(
+                    ClientError::Custom(
+                        format!("Invalid packet space name \"{}\" != \"{}\" SOA owner", signed.space, soa_owner)
+                    )
+                );
+            }
+
+            let signable = dns_update_signable(signed.serial, &signed.packet);
+            cli.client
+                .verify_message(SignedMessage {
+                    space: soa_owner.clone(),
+                    message: spaces_protocol::Bytes::new(signable),
+                    signature: signed.signature,
+                })
+                .await?;
+
+            let spaceout = cli.client.get_space(&soa_owner).await
+                .map_err(|e| ClientError::Custom(e.to_string()))?
+                .ok_or(ClientError::Custom(format!("Space not found \"{}\"", soa_owner)))?;
+
+            let raw_subtree = cli.client.prove_spaceout(OutPoint {
+                txid: spaceout.txid,
+                vout: spaceout.spaceout.n as _,
+            }, Some(prefer_recent)).await.map_err(|e| ClientError::Custom(e.to_string()))?.proof;
+            signed.proof = Some(Base64Bytes(raw_subtree));
+
+            let out = serde_json::to_vec_pretty(&signed).unwrap();
+            fs::write(&packet_path, out).map_err(|e| ClientError::Custom(e.to_string()))?;
+            println!("{} Refreshed packet: {}", "✓".color(Color::Green), packet_path.as_path().display());
+        }
     }
 
     Ok(())
@@ -782,4 +894,119 @@ async fn handle_commands(
 
 fn default_spaced_rpc_url(chain: &ExtendedNetwork) -> String {
     format!("http://127.0.0.1:{}", default_spaces_rpc_port(chain))
+}
+
+fn generate_dns_zone_serial() -> u32 {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("Clock may have gone backwards")
+        .as_secs();
+
+    now as u32
+}
+
+fn dns_update_signable(serial: u32, packet: &Vec<u8>) -> Vec<u8> {
+    let mut signable = Vec::new();
+
+    // Write sequence as compact int
+    VarInt::from(serial)
+        .consensus_encode(&mut signable)
+        .expect("encoded varint");
+
+    // Write the packet length
+    VarInt::from(packet.as_slice().len())
+        .consensus_encode(&mut signable)
+        .expect("encoded varint");
+    // Write the DNS update packet
+    signable.append_slice(packet.as_slice()).expect("buffer");
+    signable
+}
+fn parse_packet_and_soa_owner(packet_file: &Path) -> anyhow::Result<(String, SignedDnsUpdate)> {
+    let file = fs::read_to_string(packet_file)?;
+    let packet: SignedDnsUpdate = serde_json::from_str(&file)?;
+    let message = domain::base::Message::from_octets(&packet.packet)?;
+
+    let mut space = None;
+    for record in message.authority()? {
+        let record = record?;
+        if let Ok(Some(record)) = record
+            .into_record::<ZoneRecordData<_, ParsedName<_>>>()
+        {
+            match record.data() {
+                ZoneRecordData::Soa(_) => space = Some(record.owner().to_string()),
+                _ => continue,
+            }
+        }
+    }
+
+    let space = space.ok_or(anyhow!("Space name not found in packet"))?;
+    Ok((space, packet))
+}
+
+fn encode_dns_update(zone_file: &Path, preserve_serial: bool) -> anyhow::Result<DnsUpdate> {
+    let mut builder = MessageBuilder::from_target(
+        TreeCompressor::new(
+            Vec::new()
+        )
+    )?.authority();
+
+    let mut space = None;
+    builder.header_mut().set_opcode(Opcode::UPDATE);
+
+    let mut reader =
+        Zonefile::load(&mut File::open(&zone_file)?)?;
+
+    let mut serial = 0;
+    while let Some(entry) = reader.next_entry()
+        .or_else(|e| Err(anyhow!("Error reading zone entry: {}", e)))? {
+        if let Entry::Record(record) = &entry {
+            match record.data() {
+                ScannedRecordData::Soa(data) => {
+                    if space.is_some() {
+                        return Err(anyhow!("Multiple SOA records"));
+                    }
+
+                    space = Some(record.owner().clone().to_string());
+                    serial = match preserve_serial {
+                        true => data.serial().into_int(),
+                        false => generate_dns_zone_serial(),
+                    };
+
+                    let record_serial = Serial::from(serial);
+                    let record =
+                        Record::new(
+                            record.owner().try_to_name::<Vec<u8>>()?,
+                            record.class(),
+                            record.ttl(),
+                            ZoneRecordData::<Vec<u8>, Name<Vec<u8>>>::Soa(
+                                Soa::new(
+                                    data.mname().try_to_name()?,
+                                    data.rname().try_to_name()?,
+                                    record_serial,
+                                    data.refresh(),
+                                    data.retry(),
+                                    data.expire(),
+                                    data.minimum(),
+                                )),
+                        );
+
+                    builder.push(record)?;
+                }
+                _ => {
+                    builder.push(record)?;
+                }
+            };
+        }
+    }
+
+    if space.is_none() {
+        return Err(anyhow!("SOA record is required"));
+    }
+
+    let msg = builder.finish();
+    Ok(DnsUpdate {
+        space: space.unwrap(),
+        serial,
+        packet: msg.into_target(),
+    })
 }

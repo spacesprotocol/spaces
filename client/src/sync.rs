@@ -9,7 +9,7 @@ use spaces_protocol::{
 };
 use tokio::sync::broadcast;
 
-pub const TRUST_ANCHORS_COUNT: u32 = 120;
+pub const ROOT_ANCHORS_COUNT: u32 = 120;
 
 use crate::{
     client::{BlockMeta, BlockSource, Client},
@@ -118,17 +118,17 @@ impl Spaced {
         if !self.synced {
             return Ok(()) ;
         }
-        info!("Updating trust anchors ...");
+        info!("Updating root anchors ...");
         let anchors_path = match self.anchors_path.as_ref() {
             None => return Ok(()),
             Some(path) => path,
         };
 
-        let result = self.chain.store.update_anchors(anchors_path, TRUST_ANCHORS_COUNT)
+        let result = self.chain.store.update_anchors(anchors_path, ROOT_ANCHORS_COUNT)
             .or_else(|e| Err(anyhow!("Could not update trust anchors: {}",e)))?;
 
         if let Some(result) = result.first() {
-            info!("Latest trust anchor root {} (height: {})", hex::encode(result.root), result.block.height)
+            info!("Latest root anchor {} (height: {})", hex::encode(result.root), result.block.height)
         }
         Ok(())
     }

@@ -14,7 +14,7 @@ use spacedb::{
 use spacedb::subtree::SubTree;
 use spacedb::tx::ProofType;
 use spaces_protocol::{bitcoin::{BlockHash, OutPoint}, constants::{ChainAnchor, ROLLOUT_BATCH_SIZE}, hasher::{BidKey, KeyHash, OutpointKey, SpaceKey}, prepare::DataSource, Covenant, FullSpaceOut, SpaceOut};
-use crate::rpc::TrustAnchor;
+use crate::rpc::RootAnchor;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RolloutEntry {
@@ -84,13 +84,13 @@ impl Store {
         Ok(self.0.begin_write()?)
     }
 
-    pub fn update_anchors(&self, file_path: &Path, count: u32) -> Result<Vec<TrustAnchor>> {
-        let previous: Vec<TrustAnchor> = match fs::read(file_path) {
+    pub fn update_anchors(&self, file_path: &Path, count: u32) -> Result<Vec<RootAnchor>> {
+        let previous: Vec<RootAnchor> = match fs::read(file_path) {
             Ok(bytes) => serde_json::from_slice(&bytes)?,
             Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
             Err(e) => return Err(e.into()),
         };
-        let prev_map: HashMap<(BlockHash, u32), TrustAnchor> = previous
+        let prev_map: HashMap<(BlockHash, u32), RootAnchor> = previous
             .into_iter()
             .map(|anchor| ((anchor.block.hash, anchor.block.height), anchor))
             .collect();
@@ -104,7 +104,7 @@ impl Store {
                 anchors.push(existing.clone());
             } else {
                 let root = snap.compute_root()?;
-                anchors.push(TrustAnchor {
+                anchors.push(RootAnchor {
                     root,
                     block: anchor,
                 });

@@ -3,7 +3,6 @@ use std::{
 };
 use std::fs::File;
 use anyhow::{anyhow, Context};
-use base64::Engine;
 use bdk::{
     bitcoin::{Amount, BlockHash, FeeRate, Network, Txid},
     chain::BlockId,
@@ -14,7 +13,9 @@ use bdk::{
     miniscript::Tap,
     KeychainKind,
 };
+use crate::{deserialize_base64, serialize_base64};
 use jsonrpsee::{core::async_trait, proc_macros::rpc, server::Server, types::ErrorObjectOwned};
+use jsonrpsee::server::middleware::http::ProxyGetRequestLayer;
 use log::info;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use spacedb::{encode::SubTreeEncoder, tx::ProofType};
@@ -46,7 +47,7 @@ use crate::{
         WalletResponse,
     },
 };
-use crate::sync::{TRUST_ANCHORS_COUNT, COMMIT_BLOCK_INTERVAL};
+use crate::sync::{ROOT_ANCHORS_COUNT, COMMIT_BLOCK_INTERVAL};
 
 pub(crate) type Responder<T> = oneshot::Sender<T>;
 
@@ -64,13 +65,13 @@ pub struct SignedMessage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TrustAnchor {
+pub struct RootAnchor {
     #[serde(
         serialize_with = "serialize_hash",
         deserialize_with = "deserialize_hash"
     )]
     pub root: spaces_protocol::hasher::Hash,
-    pub block: ChainAnchor
+    pub block: ChainAnchor,
 }
 
 pub enum ChainStateCommand {
@@ -119,15 +120,15 @@ pub enum ChainStateCommand {
     },
     ProveSpaceout {
         outpoint: OutPoint,
-        oldest: bool,
+        prefer_recent: bool,
         resp: Responder<anyhow::Result<ProofResult>>,
     },
     ProveSpaceOutpoint {
         space_or_hash: String,
         resp: Responder<anyhow::Result<ProofResult>>,
     },
-    GetTrustAnchors {
-        resp: Responder<anyhow::Result<Vec<TrustAnchor>>>,
+    GetRootAnchors {
+        resp: Responder<anyhow::Result<Vec<RootAnchor>>>,
     },
 }
 
@@ -247,7 +248,7 @@ pub trait Rpc {
     async fn verify_listing(&self, listing: Listing) -> Result<(), ErrorObjectOwned>;
 
     #[method(name = "provespaceout")]
-    async fn prove_spaceout(&self, outpoint: OutPoint, oldest: bool) -> Result<ProofResult, ErrorObjectOwned>;
+    async fn prove_spaceout(&self, outpoint: OutPoint, prefer_recent: Option<bool>) -> Result<ProofResult, ErrorObjectOwned>;
 
     #[method(name = "provespaceoutpoint")]
     async fn prove_space_outpoint(
@@ -255,8 +256,8 @@ pub trait Rpc {
         space_or_hash: &str,
     ) -> Result<ProofResult, ErrorObjectOwned>;
 
-    #[method(name = "gettrustanchors")]
-    async fn get_trust_anchors(&self) -> Result<Vec<TrustAnchor>, ErrorObjectOwned>;
+    #[method(name = "getrootanchors")]
+    async fn get_root_anchors(&self) -> Result<Vec<RootAnchor>, ErrorObjectOwned>;
 
     #[method(name = "walletlisttransactions")]
     async fn wallet_list_transactions(
@@ -376,39 +377,15 @@ pub struct RpcServerImpl {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ProofResult {
-    root: Bytes,
+    pub root: Bytes,
     #[serde(
         serialize_with = "serialize_base64",
         deserialize_with = "deserialize_base64"
     )]
-    proof: Vec<u8>,
+    pub proof: Vec<u8>,
 
 }
 
-fn serialize_base64<S>(bytes: &Vec<u8>, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: Serializer,
-{
-    if serializer.is_human_readable() {
-        serializer.serialize_str(&base64::prelude::BASE64_STANDARD.encode(bytes))
-    } else {
-        serializer.serialize_bytes(bytes)
-    }
-}
-
-fn deserialize_base64<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    if deserializer.is_human_readable() {
-        let s = String::deserialize(deserializer)?;
-        base64::prelude::BASE64_STANDARD
-            .decode(&s)
-            .map_err(serde::de::Error::custom)
-    } else {
-        Vec::<u8>::deserialize(deserializer)
-    }
-}
 
 fn serialize_hash<S>(
     bytes: &spaces_protocol::hasher::Hash,
@@ -676,9 +653,16 @@ impl RpcServerImpl {
         addrs: Vec<SocketAddr>,
         signal: broadcast::Sender<()>,
     ) -> anyhow::Result<()> {
-        let mut listeners: Vec<Server> = Vec::with_capacity(addrs.len());
+        let mut listeners: Vec<_> = Vec::with_capacity(addrs.len());
+
         for addr in addrs.iter() {
-            let server = Server::builder().build(addr).await?;
+            let service_builder = tower::ServiceBuilder::new()
+                .layer(ProxyGetRequestLayer::new("/root-anchors.json", "getrootanchors")?)
+                .layer(ProxyGetRequestLayer::new("/", "getserverinfo")?);
+
+            let server = Server::builder()
+                .set_http_middleware(service_builder)
+                .build(addr).await?;
             listeners.push(server);
         }
 
@@ -834,6 +818,26 @@ impl RpcServer for RpcServerImpl {
             })
     }
 
+    async fn verify_message(&self, msg: SignedMessage) -> Result<(), ErrorObjectOwned> {
+        self.store
+            .verify_message(msg)
+            .await
+            .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
+    }
+
+    async fn wallet_sign_message(
+        &self,
+        wallet: &str,
+        space: &str,
+        msg: Bytes,
+    ) -> Result<SignedMessage, ErrorObjectOwned> {
+        self.wallet(&wallet)
+            .await?
+            .send_sign_message(space, msg)
+            .await
+            .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
+    }
+
     async fn wallet_get_info(&self, wallet: &str) -> Result<WalletInfo, ErrorObjectOwned> {
         self.wallet(&wallet)
             .await?
@@ -841,7 +845,6 @@ impl RpcServer for RpcServerImpl {
             .await
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
     }
-
     async fn wallet_export(&self, name: &str) -> Result<WalletExport, ErrorObjectOwned> {
         self.wallet_manager
             .export_wallet(name)
@@ -859,6 +862,7 @@ impl RpcServer for RpcServerImpl {
                 ErrorObjectOwned::owned(RPC_WALLET_NOT_LOADED, error.to_string(), None::<String>)
             })
     }
+
     async fn wallet_send_request(
         &self,
         wallet: &str,
@@ -926,19 +930,6 @@ impl RpcServer for RpcServerImpl {
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
     }
 
-    async fn wallet_sign_message(
-        &self,
-        wallet: &str,
-        space: &str,
-        msg: Bytes,
-    ) -> Result<SignedMessage, ErrorObjectOwned> {
-        self.wallet(&wallet)
-            .await?
-            .send_sign_message(space, msg)
-            .await
-            .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
-    }
-
     async fn verify_listing(&self, listing: Listing) -> Result<(), ErrorObjectOwned> {
         self.store
             .verify_listing(listing)
@@ -946,16 +937,9 @@ impl RpcServer for RpcServerImpl {
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
     }
 
-    async fn verify_message(&self, msg: SignedMessage) -> Result<(), ErrorObjectOwned> {
+    async fn prove_spaceout(&self, outpoint: OutPoint, prefer_recent: Option<bool>) -> Result<ProofResult, ErrorObjectOwned> {
         self.store
-            .verify_message(msg)
-            .await
-            .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
-    }
-
-    async fn prove_spaceout(&self, outpoint: OutPoint, oldest: bool) -> Result<ProofResult, ErrorObjectOwned> {
-        self.store
-            .prove_spaceout(outpoint, oldest)
+            .prove_spaceout(outpoint, prefer_recent.unwrap_or(false))
             .await
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
     }
@@ -970,9 +954,9 @@ impl RpcServer for RpcServerImpl {
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
     }
 
-    async fn get_trust_anchors(&self) -> Result<Vec<TrustAnchor>, ErrorObjectOwned> {
+    async fn get_root_anchors(&self) -> Result<Vec<RootAnchor>, ErrorObjectOwned> {
         self.store
-            .get_trust_anchors()
+            .get_root_anchors()
             .await
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
     }
@@ -1193,8 +1177,8 @@ impl AsyncChainState {
                         .map(|_| ()),
                 );
             }
-            ChainStateCommand::ProveSpaceout { oldest, outpoint, resp } => {
-                _ = resp.send(Self::handle_prove_spaceout(chain_state, outpoint, oldest));
+            ChainStateCommand::ProveSpaceout { prefer_recent, outpoint, resp } => {
+                _ = resp.send(Self::handle_prove_spaceout(chain_state, outpoint, prefer_recent));
             }
             ChainStateCommand::ProveSpaceOutpoint {
                 space_or_hash,
@@ -1205,15 +1189,15 @@ impl AsyncChainState {
                     &space_or_hash,
                 ));
             }
-            ChainStateCommand::GetTrustAnchors { resp } => {
+            ChainStateCommand::GetRootAnchors { resp } => {
                 _ = resp.send(Self::handle_get_anchor(anchors_path, chain_state));
             }
         }
     }
 
-    fn handle_get_anchor(anchors_path: &Option<PathBuf>, state: &mut LiveSnapshot) -> anyhow::Result<Vec<TrustAnchor>> {
+    fn handle_get_anchor(anchors_path: &Option<PathBuf>, state: &mut LiveSnapshot) -> anyhow::Result<Vec<RootAnchor>> {
         if let Some(anchors_path) = anchors_path {
-            let anchors: Vec<TrustAnchor> = serde_json::from_reader(File::open(anchors_path)
+            let anchors: Vec<RootAnchor> = serde_json::from_reader(File::open(anchors_path)
                 .or_else(|e| Err(anyhow!("Could not open anchors file: {}", e)))?)
                 .or_else(|e| Err(anyhow!("Could not read anchors file: {}", e)))?;
             return Ok(anchors);
@@ -1222,7 +1206,7 @@ impl AsyncChainState {
         let snapshot = state.inner()?;
         let root = snapshot.compute_root()?;
         let meta: ChainAnchor = snapshot.metadata().try_into()?;
-        Ok(vec![TrustAnchor {
+        Ok(vec![RootAnchor {
             root,
             block: ChainAnchor {
                 hash: meta.hash,
@@ -1246,14 +1230,14 @@ impl AsyncChainState {
         let offset = proof.write_to_slice(&mut buf)?;
         buf.truncate(offset);
 
-        Ok(ProofResult{ proof: buf, root: Bytes::new(root.to_vec()) })
+        Ok(ProofResult { proof: buf, root: Bytes::new(root.to_vec()) })
     }
 
     /// Determines the optimal snapshot block height for creating a Merkle proof.
     ///
     /// This function finds a suitable historical snapshot that:
     /// 1. Is not older than when the space was last updated.
-    /// 2. Falls within [TRUST_ANCHORS_COUNT] range (for proof verification)
+    /// 2. Falls within [ROOT_ANCHORS_COUNT] range (for proof verification)
     /// 3. Skips the oldest trust anchors to prevent the proof from becoming stale too quickly.
     ///
     /// Parameters:
@@ -1263,7 +1247,7 @@ impl AsyncChainState {
     /// Returns: Target block height aligned to [COMMIT_BLOCK_INTERVAL]
     fn compute_target_snapshot(last_update: u32, tip: u32) -> u32 {
         const SAFETY_MARGIN: u32 = 8; // Skip oldest trust anchors to prevent proof staleness
-        const USABLE_ANCHORS: u32 = TRUST_ANCHORS_COUNT - SAFETY_MARGIN;
+        const USABLE_ANCHORS: u32 = ROOT_ANCHORS_COUNT - SAFETY_MARGIN;
 
         // Align block heights to commit intervals
         let last_update_aligned = last_update.div_ceil(COMMIT_BLOCK_INTERVAL)
@@ -1283,11 +1267,11 @@ impl AsyncChainState {
     fn handle_prove_spaceout(
         state: &mut LiveSnapshot,
         outpoint: OutPoint,
-        oldest: bool,
+        prefer_recent: bool,
     ) -> anyhow::Result<ProofResult> {
         let key = OutpointKey::from_outpoint::<Sha256>(outpoint);
 
-        let proof = if oldest {
+        let proof = if !prefer_recent {
             let spaceout = match state.get_spaceout(&outpoint)? {
                 Some(spaceot) => spaceot,
                 None => return Err(anyhow!("Cannot find older proofs for a non-existent utxo (try with oldest: false)")),
@@ -1299,7 +1283,7 @@ impl AsyncChainState {
                         let tip = state.tip.read().expect("read lock").height;
                         let last_update = expire_height.saturating_sub(spaces_protocol::constants::RENEWAL_INTERVAL);
                         Self::compute_target_snapshot(last_update, tip)
-                    },
+                    }
                     _ => return Err(anyhow!("Cannot find older proofs for a non-registered space (try with oldest: false)")),
                 }
             };
@@ -1314,7 +1298,7 @@ impl AsyncChainState {
         let offset = proof.write_to_slice(&mut buf)?;
         buf.truncate(offset);
 
-        Ok(ProofResult { proof: buf, root:Bytes::new(root)})
+        Ok(ProofResult { proof: buf, root: Bytes::new(root) })
     }
 
     pub async fn handler(
@@ -1364,10 +1348,10 @@ impl AsyncChainState {
         resp_rx.await?
     }
 
-    pub async fn prove_spaceout(&self, outpoint: OutPoint, oldest: bool) -> anyhow::Result<ProofResult> {
+    pub async fn prove_spaceout(&self, outpoint: OutPoint, prefer_recent: bool) -> anyhow::Result<ProofResult> {
         let (resp, resp_rx) = oneshot::channel();
         self.sender
-            .send(ChainStateCommand::ProveSpaceout { outpoint, oldest, resp })
+            .send(ChainStateCommand::ProveSpaceout { outpoint, prefer_recent: prefer_recent, resp })
             .await?;
         resp_rx.await?
     }
@@ -1383,10 +1367,10 @@ impl AsyncChainState {
         resp_rx.await?
     }
 
-    pub async fn get_trust_anchors(&self) -> anyhow::Result<Vec<TrustAnchor>> {
+    pub async fn get_root_anchors(&self) -> anyhow::Result<Vec<RootAnchor>> {
         let (resp, resp_rx) = oneshot::channel();
         self.sender
-            .send(ChainStateCommand::GetTrustAnchors { resp })
+            .send(ChainStateCommand::GetRootAnchors { resp })
             .await?;
         resp_rx.await?
     }
