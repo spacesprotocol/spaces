@@ -1,20 +1,20 @@
 use std::{path::PathBuf, str::FromStr};
 
-use protocol::{
+use spaces_protocol::{
     bitcoin::{Amount, FeeRate},
     constants::RENEWAL_INTERVAL,
     script::SpaceScript,
     Bytes, Covenant,
 };
-use spaced::{
+use spaces_client::{
     rpc::{
         BidParams, ExecuteParams, OpenParams, RegisterParams, RpcClient, RpcWalletRequest,
         RpcWalletTxBuilder, TransferSpacesParams,
     },
     wallets::{AddressKind, WalletResponse},
 };
-use testutil::TestRig;
-use wallet::{export::WalletExport, tx_event::TxEventKind};
+use spaces_testutil::TestRig;
+use spaces_wallet::{export::WalletExport, tx_event::TxEventKind};
 
 const ALICE: &str = "wallet_99";
 const BOB: &str = "wallet_98";
