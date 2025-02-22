@@ -1237,7 +1237,7 @@ impl AsyncChainState {
     ///
     /// This function finds a suitable historical snapshot that:
     /// 1. Is not older than when the space was last updated.
-    /// 2. Falls within [ROOT_ANCHORS_COUNT] range (for proof verification)
+    /// 2. Falls within [ROOT_ANCHORS_COUNT] range
     /// 3. Skips the oldest trust anchors to prevent the proof from becoming stale too quickly.
     ///
     /// Parameters:
@@ -1256,7 +1256,7 @@ impl AsyncChainState {
             * COMMIT_BLOCK_INTERVAL;
 
         // Calculate the oldest allowed snapshot while maintaining safety margin
-        let lookback_window = USABLE_ANCHORS * COMMIT_BLOCK_INTERVAL;
+        let lookback_window = (USABLE_ANCHORS - 1) * COMMIT_BLOCK_INTERVAL;
         let oldest_allowed_snapshot = current_tip_aligned.saturating_sub(lookback_window);
 
         // Choose the most recent of last update or oldest allowed snapshot
@@ -1294,6 +1294,7 @@ impl AsyncChainState {
         };
 
         let root = proof.compute_root()?.to_vec();
+        info!("Proving with root anchor {}", hex::encode(root.as_slice()));
         let mut buf = vec![0u8; 4096];
         let offset = proof.write_to_slice(&mut buf)?;
         buf.truncate(offset);
