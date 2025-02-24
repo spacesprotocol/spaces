@@ -27,7 +27,7 @@ Bitcoin Core of version 28+ is required. It can be installed from the official [
 
 ```sh
 git clone https://github.com/spacesprotocol/spaced && cd spaced
-cargo install --path node --locked
+cargo install --path client --locked
 ```
 
 Make sure it's in your path
