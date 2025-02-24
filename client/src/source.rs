@@ -12,17 +12,16 @@ use std::{
 use base64::Engine;
 use bitcoin::{Block, BlockHash, Txid};
 use hex::FromHexError;
-use log::{error};
-use protocol::constants::ChainAnchor;
+use log::error;
 use reqwest::StatusCode;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
+use spaces_protocol::constants::ChainAnchor;
+use spaces_wallet::{bitcoin, bitcoin::Transaction};
 use threadpool::ThreadPool;
 use tokio::time::Instant;
-use wallet::{bitcoin, bitcoin::Transaction};
 
-use crate::node::BlockSource;
-use crate::std_wait;
+use crate::{client::BlockSource, std_wait};
 
 const BITCOIN_RPC_IN_WARMUP: i32 = -28; // Client still warming up
 const BITCOIN_RPC_CLIENT_NOT_CONNECTED: i32 = -9; // Bitcoin is not connected
@@ -456,8 +455,10 @@ impl BlockFetcher {
                     Ok(t) => t,
                     Err(e) => {
                         _ = task_sender.send(BlockEvent::Error(e));
-                        std_wait(|| current_task.load(Ordering::SeqCst) != job_id,
-                                 Duration::from_secs(1));
+                        std_wait(
+                            || current_task.load(Ordering::SeqCst) != job_id,
+                            Duration::from_secs(1),
+                        );
                         continue;
                     }
                 };
@@ -479,8 +480,10 @@ impl BlockFetcher {
                         }
                         Err(e) if matches!(e, BlockFetchError::RpcError(_)) => {
                             _ = task_sender.send(BlockEvent::Error(e));
-                            std_wait(|| current_task.load(Ordering::SeqCst) != job_id,
-                                     Duration::from_secs(1));
+                            std_wait(
+                                || current_task.load(Ordering::SeqCst) != job_id,
+                                Duration::from_secs(1),
+                            );
                             continue;
                         }
                         Err(e) => {

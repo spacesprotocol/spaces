@@ -2,15 +2,15 @@ pub extern crate bitcoind;
 pub mod spaced;
 
 use std::{
+    collections::HashMap,
     fs, io,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
 };
-use std::collections::HashMap;
-use ::spaced::{
-    jsonrpsee::tokio,
-    node::protocol::{
+
+use ::spaces_client::{
+    client::spaces_protocol::{
         bitcoin,
         bitcoin::{
             absolute, address::NetworkChecked, block, block::Header, hashes::Hash,
@@ -19,6 +19,7 @@ use ::spaced::{
             Txid,
         },
     },
+    jsonrpsee::tokio,
     rpc::RpcClient,
 };
 use anyhow::Result;
@@ -27,12 +28,12 @@ use bitcoind::{
     anyhow::{anyhow, Context},
     bitcoincore_rpc::{
         bitcoincore_rpc_json::{GetBlockTemplateModes, GetBlockTemplateRules},
-        RpcApi,
+        json, RpcApi,
     },
     tempfile::{tempdir, TempDir},
     BitcoinD,
 };
-use bitcoind::bitcoincore_rpc::json;
+
 use crate::spaced::SpaceD;
 
 // Path to the pre-created regtest testdata in build.rs

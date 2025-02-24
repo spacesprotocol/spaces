@@ -4,9 +4,9 @@ use std::{
 };
 
 use anyhow::Result;
-use protocol::{bitcoin::BlockHash, constants::ChainAnchor};
-use spaced::source::{BitcoinBlockSource, BitcoinRpc, BitcoinRpcAuth, BlockEvent, BlockFetcher};
-use testutil::TestRig;
+use spaces_protocol::{bitcoin::BlockHash, constants::ChainAnchor};
+use spaces_client::source::{BitcoinBlockSource, BitcoinRpc, BitcoinRpcAuth, BlockEvent, BlockFetcher};
+use spaces_testutil::TestRig;
 
 async fn setup(blocks: u64) -> Result<(TestRig, u64, BlockHash)> {
     let rig = TestRig::new().await?;

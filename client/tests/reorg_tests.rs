@@ -1,7 +1,7 @@
 use std::time::Duration;
 
-use spaced::rpc::RpcClient;
-use testutil::TestRig;
+use spaces_client::rpc::RpcClient;
+use spaces_testutil::TestRig;
 
 #[tokio::test]
 async fn it_should_resync_after_reorg_at_same_height() -> anyhow::Result<()> {

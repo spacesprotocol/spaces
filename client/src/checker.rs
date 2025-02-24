@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use anyhow::anyhow;
-use protocol::{
+use spaces_protocol::{
     bitcoin::{OutPoint, Transaction},
     hasher::{KeyHasher, SpaceKey},
     prepare::{DataSource, TxContext},
@@ -147,14 +147,17 @@ impl DataSource for TxChecker<'_> {
     fn get_space_outpoint(
         &mut self,
         space_hash: &SpaceKey,
-    ) -> protocol::errors::Result<Option<OutPoint>> {
+    ) -> spaces_protocol::errors::Result<Option<OutPoint>> {
         match self.spaces.get(space_hash) {
             None => self.original.get_space_outpoint(space_hash.into()),
             Some(res) => Ok(res.clone()),
         }
     }
 
-    fn get_spaceout(&mut self, outpoint: &OutPoint) -> protocol::errors::Result<Option<SpaceOut>> {
+    fn get_spaceout(
+        &mut self,
+        outpoint: &OutPoint,
+    ) -> spaces_protocol::errors::Result<Option<SpaceOut>> {
         match self.spaceouts.get(outpoint) {
             None => self.original.get_spaceout(outpoint),
             Some(space_out) => Ok(space_out.clone()),
