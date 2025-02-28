@@ -1,17 +1,14 @@
 extern crate core;
 
-use std::{fs, path::PathBuf};
-use std::fs::File;
-use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{fs, io, path::PathBuf};
+use std::io::{Cursor, IsTerminal};
 use anyhow::anyhow;
+use base64::Engine;
 use clap::{Parser, Subcommand};
 use colored::{Color, Colorize};
-use domain::base::{MessageBuilder, Name, ParsedName, Record, Serial, ToName, TreeCompressor};
+use domain::base::{MessageBuilder, TreeCompressor};
 use domain::base::iana::Opcode;
-use domain::dep::octseq::OctetsBuilder;
-use domain::rdata::{Soa, ZoneRecordData};
-use domain::zonefile::inplace::{Entry, ScannedRecordData, Zonefile};
+use domain::zonefile::inplace::{Entry, Zonefile};
 use jsonrpsee::{
     core::{client::Error, ClientError},
     http_client::{HttpClient, HttpClientBuilder},
@@ -23,13 +20,11 @@ use spaces_client::{config::{default_spaces_rpc_port, ExtendedNetwork}, serializ
     print_wallet_balance_response, print_wallet_info, print_wallet_response, Format,
 }, rpc::{
     BidParams, ExecuteParams, OpenParams, RegisterParams, RpcClient, RpcWalletRequest,
-    RpcWalletTxBuilder, SendCoinsParams, SignedMessage, TransferSpacesParams,
+    RpcWalletTxBuilder, SendCoinsParams, TransferSpacesParams,
 }, wallets::{AddressKind, WalletResponse}};
 use spaces_protocol::{bitcoin::{Amount, FeeRate, OutPoint, Txid}};
-use spaces_protocol::bitcoin::consensus::Encodable;
-use spaces_protocol::bitcoin::VarInt;
 use spaces_wallet::{bitcoin::secp256k1::schnorr::Signature, export::WalletExport, Listing};
-
+use spaces_wallet::nostr::{NostrEvent, NostrTag};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -218,27 +213,6 @@ enum Commands {
         #[arg(long, short)]
         fee_rate: Option<u64>,
     },
-    /// Sign a message using the owner address of the specified space
-    #[command(name = "signmessage")]
-    SignMessage {
-        /// The space to use
-        space: String,
-        /// The message to sign
-        message: String,
-    },
-    /// Verify a message using the owner address of the specified space
-    #[command(name = "verifymessage")]
-    VerifyMessage {
-        /// The space to verify
-        space: String,
-
-        /// The message to verify
-        message: String,
-
-        /// The signature to verify
-        #[arg(long)]
-        signature: String,
-    },
     /// Verify a listing
     #[command(name = "verifylisting")]
     VerifyListing {
@@ -253,24 +227,47 @@ enum Commands {
         #[arg(long)]
         seller: String,
     },
-    /// Sign a zone file turning it into a signed DNS UPDATE packet
+    /// Sign any Nostr event using the space's private key
+    #[command(name = "signevent")]
+    SignEvent {
+        /// Space name (e.g., @example)
+        space: String,
+
+        /// Path to a nostr event json file (omit for stdin)
+        #[arg(short, long)]
+        input: Option<PathBuf>,
+
+        /// Include a space-tag and trust path data
+        #[arg(short, long)]
+        anchor: bool,
+    },
+    /// Verify a signed Nostr event against the space's public key
+    #[command(name = "verifyevent")]
+    VerifyEvent {
+        /// Space name (e.g., @example)
+        space: String,
+
+        /// Path to a signed nostr event json file (omit for stdin)
+        #[arg(short, long)]
+        input: Option<PathBuf>,
+    },
+    /// Sign a zone file turning it into a space-anchored nostr event
     #[command(name = "signzone")]
     SignZone {
-        /// The DNS zone file path
-        zone: PathBuf,
-        /// When set, preserves the zone serial (default is false, meaning the serial is updated automatically)
+        /// The space to use for signing the DNS file
+        space: String,
+        /// The DNS zone file path (omit for stdin)
+        input: Option<PathBuf>,
+        /// Skip including bundled Merkle proof in the event.
         #[arg(long)]
-        preserve_serial: bool,
-        /// Skip including bundled Merkle proof information in the packet.
-        #[arg(long)]
-        skip_proof: bool,
+        skip_anchor: bool,
     },
-    // Verifies the DNS packet and updates authentication data
-    #[command(name = "refreshpacket")]
-    RefreshPacket {
-        /// Path to the signed .packet.json file
-        packet: PathBuf,
-        /// Prefer the most recent proof (not recommended)
+    // Refreshes the trust path for space-anchored nostr events
+    #[command(name = "refreshanchor")]
+    RefreshAnchor {
+        /// Path to a Nostr event file (omit for stdin)
+        input: Option<PathBuf>,
+        /// Prefer the most recent trust path (not recommended)
         #[arg(long)]
         prefer_recent: bool,
     },
@@ -363,12 +360,6 @@ struct Base64Bytes(
     Vec<u8>
 );
 
-struct DnsUpdate {
-    space: String,
-    serial: u32,
-    packet: Vec<u8>,
-}
-
 impl SpaceCli {
     async fn configure() -> anyhow::Result<(Self, Args)> {
         let mut args = Args::parse();
@@ -392,6 +383,40 @@ impl SpaceCli {
         ))
     }
 
+    async fn sign_event(&self, space: String, event: NostrEvent, anchor: bool, most_recent: bool) -> Result<NostrEvent, ClientError> {
+        let mut result = self
+            .client
+            .wallet_sign_event(
+                &self.wallet,
+                &space,
+                event,
+            )
+            .await?;
+
+        if anchor {
+            result = self.add_anchor(result, most_recent).await?
+        }
+
+        Ok(result)
+    }
+    async fn add_anchor(&self, mut event: NostrEvent, most_recent: bool) -> Result<NostrEvent, ClientError> {
+        let space = match event.space() {
+            None => return Err(ClientError::Custom("A space tag is required to add an anchor".to_string())),
+            Some(space) => space
+        };
+
+        let spaceout = self.client.get_space(&space).await
+            .map_err(|e| ClientError::Custom(e.to_string()))?
+            .ok_or(ClientError::Custom(format!("Space not found \"{}\"", space)))?;
+
+        event.proof = Some(base64::prelude::BASE64_STANDARD.encode(self.client.prove_spaceout(OutPoint {
+            txid: spaceout.txid,
+            vout: spaceout.spaceout.n as _,
+        }, Some(most_recent)).await.map_err(|e| ClientError::Custom(e.to_string()))?
+            .proof));
+
+        Ok(event)
+    }
     async fn send_request(
         &self,
         req: Option<RpcWalletRequest>,
@@ -488,7 +513,7 @@ async fn main() -> anyhow::Result<()> {
 async fn handle_commands(
     cli: &SpaceCli,
     command: Commands,
-) -> std::result::Result<(), ClientError> {
+) -> Result<(), ClientError> {
     match command {
         Commands::GetRollout {
             target_interval: target,
@@ -779,113 +804,60 @@ async fn handle_commands(
             cli.client.verify_listing(listing).await?;
             println!("{} Listing verified", "✓".color(Color::Green));
         }
-        Commands::SignMessage { mut space, message } => {
+        Commands::SignEvent { mut space, input, anchor } => {
+            let mut event = read_event(input)
+                .map_err(|e| ClientError::Custom(format!("input error: {}", e.to_string())))?;
+
             space = normalize_space(&space);
-            let result = cli
-                .client
-                .wallet_sign_message(
-                    &cli.wallet,
-                    &space,
-                    spaces_protocol::Bytes::new(message.as_bytes().to_vec()),
-                )
+            match event.space() {
+                None if anchor => {
+                    event.tags.insert(0, NostrTag(vec!["space".to_string(), space.clone()]))
+                }
+                Some(tag) => {
+                    if tag != space {
+                        return Err(ClientError::Custom(
+                            format!("Expected a space tag with value '{}', got '{}'", space, tag)
+                        ));
+                    }
+                }
+                _ => {}
+            };
+
+            let result = cli.sign_event(space, event, anchor, false)
                 .await?;
-            println!("{}", result.signature);
+            println!("{}", serde_json::to_string_pretty(&result).expect("result"));
         }
-        Commands::VerifyMessage {
-            mut space,
-            message,
-            signature,
-        } => {
-            space = normalize_space(&space);
-            let raw = hex::decode(signature)
-                .map_err(|_| ClientError::Custom("Invalid signature".to_string()))?;
-            let signature = Signature::from_slice(raw.as_slice())
-                .map_err(|_| ClientError::Custom("Invalid signature".to_string()))?;
-            cli.client
-                .verify_message(SignedMessage {
-                    space,
-                    message: spaces_protocol::Bytes::new(message.as_bytes().to_vec()),
-                    signature,
-                })
-                .await?;
-            println!("{} Message verified", "✓".color(Color::Green));
-        }
-        Commands::SignZone { zone, preserve_serial, skip_proof } => {
-            let update = encode_dns_update(&zone, preserve_serial)
+        Commands::SignZone { space, input, skip_anchor } => {
+            let update = encode_dns_update(&space, input)
                 .map_err(|e| ClientError::Custom(format!("Parse error: {}", e)))?;
+            let result = cli.sign_event(space, update, !skip_anchor, false).await?;
 
-            let signable = dns_update_signable(update.serial, &update.packet);
-            let spaceout = cli.client.get_space(&update.space).await
-                .map_err(|e| ClientError::Custom(e.to_string()))?
-                .ok_or(ClientError::Custom(format!("Space not found \"{}\"", update.space)))?;
-
-            let result = cli
-                .client
-                .wallet_sign_message(
-                    &cli.wallet,
-                    &update.space,
-                    spaces_protocol::Bytes::new(signable),
-                )
-                .await?;
-
-            let proof = match skip_proof {
-                true => None,
-                false => Some(
-                    cli.client.prove_spaceout(OutPoint {
-                        txid: spaceout.txid,
-                        vout: spaceout.spaceout.n as _,
-                    }, Some(false)).await.map_err(|e| ClientError::Custom(e.to_string()))?.proof
-                ),
-            };
-
-            let signed = SignedDnsUpdate {
-                serial: update.serial,
-                space: update.space,
-                packet: update.packet,
-                signature: result.signature,
-                proof: proof.map(|p| Base64Bytes(p)),
-            };
-
-            let out = serde_json::to_vec_pretty(&signed).unwrap();
-            let path = zone.with_extension("packet.json");
-            fs::write(&path, out).map_err(|e| ClientError::Custom(e.to_string()))?;
-            println!("{} DNS Packet signed: {} (serial: {})", "✓".color(Color::Green), path.as_path().display(), signed.serial);
+            println!("{}", serde_json::to_string_pretty(&result).expect("result"));
         }
-        Commands::RefreshPacket { packet: packet_path, prefer_recent } => {
-            let (soa_owner, mut signed) =
-                parse_packet_and_soa_owner(&packet_path)
-                    .map_err(|e| ClientError::Custom(e.to_string()))?;
+        Commands::RefreshAnchor { input, prefer_recent } => {
+            let event = read_event(input)
+                .map_err(|e| ClientError::Custom(format!("input error: {}", e.to_string())))?;
+            let space = match event.space() {
+                None => {
+                    return Err(ClientError::Custom("Not a space-anchored event (no space tag)".to_string()))
+                }
+                Some(space) => space
+            };
 
-            if soa_owner != signed.space {
-                return Err(
-                    ClientError::Custom(
-                        format!("Invalid packet space name \"{}\" != \"{}\" SOA owner", signed.space, soa_owner)
-                    )
-                );
-            }
+            let mut event = cli.client.verify_event(&space, event)
+                .await.map_err(|e| ClientError::Custom(e.to_string()))?;
+            event.proof = None;
+            event = cli.add_anchor(event, prefer_recent).await?;
 
-            let signable = dns_update_signable(signed.serial, &signed.packet);
-            cli.client
-                .verify_message(SignedMessage {
-                    space: soa_owner.clone(),
-                    message: spaces_protocol::Bytes::new(signable),
-                    signature: signed.signature,
-                })
-                .await?;
+            println!("{}", serde_json::to_string_pretty(&event).expect("result"));
+        }
+        Commands::VerifyEvent { space, input } => {
+            let event = read_event(input)
+                .map_err(|e| ClientError::Custom(format!("input error: {}", e.to_string())))?;
+            let event = cli.client.verify_event(&space, event)
+                .await.map_err(|e| ClientError::Custom(e.to_string()))?;
 
-            let spaceout = cli.client.get_space(&soa_owner).await
-                .map_err(|e| ClientError::Custom(e.to_string()))?
-                .ok_or(ClientError::Custom(format!("Space not found \"{}\"", soa_owner)))?;
-
-            let raw_subtree = cli.client.prove_spaceout(OutPoint {
-                txid: spaceout.txid,
-                vout: spaceout.spaceout.n as _,
-            }, Some(prefer_recent)).await.map_err(|e| ClientError::Custom(e.to_string()))?.proof;
-            signed.proof = Some(Base64Bytes(raw_subtree));
-
-            let out = serde_json::to_vec_pretty(&signed).unwrap();
-            fs::write(&packet_path, out).map_err(|e| ClientError::Custom(e.to_string()))?;
-            println!("{} Refreshed packet: {}", "✓".color(Color::Green), packet_path.as_path().display());
+            println!("{}", serde_json::to_string_pretty(&event).expect("result"));
         }
     }
 
@@ -896,117 +868,57 @@ fn default_spaced_rpc_url(chain: &ExtendedNetwork) -> String {
     format!("http://127.0.0.1:{}", default_spaces_rpc_port(chain))
 }
 
-fn generate_dns_zone_serial() -> u32 {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("Clock may have gone backwards")
-        .as_secs();
+fn encode_dns_update(space: &str, zone_file: Option<PathBuf>) -> anyhow::Result<NostrEvent> {
+    // domain crate panics if zone doesn't end in a new line
+    let zone = get_input(zone_file)? + "\n";
 
-    now as u32
-}
-
-fn dns_update_signable(serial: u32, packet: &Vec<u8>) -> Vec<u8> {
-    let mut signable = Vec::new();
-
-    // Write sequence as compact int
-    VarInt::from(serial)
-        .consensus_encode(&mut signable)
-        .expect("encoded varint");
-
-    // Write the packet length
-    VarInt::from(packet.as_slice().len())
-        .consensus_encode(&mut signable)
-        .expect("encoded varint");
-    // Write the DNS update packet
-    signable.append_slice(packet.as_slice()).expect("buffer");
-    signable
-}
-fn parse_packet_and_soa_owner(packet_file: &Path) -> anyhow::Result<(String, SignedDnsUpdate)> {
-    let file = fs::read_to_string(packet_file)?;
-    let packet: SignedDnsUpdate = serde_json::from_str(&file)?;
-    let message = domain::base::Message::from_octets(&packet.packet)?;
-
-    let mut space = None;
-    for record in message.authority()? {
-        let record = record?;
-        if let Ok(Some(record)) = record
-            .into_record::<ZoneRecordData<_, ParsedName<_>>>()
-        {
-            match record.data() {
-                ZoneRecordData::Soa(_) => space = Some(record.owner().to_string()),
-                _ => continue,
-            }
-        }
-    }
-
-    let space = space.ok_or(anyhow!("Space name not found in packet"))?;
-    Ok((space, packet))
-}
-
-fn encode_dns_update(zone_file: &Path, preserve_serial: bool) -> anyhow::Result<DnsUpdate> {
     let mut builder = MessageBuilder::from_target(
         TreeCompressor::new(
             Vec::new()
         )
     )?.authority();
 
-    let mut space = None;
     builder.header_mut().set_opcode(Opcode::UPDATE);
 
-    let mut reader =
-        Zonefile::load(&mut File::open(&zone_file)?)?;
+    let mut cursor = Cursor::new(zone);
+    let mut reader = Zonefile::load(&mut cursor)?;
 
-    let mut serial = 0;
     while let Some(entry) = reader.next_entry()
         .or_else(|e| Err(anyhow!("Error reading zone entry: {}", e)))? {
         if let Entry::Record(record) = &entry {
-            match record.data() {
-                ScannedRecordData::Soa(data) => {
-                    if space.is_some() {
-                        return Err(anyhow!("Multiple SOA records"));
-                    }
-
-                    space = Some(record.owner().clone().to_string());
-                    serial = match preserve_serial {
-                        true => data.serial().into_int(),
-                        false => generate_dns_zone_serial(),
-                    };
-
-                    let record_serial = Serial::from(serial);
-                    let record =
-                        Record::new(
-                            record.owner().try_to_name::<Vec<u8>>()?,
-                            record.class(),
-                            record.ttl(),
-                            ZoneRecordData::<Vec<u8>, Name<Vec<u8>>>::Soa(
-                                Soa::new(
-                                    data.mname().try_to_name()?,
-                                    data.rname().try_to_name()?,
-                                    record_serial,
-                                    data.refresh(),
-                                    data.retry(),
-                                    data.expire(),
-                                    data.minimum(),
-                                )),
-                        );
-
-                    builder.push(record)?;
-                }
-                _ => {
-                    builder.push(record)?;
-                }
-            };
+            builder.push(record)?;
         }
     }
 
-    if space.is_none() {
-        return Err(anyhow!("SOA record is required"));
-    }
-
     let msg = builder.finish();
-    Ok(DnsUpdate {
-        space: space.unwrap(),
-        serial,
-        packet: msg.into_target(),
+    Ok(
+        NostrEvent::new(
+            871_222,
+            &base64::prelude::BASE64_STANDARD.encode(msg.as_slice()),
+            vec![
+                NostrTag(vec!["space".to_string(), space.to_string()])
+            ])
+    )
+}
+
+fn read_event(file: Option<PathBuf>) -> anyhow::Result<NostrEvent> {
+    let content = get_input(file)?;
+    let event: NostrEvent = serde_json::from_str(&content)?;
+    Ok(event)
+}
+
+// Helper to handle file or stdin input
+fn get_input(input: Option<PathBuf>) -> anyhow::Result<String> {
+    Ok(match input {
+        Some(file) => fs::read_to_string(file)?,
+        None => {
+            let input = io::stdin();
+            match input.is_terminal() {
+                true => return Err(anyhow!("no input provided: specify file path or stdin")),
+                false => input
+                    .lines()
+                    .collect::<Result<String, _>>()?
+            }
+        }
     })
 }

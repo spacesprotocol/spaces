@@ -19,8 +19,6 @@ use bincode::config;
 use bitcoin::{
     absolute::{Height, LockTime},
     bip32::ChildNumber,
-    consensus::Encodable,
-    hashes::{sha256d, Hash, HashEngine},
     key::{rand::RngCore, TapTweak, TweakedKeypair},
     psbt,
     psbt::raw::ProprietaryKey,
@@ -30,7 +28,7 @@ use bitcoin::{
     taproot::LeafVersion,
     transaction::Version,
     Amount, Block, BlockHash, FeeRate, Network, OutPoint, Psbt, Sequence, TapLeafHash,
-    TapSighashType, Transaction, TxIn, TxOut, Txid, VarInt, Weight, Witness,
+    TapSighashType, Transaction, TxIn, TxOut, Txid, Weight, Witness,
 };
 use secp256k1::{schnorr, schnorr::Signature, Message};
 use serde::{ser::SerializeSeq, Deserialize, Deserializer, Serialize, Serializer};
@@ -57,6 +55,7 @@ use crate::{
     },
     tx_event::{TxEvent, TxEventKind, TxRecord},
 };
+use crate::nostr::NostrEvent;
 
 pub extern crate bdk_wallet;
 pub extern crate bitcoin;
@@ -67,6 +66,7 @@ pub mod builder;
 pub mod export;
 mod rusqlite_impl;
 pub mod tx_event;
+pub mod nostr;
 
 pub const SPACES_SIGNED_MSG_PREFIX: &[u8] = b"\x17Spaces Signed Message:\n";
 
@@ -387,12 +387,16 @@ impl SpacesWallet {
         TxEvent::get_latest_events(&db_tx).context("could not read latest events")
     }
 
-    pub fn sign_message<H: KeyHasher>(
+    pub fn sign_event<H: KeyHasher>(
         &mut self,
         src: &mut impl DataSource,
         space: &str,
-        msg: impl AsRef<[u8]>,
-    ) -> anyhow::Result<Signature> {
+        mut event: NostrEvent,
+    ) -> anyhow::Result<NostrEvent> {
+        if event.space().is_some_and(|s| s != space) {
+            return Err(anyhow::anyhow!("Space tag does not match specified space"))
+        }
+
         let label = SLabel::from_str(space)?;
         let space_key = SpaceKey::from(H::hash(label.as_ref()));
         let outpoint = match src.get_space_outpoint(&space_key)? {
@@ -408,19 +412,20 @@ impl SpacesWallet {
             .get_taproot_keypair(utxo.keychain, utxo.derivation_index)
             .context("Could not derive taproot keypair to sign message")?;
 
-        let msg_hash = signed_msg_hash(msg);
-        let msg_to_sign = secp256k1::Message::from_digest(msg_hash.to_byte_array());
-        let ctx = secp256k1::Secp256k1::new();
-        Ok(ctx.sign_schnorr(&msg_to_sign, &keypair.to_inner()))
+        event.sign(secp256k1::Secp256k1::new(), &keypair.to_inner())?;
+        Ok(event)
     }
 
-    pub fn verify_message<H: KeyHasher>(
+    pub fn verify_event<H: KeyHasher>(
         src: &mut impl DataSource,
         space: &str,
-        msg: impl AsRef<[u8]>,
-        signature: &Signature,
-    ) -> anyhow::Result<()> {
-        let label = SLabel::from_str(space)?;
+        mut event: NostrEvent,
+    ) -> anyhow::Result<NostrEvent> {
+        if event.space().is_some_and(|s| s != space) {
+            return Err(anyhow::anyhow!("Space tag does not match specified space"))
+        }
+
+        let label = SLabel::from_str(&space)?;
         let space_key = SpaceKey::from(H::hash(label.as_ref()));
         let outpoint = match src.get_space_outpoint(&space_key)? {
             None => return Err(anyhow::anyhow!("Space not found")),
@@ -438,14 +443,22 @@ impl SpacesWallet {
         if script_bytes.len() != secp256k1::constants::SCHNORR_PUBLIC_KEY_SIZE + 2 {
             return Err(anyhow::anyhow!("Expected a schnorr public key"));
         }
-
         let pubkey = XOnlyPublicKey::from_slice(&script_bytes[2..])?;
-        let ctx = secp256k1::Secp256k1::new();
-        let msg_hash = signed_msg_hash(msg);
-        let msg_to_sign = Message::from_digest(msg_hash.to_byte_array());
 
-        ctx.verify_schnorr(signature, &msg_to_sign, &pubkey)?;
-        Ok(())
+        match event.pubkey {
+            None => {
+                event.pubkey = Some(pubkey);
+            }
+            Some(actual) => {
+                if actual != pubkey {
+                    return Err(anyhow::anyhow!("Event pubkey doesn't match space pubkey"));
+                }
+            }
+        }
+
+        let ctx = secp256k1::Secp256k1::new();
+        event.verify(ctx);
+        Ok(event)
     }
 
     pub fn list_unspent_with_details(
@@ -1384,15 +1397,4 @@ impl<'de> Deserialize<'de> for SpaceScriptSigningInfo {
 
         deserializer.deserialize_seq(OpenSigningInfoVisitor)
     }
-}
-
-pub fn signed_msg_hash(msg: impl AsRef<[u8]>) -> sha256d::Hash {
-    let msg_bytes = msg.as_ref();
-    let mut engine = sha256d::Hash::engine();
-    engine.input(SPACES_SIGNED_MSG_PREFIX);
-    VarInt::from(msg_bytes.len())
-        .consensus_encode(&mut engine)
-        .expect("varint serialization");
-    engine.input(msg_bytes);
-    sha256d::Hash::from_engine(engine)
 }

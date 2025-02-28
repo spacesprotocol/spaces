@@ -5,14 +5,13 @@ mod wasm_api {
     use wasm_bindgen::prelude::*;
     use alloc::vec::Vec;
     use core::str::FromStr;
-    use spacedb::{self, NodeHasher, Sha256Hasher};
 
     use crate::{Veritas as VeritasNative, Proof as ProofNative, Value as ValueNative, Error};
     use spaces_protocol::{
         Covenant as NativeCovenant, slabel::SLabel as NativeSLabel, Space as NativeSpace,
         SpaceOut as NativeSpaceOut,
     };
-    use spaces_protocol::hasher::SpaceKey;
+    use spaces_protocol::bitcoin::hashes::{sha256, Hash, HashEngine};
 
     #[wasm_bindgen]
     pub struct Veritas {
@@ -75,13 +74,7 @@ mod wasm_api {
 
         #[wasm_bindgen(js_name = "toBytes")]
         pub fn to_bytes(&self) -> Vec<u8> {
-           self.inner.as_ref().to_vec()
-        }
-
-        #[wasm_bindgen(js_name = "computeHash")]
-        pub fn compute_hash(&self) -> Vec<u8> {
-            let hash = Sha256Hasher::hash(self.inner.as_ref());
-            SpaceKey::from(hash).as_slice().to_vec()
+            self.inner.as_ref().to_vec()
         }
     }
 
@@ -253,12 +246,17 @@ mod wasm_api {
                 .map_err(|e| error_to_jsvalue(e))
         }
 
-        /// Verifies a message.
-        #[wasm_bindgen(js_name = "verifyMessage")]
-        pub fn verify_message(&self, utxo: &SpaceOut, msg: &[u8], signature: &[u8]) -> Result<(), JsValue> {
-            self.inner
-                .verify_message(&utxo.inner, msg, signature)
-                .map_err(|e| error_to_jsvalue(e))
+        #[wasm_bindgen(js_name = "verifySchnorr")]
+        pub fn verify_schnorr(&self, pubkey: &[u8], digest: &[u8], signature: &[u8]) -> bool {
+            self.inner.verify_schnorr(pubkey, digest, signature)
+        }
+
+        #[wasm_bindgen(js_name = "sha256")]
+        pub fn sha256(data: &[u8]) -> Result<Vec<u8>, JsValue> {
+            let mut engine = sha256::Hash::engine();
+            engine.input(data);
+            let h = sha256::Hash::from_engine(engine);
+            Ok(h.to_byte_array().to_vec())
         }
     }
 
@@ -280,13 +278,12 @@ mod wasm_api {
         }
 
         #[wasm_bindgen(js_name = "findSpace")]
-        pub fn find_space(&self, space_key: &[u8]) -> Result<Option<SpaceOut>, JsValue> {
-            let hash = read_hash(space_key)?;
+        pub fn find_space(&self, space: &SLabel) -> Result<Option<SpaceOut>, JsValue> {
             Ok(
                 self.inner.
-                    find_space(&hash)
+                    find_space(&space.inner)
                     .map_err(|e| error_to_jsvalue(e))?
-                    .map(|out| SpaceOut { inner: out})
+                    .map(|out| SpaceOut { inner: out })
             )
         }
 
@@ -321,7 +318,7 @@ mod wasm_api {
         }
     }
 
-    fn read_hash(hash: &[u8]) -> Result<[u8;32], JsValue> {
+    fn read_hash(hash: &[u8]) -> Result<[u8; 32], JsValue> {
         if hash.len() != 32 {
             return Err(JsValue::from_str("hash must be 32 bytes"));
         }

@@ -7,14 +7,12 @@ extern crate alloc;
 use alloc::vec::Vec;
 use alloc::collections::BTreeSet;
 use bincode::{config};
-use spacedb::{encode::SubTreeEncoder, subtree::{SubTree, SubtreeIter}, Hash, NodeHasher, Sha256Hasher, VerifyError};
+use spacedb::{encode::SubTreeEncoder, subtree::{SubTree, SubtreeIter}, Hash, Sha256Hasher, VerifyError};
 use spaces_protocol::{hasher, hasher::{OutpointKey, SpaceKey}, SpaceOut};
-use spaces_protocol::bitcoin::hashes::{sha256d, Hash as BitcoinHash, HashEngine};
 use spaces_protocol::bitcoin::key::Secp256k1;
-use spaces_protocol::bitcoin::{secp256k1, OutPoint, VarInt, XOnlyPublicKey};
-use spaces_protocol::bitcoin::consensus::Encodable;
+use spaces_protocol::bitcoin::{secp256k1, OutPoint, XOnlyPublicKey};
 use spaces_protocol::bitcoin::secp256k1::{VerifyOnly};
-
+use spaces_protocol::slabel::SLabel;
 
 pub struct Veritas {
     anchors: BTreeSet<hasher::Hash>,
@@ -80,13 +78,23 @@ impl Veritas {
         })
     }
 
-    pub fn verify_message(&self, utxo: &SpaceOut, msg: impl AsRef<[u8]>, sig: &[u8]) -> Result<(), Error> {
-        let sig = secp256k1::schnorr::Signature::from_slice(sig).map_err(|_| Error::InvalidSignature)?;
-        let pubkey = utxo.public_key().ok_or(Error::UnsupportedScriptPubKey)?;
-        let msg_hash = signed_msg_hash(msg.as_ref());
-        let msg = secp256k1::Message::from_digest(msg_hash.to_byte_array());
-        self.ctx.verify_schnorr(&sig, &msg, &pubkey).map_err(|_| Error::SignatureVerificationFailed)?;
-        Ok(())
+    pub fn verify_schnorr(&self, pubkey: &[u8], digest: &[u8], sig: &[u8]) -> bool {
+        if digest.len() != 32 {
+            return false;
+        }
+        let sig = match secp256k1::schnorr::Signature::from_slice(sig) {
+            Err(_) => return false,
+            Ok(sig) => sig,
+        };
+        let pubkey = match XOnlyPublicKey::from_slice(pubkey) {
+            Err(_) => return false,
+            Ok(pubkey) => pubkey,
+        };
+
+        let mut msg_digest = [0u8; 32];
+        msg_digest.copy_from_slice(digest.as_ref());
+        let msg_digest = secp256k1::Message::from_digest(msg_digest);
+        self.ctx.verify_schnorr(&sig, &msg_digest, &pubkey).map(|_| true).unwrap_or(false)
     }
 }
 
@@ -116,20 +124,13 @@ impl Proof {
         Ok(Some(utxo))
     }
 
-    /// Retrieves a UTXO leaf containing a space that matches the given key
-    /// within the subtree
-    ///
-    /// Subtree stores Outpoint -> UTXO
-    /// so this is an O(n) lookup
-    pub fn find_space(&self, space_key: &Hash) -> Result<Option<SpaceOut>, Error> {
+    /// Retrieves a UTXO leaf containing the specified space
+    pub fn find_space(&self, space: &SLabel) -> Result<Option<SpaceOut>, Error> {
         for (_, v) in self.iter() {
             match v {
                 Value::UTXO(utxo) => {
-                    match space_key_from_utxo(&utxo) {
-                        Some(key) if &key == space_key => {
-                            return Ok(Some(utxo))
-                        }
-                        _ => {}
+                    if utxo.space.as_ref().is_some_and(|s| s.name.as_ref() == space.as_ref()) {
+                        return Ok(Some(utxo))
                     }
                 }
                 _ => continue,
@@ -137,23 +138,6 @@ impl Proof {
         }
         Ok(None)
     }
-}
-
-fn space_key_from_utxo(utxo: &SpaceOut) -> Option<Hash> {
-    let space = utxo.space.as_ref()?;
-    let hash = Sha256Hasher::hash(space.name.as_ref());
-    Some(SpaceKey::from(hash).into())
-}
-
-fn signed_msg_hash(msg: impl AsRef<[u8]>) -> sha256d::Hash {
-    let msg_bytes = msg.as_ref();
-    let mut engine = sha256d::Hash::engine();
-    engine.input(spaces_protocol::constants::SPACES_SIGNED_MSG_PREFIX);
-    VarInt::from(msg_bytes.len())
-        .consensus_encode(&mut engine)
-        .expect("varint serialization");
-    engine.input(msg_bytes);
-    sha256d::Hash::from_engine(engine)
 }
 
 impl From<spacedb::Error> for Error {

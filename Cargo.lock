@@ -2453,7 +2453,7 @@ dependencies = [
 
 [[package]]
 name = "spaces_veritas"
-version = "0.0.1"
+version = "0.0.6"
 dependencies = [
  "base64 0.22.1",
  "bincode",

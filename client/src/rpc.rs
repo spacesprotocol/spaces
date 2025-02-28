@@ -21,7 +21,6 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use spacedb::{encode::SubTreeEncoder, tx::ProofType};
 use spaces_protocol::{bitcoin, bitcoin::{
     bip32::Xpriv,
-    secp256k1,
     Network::{Regtest, Testnet},
     OutPoint,
 }, constants::ChainAnchor, hasher::{BaseHash, KeyHasher, OutpointKey, SpaceKey}, prepare::DataSource, slabel::SLabel, validate::TxChangeSet, Bytes, Covenant, FullSpaceOut, SpaceOut};
@@ -35,7 +34,7 @@ use tokio::{
     sync::{broadcast, mpsc, oneshot, RwLock},
     task::JoinSet,
 };
-
+use spaces_wallet::nostr::NostrEvent;
 use crate::{
     checker::TxChecker,
     client::{BlockMeta, TxEntry},
@@ -55,13 +54,6 @@ pub(crate) type Responder<T> = oneshot::Sender<T>;
 pub struct ServerInfo {
     pub chain: ExtendedNetwork,
     pub tip: ChainAnchor,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SignedMessage {
-    pub space: String,
-    pub message: Bytes,
-    pub signature: secp256k1::schnorr::Signature,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -114,9 +106,10 @@ pub enum ChainStateCommand {
         listing: Listing,
         resp: Responder<anyhow::Result<()>>,
     },
-    VerifyMessage {
-        msg: SignedMessage,
-        resp: Responder<anyhow::Result<()>>,
+    VerifyEvent {
+        space: String,
+        event: NostrEvent,
+        resp: Responder<anyhow::Result<NostrEvent>>,
     },
     ProveSpaceout {
         outpoint: OutPoint,
@@ -184,16 +177,16 @@ pub trait Rpc {
     #[method(name = "walletimport")]
     async fn wallet_import(&self, wallet: WalletExport) -> Result<(), ErrorObjectOwned>;
 
-    #[method(name = "verifymessage")]
-    async fn verify_message(&self, msg: SignedMessage) -> Result<(), ErrorObjectOwned>;
+    #[method(name = "verifyevent")]
+    async fn verify_event(&self, space: &str, event: NostrEvent) -> Result<NostrEvent, ErrorObjectOwned>;
 
-    #[method(name = "walletsignmessage")]
-    async fn wallet_sign_message(
+    #[method(name = "walletsignevent")]
+    async fn wallet_sign_event(
         &self,
         wallet: &str,
         space: &str,
-        msg: Bytes,
-    ) -> Result<SignedMessage, ErrorObjectOwned>;
+        event: NostrEvent,
+    ) -> Result<NostrEvent, ErrorObjectOwned>;
 
     #[method(name = "walletgetinfo")]
     async fn wallet_get_info(&self, name: &str) -> Result<WalletInfo, ErrorObjectOwned>;
@@ -818,22 +811,22 @@ impl RpcServer for RpcServerImpl {
             })
     }
 
-    async fn verify_message(&self, msg: SignedMessage) -> Result<(), ErrorObjectOwned> {
+    async fn verify_event(&self, space: &str, event: NostrEvent) -> Result<NostrEvent, ErrorObjectOwned> {
         self.store
-            .verify_message(msg)
+            .verify_event(space, event)
             .await
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
     }
 
-    async fn wallet_sign_message(
+    async fn wallet_sign_event(
         &self,
         wallet: &str,
         space: &str,
-        msg: Bytes,
-    ) -> Result<SignedMessage, ErrorObjectOwned> {
+        event: NostrEvent,
+    ) -> Result<NostrEvent, ErrorObjectOwned> {
         self.wallet(&wallet)
             .await?
-            .send_sign_message(space, msg)
+            .send_sign_event(space, event)
             .await
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
     }
@@ -1166,15 +1159,13 @@ impl AsyncChainState {
                     SpacesWallet::verify_listing::<Sha256>(chain_state, &listing).map(|_| ()),
                 );
             }
-            ChainStateCommand::VerifyMessage { msg, resp } => {
+            ChainStateCommand::VerifyEvent { space, event, resp } => {
                 _ = resp.send(
-                    SpacesWallet::verify_message::<Sha256>(
+                    SpacesWallet::verify_event::<Sha256>(
                         chain_state,
-                        &msg.space,
-                        msg.message.as_slice(),
-                        &msg.signature,
-                    )
-                        .map(|_| ()),
+                        &space,
+                        event,
+                    ),
                 );
             }
             ChainStateCommand::ProveSpaceout { prefer_recent, outpoint, resp } => {
@@ -1341,10 +1332,10 @@ impl AsyncChainState {
         resp_rx.await?
     }
 
-    pub async fn verify_message(&self, msg: SignedMessage) -> anyhow::Result<()> {
+    pub async fn verify_event(&self, space:&str, event: NostrEvent) -> anyhow::Result<NostrEvent> {
         let (resp, resp_rx) = oneshot::channel();
         self.sender
-            .send(ChainStateCommand::VerifyMessage { msg, resp })
+            .send(ChainStateCommand::VerifyEvent { space: space.to_string(), event, resp })
             .await?;
         resp_rx.await?
     }

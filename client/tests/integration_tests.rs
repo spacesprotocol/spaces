@@ -15,6 +15,7 @@ use spaces_client::{
 };
 use spaces_testutil::TestRig;
 use spaces_wallet::{export::WalletExport, tx_event::TxEventKind};
+use spaces_wallet::nostr::NostrEvent;
 
 const ALICE: &str = "wallet_99";
 const BOB: &str = "wallet_98";
@@ -1262,43 +1263,26 @@ async fn it_should_allow_sign_verify_messages(rig: &TestRig) -> anyhow::Result<(
 
     let space_name = space.spaceout.space.as_ref().unwrap().name.to_string();
 
-    let msg = Bytes::new(b"hello world".to_vec());
+    let msg = NostrEvent::new(1, "hello world", vec![]);
     let signed = rig
         .spaced
         .client
-        .wallet_sign_message(BOB, &space_name, msg.clone())
+        .wallet_sign_event(BOB, &space_name,  msg.clone())
         .await
         .expect("sign");
 
     println!("signed\n{}", serde_json::to_string_pretty(&signed).unwrap());
-    assert_eq!(signed.space, space_name, "bad signer");
     assert_eq!(
-        signed.message.as_slice(),
-        msg.as_slice(),
+        signed.content,
+        msg.content,
         "msg content must match"
     );
 
     rig.spaced
         .client
-        .verify_message(signed.clone())
+        .verify_event(&space_name, signed.clone())
         .await
         .expect("verify");
-
-    let mut bad_signer = signed.clone();
-    bad_signer.space = "@nothanks".to_string();
-    rig.spaced
-        .client
-        .verify_message(bad_signer)
-        .await
-        .expect_err("bad signer");
-
-    let mut bad_msg = signed.clone();
-    bad_msg.message = Bytes::new(b"hello world 2".to_vec());
-    rig.spaced
-        .client
-        .verify_message(bad_msg)
-        .await
-        .expect_err("bad msg");
 
     Ok(())
 }

@@ -32,12 +32,12 @@ use tokio::{
     sync::{broadcast, mpsc, mpsc::Receiver, oneshot},
     time::Instant,
 };
-
+use spaces_wallet::nostr::NostrEvent;
 use crate::{
     checker::TxChecker,
     client::BlockSource,
     config::ExtendedNetwork,
-    rpc::{RpcWalletRequest, RpcWalletTxBuilder, SignedMessage, WalletLoadRequest},
+    rpc::{RpcWalletRequest, RpcWalletTxBuilder, WalletLoadRequest},
     source::{
         BitcoinBlockSource, BitcoinRpc, BitcoinRpcError, BlockEvent, BlockFetchError, BlockFetcher,
     },
@@ -159,10 +159,10 @@ pub enum WalletCommand {
         resp: crate::rpc::Responder<anyhow::Result<Balance>>,
     },
     UnloadWallet,
-    SignMessage {
+    SignEvent {
         space: String,
-        msg: spaces_protocol::Bytes,
-        resp: crate::rpc::Responder<anyhow::Result<SignedMessage>>,
+        event: NostrEvent,
+        resp: crate::rpc::Responder<anyhow::Result<NostrEvent>>,
     },
 }
 
@@ -448,19 +448,8 @@ impl RpcWallet {
             WalletCommand::Sell { space, price, resp } => {
                 _ = resp.send(wallet.sell::<Sha256>(state, &space, Amount::from_sat(price)));
             }
-            WalletCommand::SignMessage { space, msg, resp } => {
-                match wallet.sign_message::<Sha256>(state, &space, msg.as_slice()) {
-                    Ok(signature) => {
-                        _ = resp.send(Ok(SignedMessage {
-                            space,
-                            message: msg,
-                            signature,
-                        }));
-                    }
-                    Err(err) => {
-                        _ = resp.send(Err(err));
-                    }
-                }
+            WalletCommand::SignEvent { space, event, resp } => {
+                _ = resp.send(wallet.sign_event::<Sha256>(state, &space, event));
             }
         }
         Ok(())
@@ -1284,16 +1273,16 @@ impl RpcWallet {
         resp_rx.await?
     }
 
-    pub async fn send_sign_message(
+    pub async fn send_sign_event(
         &self,
         space: &str,
-        msg: spaces_protocol::Bytes,
-    ) -> anyhow::Result<SignedMessage> {
+        event: NostrEvent,
+    ) -> anyhow::Result<NostrEvent> {
         let (resp, resp_rx) = oneshot::channel();
         self.sender
-            .send(WalletCommand::SignMessage {
+            .send(WalletCommand::SignEvent {
                 space: space.to_string(),
-                msg,
+                event,
                 resp,
             })
             .await?;
