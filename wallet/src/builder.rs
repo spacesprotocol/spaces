@@ -21,17 +21,17 @@ use bitcoin::{
     Amount, FeeRate, Network, OutPoint, Psbt, Script, ScriptBuf, Sequence, Transaction, TxOut,
     Txid, Weight, Witness,
 };
-use protocol::{
+use spaces_protocol::{
     bitcoin::absolute::Height,
     constants::{BID_PSBT_INPUT_SEQUENCE, BID_PSBT_TX_VERSION},
     script::SpaceScript,
     Covenant, FullSpaceOut, Space,
 };
+
 use crate::{
-    address::SpaceAddress,
-    DoubleUtxo, FullTxOut, SpaceScriptSigningInfo, SpacesWallet,
+    address::SpaceAddress, tx_event::TxRecord, DoubleUtxo, FullTxOut, SpaceScriptSigningInfo,
+    SpacesWallet,
 };
-use crate::tx_event::TxRecord;
 
 #[derive(Debug, Clone)]
 pub struct Builder {
@@ -60,7 +60,7 @@ pub struct BuilderIterator<'a> {
     force: bool,
     median_time: u64,
     confirmed_only: bool,
-    unspendables: Vec<OutPoint>
+    unspendables: Vec<OutPoint>,
 }
 
 pub enum BuilderStack {
@@ -241,7 +241,7 @@ impl<'a, Cs: CoinSelectionAlgorithm> TxBuilderSpacesUtils<'a, Cs> for TxBuilder<
             placeholder.auction.outpoint.vout as u8,
             &offer,
         )?)
-            .expect("compressed psbt script bytes");
+        .expect("compressed psbt script bytes");
 
         let carrier = ScriptBuf::new_op_return(&compressed_psbt);
 
@@ -409,8 +409,6 @@ impl Builder {
                 }
             }
 
-
-
             builder.fee_rate(fee_rate);
             let r = builder.finish().map_err(|e| match e {
                 CreateTxError::CoinSelection(e) if confirmed_only => {
@@ -484,7 +482,6 @@ impl Iterator for BuilderIterator<'_> {
                     self.fee_rate,
                     self.dust,
                     self.confirmed_only,
-
                 ) {
                     Ok(prep) => prep,
                     Err(err) => return Some(Err(err)),
@@ -527,7 +524,9 @@ impl Iterator for BuilderIterator<'_> {
                     }));
                 }
 
-                for ((signing, commitment), context) in reveals_iter.zip(commitments_iter).zip(contexts) {
+                for ((signing, commitment), context) in
+                    reveals_iter.zip(commitments_iter).zip(contexts)
+                {
                     // script applies to every space in context
                     for transfer in context.iter() {
                         detailed_tx.add_commitment(
@@ -585,11 +584,7 @@ impl Iterator for BuilderIterator<'_> {
                 if !params.sends.is_empty() {
                     // TODO: resolved address recipient
                     for send in &params.sends {
-                        detailed_tx.add_send(
-                            send.amount,
-                            None,
-                            send.recipient.script_pubkey(),
-                        );
+                        detailed_tx.add_send(send.amount, None, send.recipient.script_pubkey());
                     }
                 }
                 Some(Ok(detailed_tx))
@@ -755,7 +750,7 @@ impl Builder {
         };
 
         // Always create a few more bidouts for future transactions
-        const EXTRA_BIDOUTS : u8 = 2;
+        const EXTRA_BIDOUTS: u8 = 2;
         // check how many bid outputs we need to create
         let auction_outputs = match self.bidouts {
             None => {
@@ -950,7 +945,7 @@ impl Builder {
         network: Network,
         name: &str,
     ) -> anyhow::Result<SpaceScriptSigningInfo> {
-        let sname = protocol::slabel::SLabel::from_str(name).expect("valid space name");
+        let sname = spaces_protocol::slabel::SLabel::from_str(name).expect("valid space name");
         let nop = SpaceScript::nop_script(SpaceScript::create_open(sname));
         SpaceScriptSigningInfo::new(network, nop)
     }
@@ -1021,9 +1016,9 @@ impl CoinSelectionAlgorithm for SpacesAwareCoinSelection {
 
             weighted_utxo.utxo.txout().value > SpacesAwareCoinSelection::DUST_THRESHOLD
                 && !self
-                .exclude_outputs
-                .iter()
-                .any(|o| o == &weighted_utxo.utxo.outpoint())
+                    .exclude_outputs
+                    .iter()
+                    .any(|o| o == &weighted_utxo.utxo.outpoint())
         });
 
         let mut result = self.default_algorithm.coin_select(

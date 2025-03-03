@@ -1,31 +1,34 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
+    fs,
     fs::OpenOptions,
     io,
     io::ErrorKind,
     mem,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, RwLock},
 };
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use bincode::{config, Decode, Encode};
 use jsonrpsee::core::Serialize;
-use protocol::{
-    bitcoin::OutPoint,
+use serde::Deserialize;
+use spacedb::{
+    db::{Database, SnapshotIterator},
+    fs::FileBackend,
+    subtree::SubTree,
+    tx::{KeyIterator, ProofType, ReadTransaction, WriteTransaction},
+    Configuration, Hash, NodeHasher, Sha256Hasher,
+};
+use spaces_protocol::{
+    bitcoin::{BlockHash, OutPoint},
     constants::{ChainAnchor, ROLLOUT_BATCH_SIZE},
     hasher::{BidKey, KeyHash, OutpointKey, SpaceKey},
     prepare::DataSource,
     Covenant, FullSpaceOut, SpaceOut,
 };
-use serde::Deserialize;
-use spacedb::{
-    db::{Database, SnapshotIterator},
-    fs::FileBackend,
-    tx::{KeyIterator, ReadTransaction, WriteTransaction},
-    Configuration, Hash, NodeHasher, Sha256Hasher,
-};
-use protocol::bitcoin::BlockHash;
+
+use crate::rpc::RootAnchor;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RolloutEntry {
@@ -94,6 +97,38 @@ impl Store {
         Ok(self.0.begin_write()?)
     }
 
+    pub fn update_anchors(&self, file_path: &Path, count: u32) -> Result<Vec<RootAnchor>> {
+        let previous: Vec<RootAnchor> = match fs::read(file_path) {
+            Ok(bytes) => serde_json::from_slice(&bytes)?,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
+            Err(e) => return Err(e.into()),
+        };
+        let prev_map: HashMap<(BlockHash, u32), RootAnchor> = previous
+            .into_iter()
+            .map(|anchor| ((anchor.block.hash, anchor.block.height), anchor))
+            .collect();
+
+        let mut anchors = Vec::new();
+        for snap in self.0.iter().take(count as _) {
+            let mut snap = snap?;
+            let anchor: ChainAnchor = snap.metadata().try_into()?;
+
+            if let Some(existing) = prev_map.get(&(anchor.hash, anchor.height)) {
+                anchors.push(existing.clone());
+            } else {
+                let root = snap.compute_root()?;
+                anchors.push(RootAnchor {
+                    root,
+                    block: anchor,
+                });
+            }
+        }
+
+        let updated = serde_json::to_vec_pretty(&anchors)?;
+        fs::write(file_path, updated)?;
+        Ok(anchors)
+    }
+
     pub fn begin(&self, genesis_block: &ChainAnchor) -> Result<LiveSnapshot> {
         let snapshot = self.0.begin_read()?;
         let anchor: ChainAnchor = if snapshot.metadata().len() == 0 {
@@ -157,7 +192,7 @@ pub trait ChainState {
 
     fn get_space_info(
         &mut self,
-        space_hash: &protocol::hasher::SpaceKey,
+        space_hash: &spaces_protocol::hasher::SpaceKey,
     ) -> anyhow::Result<Option<FullSpaceOut>>;
 }
 
@@ -211,7 +246,30 @@ impl LiveSnapshot {
         };
     }
 
-    pub fn inner(&mut self) -> anyhow::Result<&ReadTx> {
+    pub fn prove_with_snapshot(
+        &self,
+        keys: &[Hash],
+        snapshot_block_height: u32,
+    ) -> Result<SubTree<Sha256Hasher>> {
+        let snapshot = self.db.iter().filter_map(|s| s.ok()).find(|s| {
+            let anchor: ChainAnchor = match s.metadata().try_into() {
+                Ok(a) => a,
+                _ => return false,
+            };
+            anchor.height == snapshot_block_height
+        });
+        if let Some(mut snapshot) = snapshot {
+            return snapshot
+                .prove(keys, ProofType::Standard)
+                .or_else(|err| Err(anyhow!("Could not prove: {}", err)));
+        }
+        Err(anyhow!(
+            "Older snapshot targeting block {} could not be found",
+            snapshot_block_height
+        ))
+    }
+
+    pub fn inner(&mut self) -> anyhow::Result<&mut ReadTx> {
         {
             let rlock = self.staged.read().expect("acquire lock");
             let version = rlock.snapshot_version;
@@ -219,7 +277,7 @@ impl LiveSnapshot {
 
             self.update_snapshot(version)?;
         }
-        Ok(&self.snapshot.1)
+        Ok(&mut self.snapshot.1)
     }
 
     pub fn insert<K: KeyHash + Into<Hash>, T: Encode>(&self, key: K, value: T) {
@@ -235,8 +293,8 @@ impl LiveSnapshot {
             Some(value) => {
                 let (decoded, _): (T, _) = bincode::decode_from_slice(&value, config::standard())
                     .map_err(|e| {
-                        spacedb::Error::IO(io::Error::new(ErrorKind::Other, e.to_string()))
-                    })?;
+                    spacedb::Error::IO(io::Error::new(ErrorKind::Other, e.to_string()))
+                })?;
                 Ok(Some(decoded))
             }
             None => Ok(None),
@@ -428,24 +486,27 @@ impl DataSource for LiveSnapshot {
     fn get_space_outpoint(
         &mut self,
         space_hash: &SpaceKey,
-    ) -> protocol::errors::Result<Option<OutPoint>> {
-        let result: Option<EncodableOutpoint> = self
-            .get(*space_hash)
-            .map_err(|err| protocol::errors::Error::IO(format!("getspaceoutpoint: {}", err.to_string())))?;
+    ) -> spaces_protocol::errors::Result<Option<OutPoint>> {
+        let result: Option<EncodableOutpoint> = self.get(*space_hash).map_err(|err| {
+            spaces_protocol::errors::Error::IO(format!("getspaceoutpoint: {}", err.to_string()))
+        })?;
         Ok(result.map(|out| out.into()))
     }
 
-    fn get_spaceout(&mut self, outpoint: &OutPoint) -> protocol::errors::Result<Option<SpaceOut>> {
+    fn get_spaceout(
+        &mut self,
+        outpoint: &OutPoint,
+    ) -> spaces_protocol::errors::Result<Option<SpaceOut>> {
         let h = OutpointKey::from_outpoint::<Sha256>(*outpoint);
-        let result = self
-            .get(h)
-            .map_err(|err| protocol::errors::Error::IO(format!("getspaceout: {}", err.to_string())))?;
+        let result = self.get(h).map_err(|err| {
+            spaces_protocol::errors::Error::IO(format!("getspaceout: {}", err.to_string()))
+        })?;
         Ok(result)
     }
 }
 
-impl protocol::hasher::KeyHasher for Sha256 {
-    fn hash(data: &[u8]) -> protocol::hasher::Hash {
+impl spaces_protocol::hasher::KeyHasher for Sha256 {
+    fn hash(data: &[u8]) -> spaces_protocol::hasher::Hash {
         Sha256Hasher::hash(data)
     }
 }
@@ -503,8 +564,8 @@ impl Iterator for KeyRolloutIterator {
 
 struct MergingIterator<I1, I2>
 where
-    I1: Iterator<Item=Result<(BidKey, SpaceKey)>>,
-    I2: Iterator<Item=Result<(BidKey, SpaceKey)>>,
+    I1: Iterator<Item = Result<(BidKey, SpaceKey)>>,
+    I2: Iterator<Item = Result<(BidKey, SpaceKey)>>,
 {
     iter1: std::iter::Peekable<I1>,
     iter2: std::iter::Peekable<I2>,
@@ -512,8 +573,8 @@ where
 
 impl<I1, I2> MergingIterator<I1, I2>
 where
-    I1: Iterator<Item=Result<(BidKey, SpaceKey)>>,
-    I2: Iterator<Item=Result<(BidKey, SpaceKey)>>,
+    I1: Iterator<Item = Result<(BidKey, SpaceKey)>>,
+    I2: Iterator<Item = Result<(BidKey, SpaceKey)>>,
 {
     fn new(iter1: I1, iter2: I2) -> Self {
         MergingIterator {
@@ -525,8 +586,8 @@ where
 
 impl<I1, I2> Iterator for MergingIterator<I1, I2>
 where
-    I1: Iterator<Item=Result<(BidKey, SpaceKey)>>,
-    I2: Iterator<Item=Result<(BidKey, SpaceKey)>>,
+    I1: Iterator<Item = Result<(BidKey, SpaceKey)>>,
+    I2: Iterator<Item = Result<(BidKey, SpaceKey)>>,
 {
     type Item = Result<(BidKey, SpaceKey)>;
 

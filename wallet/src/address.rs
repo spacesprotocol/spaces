@@ -2,7 +2,7 @@ use core::{fmt, str::FromStr};
 
 use bech32::{primitives::decode::SegwitHrpstringError, Hrp};
 use bitcoin::blockdata::script::witness_version::WitnessVersion;
-use protocol::{
+use spaces_protocol::{
     bitcoin,
     bitcoin::{
         address::{Address, ParseError},

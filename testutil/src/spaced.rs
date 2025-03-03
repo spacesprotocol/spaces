@@ -7,7 +7,7 @@ use std::{
 use anyhow::Result;
 use assert_cmd::cargo::CommandCargoExt;
 use bitcoind::{anyhow, anyhow::anyhow, get_available_port, tempfile::tempdir};
-use spaced::{
+use spaces_client::{
     jsonrpsee::{
         http_client::{HttpClient, HttpClientBuilder},
         tokio,

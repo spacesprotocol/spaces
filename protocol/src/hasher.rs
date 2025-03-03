@@ -57,10 +57,15 @@ impl From<Hash> for SpaceKey {
 impl SpaceKey {
     #[inline(always)]
     pub fn from_raw(value: Hash) -> crate::errors::Result<Self> {
-        if (value[0] & 0b1000_0000) == 0 && (value[31] & 0b0000_0001) == 0 {
+        if Self::is_valid(&value) {
             return Ok(Self { 0: value });
         }
-        return Err(crate::errors::Error::IO("bad space hash".to_string()));
+        Err(crate::errors::Error::IO("bad space hash".to_string()))
+    }
+
+    #[inline(always)]
+    pub fn is_valid(value: &Hash) -> bool {
+        value[0] & 0b1000_0000 == 0 && value[31] & 0b0000_0001 == 0
     }
 
     pub fn from_slice_unchecked(slice: &[u8]) -> Self {
@@ -112,6 +117,11 @@ impl OutpointKey {
         buffer[32..].copy_from_slice(&value.vout.to_be_bytes());
         let h = H::hash(&buffer);
         h.into()
+    }
+
+    #[inline(always)]
+    pub fn is_valid(value: &Hash) -> bool {
+        value[0] & 0b1000_0000 == 0 && value[31] & 0b0000_0001 == 0b0000_0001
     }
 }
 

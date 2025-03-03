@@ -16,6 +16,8 @@ pub struct ChainAnchor {
     pub height: u32,
 }
 
+pub const SPACES_SIGNED_MSG_PREFIX: &[u8] = b"\x17Spaces Signed Message:\n";
+
 pub const RESERVED_SPACES: [&'static [u8]; 3] = [b"\x07example", b"\x04test", b"\x05local"];
 
 /// The number of blocks between each rollout of new spaces for auction.
@@ -111,7 +113,7 @@ pub mod bincode_impl {
     };
     use bitcoin::{hashes::Hash, BlockHash};
 
-    use crate::constants::ChainAnchor;
+    use crate::{alloc::borrow::ToOwned, constants::ChainAnchor};
 
     impl Encode for ChainAnchor {
         fn encode<E: Encoder>(&self, encoder: &mut E) -> Result<(), EncodeError> {

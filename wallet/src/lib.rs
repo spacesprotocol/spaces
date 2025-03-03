@@ -1,45 +1,61 @@
-use std::{
-    collections::{BTreeMap},
-    fmt::Debug,
-    fs,
-    path::PathBuf,
-};
-use std::ops::Mul;
-use std::str::FromStr;
+use std::{collections::BTreeMap, fmt::Debug, fs, ops::Mul, path::PathBuf, str::FromStr};
+
 use anyhow::{anyhow, Context};
-use bdk_wallet::{chain, chain::BlockId, coin_selection::{CoinSelectionAlgorithm, CoinSelectionResult, Excess, InsufficientFunds}, rusqlite::Connection, tx_builder::TxOrdering, AddressInfo, KeychainKind, LocalOutput, PersistedWallet, SignOptions, TxBuilder, Update, Wallet, WalletTx, WeightedUtxo};
-use bdk_wallet::chain::{ChainPosition, Indexer};
-use bdk_wallet::chain::local_chain::{CannotConnectError, LocalChain};
-use bdk_wallet::chain::tx_graph::CalculateFeeError;
-use bdk_wallet::keys::DescriptorSecretKey;
+use bdk_wallet::{
+    chain,
+    chain::{
+        local_chain::{CannotConnectError, LocalChain},
+        tx_graph::CalculateFeeError,
+        BlockId, ChainPosition, Indexer,
+    },
+    coin_selection::{CoinSelectionAlgorithm, CoinSelectionResult, Excess, InsufficientFunds},
+    keys::DescriptorSecretKey,
+    rusqlite::Connection,
+    tx_builder::TxOrdering,
+    AddressInfo, KeychainKind, LocalOutput, PersistedWallet, SignOptions, TxBuilder, Update,
+    Wallet, WalletTx, WeightedUtxo,
+};
 use bincode::config;
-use bitcoin::{absolute::{Height, LockTime}, key::rand::RngCore, psbt, psbt::raw::ProprietaryKey, script, sighash::{Prevouts, SighashCache}, taproot, taproot::LeafVersion, Amount, Block, BlockHash, FeeRate, Network, OutPoint, Psbt, Sequence, TapLeafHash, TapSighashType, Transaction, TxIn, TxOut, Txid, VarInt, Weight, Witness};
-use bitcoin::bip32::{ChildNumber};
-use bitcoin::consensus::Encodable;
-use bitcoin::hashes::{sha256d, Hash, HashEngine};
-use bitcoin::key::{TapTweak, TweakedKeypair};
-use bitcoin::transaction::Version;
-use secp256k1::{schnorr, Message};
-use secp256k1::schnorr::Signature;
-use protocol::{bitcoin::{
-    constants::genesis_block,
-    key::{rand, UntweakedKeypair},
-    opcodes,
-    taproot::{ControlBlock, TaprootBuilder},
-    Address, ScriptBuf, XOnlyPublicKey,
-}, prepare::{is_magic_lock_time, TrackableOutput}, Covenant, FullSpaceOut, Space};
+use bitcoin::{
+    absolute::{Height, LockTime},
+    bip32::ChildNumber,
+    key::{rand::RngCore, TapTweak, TweakedKeypair},
+    psbt,
+    psbt::raw::ProprietaryKey,
+    script,
+    sighash::{Prevouts, SighashCache},
+    taproot,
+    taproot::LeafVersion,
+    transaction::Version,
+    Amount, Block, BlockHash, FeeRate, Network, OutPoint, Psbt, Sequence, TapLeafHash,
+    TapSighashType, Transaction, TxIn, TxOut, Txid, Weight, Witness,
+};
+use secp256k1::{schnorr, schnorr::Signature, Message};
 use serde::{ser::SerializeSeq, Deserialize, Deserializer, Serialize, Serializer};
-use protocol::constants::{BID_PSBT_INPUT_SEQUENCE, BID_PSBT_TX_LOCK_TIME};
-use protocol::hasher::{KeyHasher, SpaceKey};
-use protocol::prepare::DataSource;
-use protocol::slabel::SLabel;
+use spaces_protocol::{
+    bitcoin::{
+        constants::genesis_block,
+        key::{rand, UntweakedKeypair},
+        opcodes,
+        taproot::{ControlBlock, TaprootBuilder},
+        Address, ScriptBuf, XOnlyPublicKey,
+    },
+    constants::{BID_PSBT_INPUT_SEQUENCE, BID_PSBT_TX_LOCK_TIME},
+    hasher::{KeyHasher, SpaceKey},
+    prepare::{is_magic_lock_time, DataSource, TrackableOutput},
+    slabel::SLabel,
+    Covenant, FullSpaceOut, Space,
+};
+
 use crate::{
     address::SpaceAddress,
-    builder::{is_connector_dust, is_space_dust, SpacesAwareCoinSelection},
-    tx_event::TxEvent,
+    builder::{
+        is_connector_dust, is_space_dust, space_dust, tap_key_spend_weight,
+        SpacesAwareCoinSelection,
+    },
+    nostr::NostrEvent,
+    tx_event::{TxEvent, TxEventKind, TxRecord},
 };
-use crate::builder::{space_dust, tap_key_spend_weight};
-use crate::tx_event::{TxEventKind, TxRecord};
 
 pub extern crate bdk_wallet;
 pub extern crate bitcoin;
@@ -48,6 +64,7 @@ extern crate core;
 pub mod address;
 pub mod builder;
 pub mod export;
+pub mod nostr;
 mod rusqlite_impl;
 pub mod tx_event;
 
@@ -171,30 +188,40 @@ impl SpacesWallet {
             Some(hash) => hash,
         };
 
-        let spaces_wallet = if let Some(wallet) =
-            Wallet::load()
-                .check_network(config.network)
-                .descriptor(KeychainKind::External, Some(config.space_descriptors.external.clone()))
-                .descriptor(KeychainKind::Internal, Some(config.space_descriptors.internal.clone()))
-                .lookahead(50)
-                .extract_keys()
-                .load_wallet(&mut conn).context("could not load wallet")? {
+        let spaces_wallet = if let Some(wallet) = Wallet::load()
+            .check_network(config.network)
+            .descriptor(
+                KeychainKind::External,
+                Some(config.space_descriptors.external.clone()),
+            )
+            .descriptor(
+                KeychainKind::Internal,
+                Some(config.space_descriptors.internal.clone()),
+            )
+            .lookahead(50)
+            .extract_keys()
+            .load_wallet(&mut conn)
+            .context("could not load wallet")?
+        {
             wallet
         } else {
             Wallet::create(
                 config.space_descriptors.external.clone(),
                 config.space_descriptors.internal.clone(),
             )
-                .lookahead(50)
-                .network(config.network)
-                .genesis_hash(genesis_hash)
-                .create_wallet(&mut conn).context("could not create wallet")?
+            .lookahead(50)
+            .network(config.network)
+            .genesis_hash(genesis_hash)
+            .create_wallet(&mut conn)
+            .context("could not create wallet")?
         };
 
-
-        let tx = conn.transaction().context("could not create wallet db transaction")?;
+        let tx = conn
+            .transaction()
+            .context("could not create wallet db transaction")?;
         Self::init_sqlite_tables(&tx).context("could not initialize wallet db tables")?;
-        tx.commit().context("could not commit wallet db transaction")?;
+        tx.commit()
+            .context("could not commit wallet db transaction")?;
 
         let wallet = Self {
             config,
@@ -243,16 +270,16 @@ impl SpacesWallet {
     pub fn insert_checkpoint(&mut self, checkpoint: BlockId) -> Result<(), CannotConnectError> {
         let mut cp = self.internal.latest_checkpoint();
         cp = cp.insert(checkpoint);
-        self.internal
-            .apply_update(Update {
-                chain: Some(cp),
-                ..Default::default()
-            })
+        self.internal.apply_update(Update {
+            chain: Some(cp),
+            ..Default::default()
+        })
     }
 
-    pub fn transactions(&self) -> impl Iterator<Item=WalletTx> + '_ {
-        self.internal.transactions().filter(|tx| !is_revert_tx(tx) &&
-            self.internal.spk_index().is_tx_relevant(&tx.tx_node))
+    pub fn transactions(&self) -> impl Iterator<Item = WalletTx> + '_ {
+        self.internal
+            .transactions()
+            .filter(|tx| !is_revert_tx(tx) && self.internal.spk_index().is_tx_relevant(&tx.tx_node))
     }
 
     pub fn sent_and_received(&self, tx: &Transaction) -> (Amount, Amount) {
@@ -263,33 +290,51 @@ impl SpacesWallet {
         self.internal.calculate_fee(tx)
     }
 
-    pub fn build_tx(&mut self, unspendables: Vec<OutPoint>, confirmed_only: bool)
-                    -> anyhow::Result<TxBuilder<SpacesAwareCoinSelection>> {
+    pub fn build_tx(
+        &mut self,
+        unspendables: Vec<OutPoint>,
+        confirmed_only: bool,
+    ) -> anyhow::Result<TxBuilder<SpacesAwareCoinSelection>> {
         self.create_builder(unspendables, None, confirmed_only)
     }
 
-    pub fn list_spaces_outpoints(&self, src: &mut impl DataSource) -> anyhow::Result<Vec<OutPoint>> {
+    pub fn list_spaces_outpoints(
+        &self,
+        src: &mut impl DataSource,
+    ) -> anyhow::Result<Vec<OutPoint>> {
         let mut outs = Vec::new();
         for unspent in self.list_unspent() {
-            if src.get_spaceout(&unspent.outpoint)?.and_then(|out| out.space).is_some() {
+            if src
+                .get_spaceout(&unspent.outpoint)?
+                .and_then(|out| out.space)
+                .is_some()
+            {
                 outs.push(unspent.outpoint);
             }
         }
         Ok(outs)
     }
 
-    pub fn build_fee_bump(&mut self, unspendables: Vec<OutPoint>, txid: Txid, fee_rate: FeeRate) -> anyhow::Result<TxBuilder<'_, SpacesAwareCoinSelection>> {
+    pub fn build_fee_bump(
+        &mut self,
+        unspendables: Vec<OutPoint>,
+        txid: Txid,
+        fee_rate: FeeRate,
+    ) -> anyhow::Result<TxBuilder<'_, SpacesAwareCoinSelection>> {
         let events = self.get_tx_events(txid)?;
         for event in events {
             match event.kind {
-                TxEventKind::Bid => {
-                    match self.get_tx(txid) {
-                        Some(tx) => if !tx.chain_position.is_confirmed() {
-                            return Err(anyhow!("Bid with a higher fee on `{}` to replace this tx", event.space.expect("space")))
+                TxEventKind::Bid => match self.get_tx(txid) {
+                    Some(tx) => {
+                        if !tx.chain_position.is_confirmed() {
+                            return Err(anyhow!(
+                                "Bid with a higher fee on `{}` to replace this tx",
+                                event.space.expect("space")
+                            ));
                         }
-                        _ => continue,
                     }
-                }
+                    _ => continue,
+                },
                 _ => {}
             }
         }
@@ -303,24 +348,20 @@ impl SpacesWallet {
         replace: Option<(Txid, FeeRate)>,
         confirmed_only: bool,
     ) -> anyhow::Result<TxBuilder<'_, SpacesAwareCoinSelection>> {
-        let selection = SpacesAwareCoinSelection::new(
-            unspendables, confirmed_only,
-        );
+        let selection = SpacesAwareCoinSelection::new(unspendables, confirmed_only);
 
         let mut builder = match replace {
-            None => {
-                self.internal.build_tx().coin_selection(selection)
-            }
+            None => self.internal.build_tx().coin_selection(selection),
             Some((txid, fee_rate)) => {
                 let previous_tx_lock_time = match self.get_tx(txid) {
                     None => return Err(anyhow::anyhow!("No wallet tx {} found", txid)),
                     Some(tx) => tx.tx_node.lock_time,
                 };
-                let mut builder = self.internal.build_fee_bump(txid)?
+                let mut builder = self
+                    .internal
+                    .build_fee_bump(txid)?
                     .coin_selection(selection);
-                builder
-                    .nlocktime(previous_tx_lock_time)
-                    .fee_rate(fee_rate);
+                builder.nlocktime(previous_tx_lock_time).fee_rate(fee_rate);
                 builder
             }
         };
@@ -333,11 +374,11 @@ impl SpacesWallet {
         self.internal.is_mine(script)
     }
 
-    pub fn list_unspent(&self) -> impl Iterator<Item=LocalOutput> + '_ {
+    pub fn list_unspent(&self) -> impl Iterator<Item = LocalOutput> + '_ {
         self.internal.list_unspent()
     }
 
-    pub fn list_output(&self) -> impl Iterator<Item=LocalOutput> + '_ {
+    pub fn list_output(&self) -> impl Iterator<Item = LocalOutput> + '_ {
         self.internal.list_output()
     }
 
@@ -346,7 +387,16 @@ impl SpacesWallet {
         TxEvent::get_latest_events(&db_tx).context("could not read latest events")
     }
 
-    pub fn sign_message<H: KeyHasher>(&mut self, src: &mut impl DataSource, space: &str, msg: impl AsRef<[u8]>) -> anyhow::Result<Signature> {
+    pub fn sign_event<H: KeyHasher>(
+        &mut self,
+        src: &mut impl DataSource,
+        space: &str,
+        mut event: NostrEvent,
+    ) -> anyhow::Result<NostrEvent> {
+        if event.space().is_some_and(|s| s != space) {
+            return Err(anyhow::anyhow!("Space tag does not match specified space"));
+        }
+
         let label = SLabel::from_str(space)?;
         let space_key = SpaceKey::from(H::hash(label.as_ref()));
         let outpoint = match src.get_space_outpoint(&space_key)? {
@@ -358,22 +408,24 @@ impl SpacesWallet {
             Some(utxo) => utxo,
         };
 
-        let keypair = self.get_taproot_keypair(utxo.keychain, utxo.derivation_index)
+        let keypair = self
+            .get_taproot_keypair(utxo.keychain, utxo.derivation_index)
             .context("Could not derive taproot keypair to sign message")?;
 
-        let msg_hash = signed_msg_hash(msg);
-        let msg_to_sign = secp256k1::Message::from_digest(msg_hash.to_byte_array());
-        let ctx = secp256k1::Secp256k1::new();
-        Ok(ctx.sign_schnorr(&msg_to_sign, &keypair.to_inner()))
+        event.sign(secp256k1::Secp256k1::new(), &keypair.to_inner())?;
+        Ok(event)
     }
 
-    pub fn verify_message<H : KeyHasher>(
+    pub fn verify_event<H: KeyHasher>(
         src: &mut impl DataSource,
         space: &str,
-        msg: impl AsRef<[u8]>,
-        signature: &Signature
-    ) -> anyhow::Result<()> {
-        let label = SLabel::from_str(space)?;
+        mut event: NostrEvent,
+    ) -> anyhow::Result<NostrEvent> {
+        if event.space().is_some_and(|s| s != space) {
+            return Err(anyhow::anyhow!("Space tag does not match specified space"));
+        }
+
+        let label = SLabel::from_str(&space)?;
         let space_key = SpaceKey::from(H::hash(label.as_ref()));
         let outpoint = match src.get_space_outpoint(&space_key)? {
             None => return Err(anyhow::anyhow!("Space not found")),
@@ -384,24 +436,35 @@ impl SpacesWallet {
             Some(spaceout) => spaceout,
         };
         if !spaceout.script_pubkey.is_witness_program() {
-            return Err(anyhow::anyhow!("Cannot verify non-taproot spaces"))
+            return Err(anyhow::anyhow!("Cannot verify non-taproot spaces"));
         }
 
         let script_bytes = spaceout.script_pubkey.as_bytes();
         if script_bytes.len() != secp256k1::constants::SCHNORR_PUBLIC_KEY_SIZE + 2 {
             return Err(anyhow::anyhow!("Expected a schnorr public key"));
         }
-
         let pubkey = XOnlyPublicKey::from_slice(&script_bytes[2..])?;
-        let ctx = secp256k1::Secp256k1::new();
-        let msg_hash = signed_msg_hash(msg);
-        let msg_to_sign = Message::from_digest(msg_hash.to_byte_array());
 
-        ctx.verify_schnorr(signature, &msg_to_sign, &pubkey)?;
-        Ok(())
+        match event.pubkey {
+            None => {
+                event.pubkey = Some(pubkey);
+            }
+            Some(actual) => {
+                if actual != pubkey {
+                    return Err(anyhow::anyhow!("Event pubkey doesn't match space pubkey"));
+                }
+            }
+        }
+
+        let ctx = secp256k1::Secp256k1::new();
+        event.verify(ctx);
+        Ok(event)
     }
 
-    pub fn list_unspent_with_details(&mut self, store: &mut impl DataSource) -> anyhow::Result<Vec<WalletOutput>> {
+    pub fn list_unspent_with_details(
+        &mut self,
+        store: &mut impl DataSource,
+    ) -> anyhow::Result<Vec<WalletOutput>> {
         let mut wallet_outputs = Vec::new();
         for output in self.internal.list_unspent() {
             let mut details = WalletOutput {
@@ -422,7 +485,12 @@ impl SpacesWallet {
     /// Checks the mempool for dropped bid transactions and reverts them in the wallet’s Tx graph,
     /// reclaiming any "stuck" funds. This is necessary because continuously scanning the entire
     /// mainnet mempool would be resource-intensive to fetch from Bitcoin Core RPC.
-    pub fn update_unconfirmed_bids(&mut self, mem: impl Mempool, height: u32, data_source: &mut impl DataSource) -> anyhow::Result<Vec<Txid>> {
+    pub fn update_unconfirmed_bids(
+        &mut self,
+        mem: impl Mempool,
+        height: u32,
+        data_source: &mut impl DataSource,
+    ) -> anyhow::Result<Vec<Txid>> {
         let unconfirmed_bids = self.unconfirmed_bids()?;
         let mut revert_txs = Vec::new();
         for (bid, outpoint) in unconfirmed_bids {
@@ -431,7 +499,11 @@ impl SpacesWallet {
                 continue;
             }
             // bid dropped from mempool perhaps it was confirmed spending outpoint?
-            if data_source.get_spaceout(&outpoint).context("could not fetch spaceout from db")?.is_none() {
+            if data_source
+                .get_spaceout(&outpoint)
+                .context("could not fetch spaceout from db")?
+                .is_none()
+            {
                 continue;
             }
             if let Some((revert, seen)) = revert_unconfirmed_bid_tx(&bid, outpoint) {
@@ -454,29 +526,35 @@ impl SpacesWallet {
     /// to check if they have been replaced.
     pub fn unconfirmed_bids(&mut self) -> anyhow::Result<Vec<(WalletTx, OutPoint)>> {
         let txids: Vec<_> = {
-            let unconfirmed: Vec<_> = self.transactions()
-                .filter(|x| !x.chain_position.is_confirmed()).collect();
+            let unconfirmed: Vec<_> = self
+                .transactions()
+                .filter(|x| !x.chain_position.is_confirmed())
+                .collect();
             unconfirmed.iter().map(|x| x.tx_node.txid).collect()
         };
         let bid_txids = {
             let db_tx = self.connection.transaction()?;
             TxEvent::filter_bids(&db_tx, txids)?
         };
-        let bid_txs: Vec<_> = self.transactions()
+        let bid_txs: Vec<_> = self
+            .transactions()
             .filter(|tx| !tx.chain_position.is_confirmed())
             .filter_map(|tx| {
-                bid_txids.iter().find(|(bid_txid, _)| *bid_txid == tx.tx_node.txid).map(|(_, bid_outpoint)| {
-                    (tx, *bid_outpoint)
-                })
-            }).collect();
+                bid_txids
+                    .iter()
+                    .find(|(bid_txid, _)| *bid_txid == tx.tx_node.txid)
+                    .map(|(_, bid_outpoint)| (tx, *bid_outpoint))
+            })
+            .collect();
         Ok(bid_txs)
     }
 
     pub fn get_tx_events(&mut self, txid: Txid) -> anyhow::Result<Vec<TxEvent>> {
-        let db_tx = self.connection.transaction()
+        let db_tx = self
+            .connection
+            .transaction()
             .context("could not get wallet db transaction")?;
-        let result = TxEvent::all(&db_tx, txid)
-            .context("could not get wallet db tx events")?;
+        let result = TxEvent::all(&db_tx, txid).context("could not get wallet db tx events")?;
         Ok(result)
     }
 
@@ -534,7 +612,11 @@ impl SpacesWallet {
         self.internal.apply_unconfirmed_txs(vec![(tx, seen)]);
     }
 
-    pub fn apply_unconfirmed_tx_record(&mut self, tx_record: TxRecord, seen: u64) -> anyhow::Result<()> {
+    pub fn apply_unconfirmed_tx_record(
+        &mut self,
+        tx_record: TxRecord,
+        seen: u64,
+    ) -> anyhow::Result<()> {
         let txid = tx_record.tx.compute_txid();
         self.apply_unconfirmed_tx(tx_record.tx, seen);
 
@@ -543,7 +625,9 @@ impl SpacesWallet {
             self.internal.insert_txout(outpoint, txout);
         }
 
-        let db_tx = self.connection.transaction()
+        let db_tx = self
+            .connection
+            .transaction()
             .context("could not create wallet db transaction")?;
         for event in tx_record.events {
             TxEvent::insert(
@@ -553,9 +637,12 @@ impl SpacesWallet {
                 event.space,
                 event.previous_spaceout,
                 event.details,
-            ).context("could not insert tx event into wallet db")?;
+            )
+            .context("could not insert tx event into wallet db")?;
         }
-        db_tx.commit().context("could not commit tx events to wallet db")?;
+        db_tx
+            .commit()
+            .context("could not commit tx events to wallet db")?;
         Ok(())
     }
 
@@ -565,10 +652,7 @@ impl SpacesWallet {
     }
 
     /// List outputs that can be safely auctioned off
-    pub fn list_bidouts(
-        &mut self,
-        confirmed_only: bool,
-    ) -> anyhow::Result<Vec<DoubleUtxo>> {
+    pub fn list_bidouts(&mut self, confirmed_only: bool) -> anyhow::Result<Vec<DoubleUtxo>> {
         let mut unspent: Vec<LocalOutput> = self.list_unspent().collect();
         let mut not_auctioned = vec![];
 
@@ -642,7 +726,12 @@ impl SpacesWallet {
         Ok(not_auctioned)
     }
 
-    pub fn buy<H: KeyHasher>(&mut self, src: &mut impl DataSource, listing: &Listing, fee_rate: FeeRate) -> anyhow::Result<Transaction> {
+    pub fn buy<H: KeyHasher>(
+        &mut self,
+        src: &mut impl DataSource,
+        listing: &Listing,
+        fee_rate: FeeRate,
+    ) -> anyhow::Result<Transaction> {
         let (seller, spaceout) = Self::verify_listing::<H>(src, &listing)?;
 
         let mut witness = Witness::new();
@@ -651,7 +740,7 @@ impl SpacesWallet {
                 signature: listing.signature,
                 sighash_type: TapSighashType::SinglePlusAnyoneCanPay,
             }
-                .to_vec(),
+            .to_vec(),
         );
 
         let funded_psbt = {
@@ -691,12 +780,20 @@ impl SpacesWallet {
         Ok(tx)
     }
 
-    pub fn verify_listing<H: KeyHasher>(src: &mut impl DataSource, listing: &Listing) -> anyhow::Result<(SpaceAddress, FullSpaceOut)> {
+    pub fn verify_listing<H: KeyHasher>(
+        src: &mut impl DataSource,
+        listing: &Listing,
+    ) -> anyhow::Result<(SpaceAddress, FullSpaceOut)> {
         let label = SLabel::from_str(&listing.space)?;
         let space_key = SpaceKey::from(H::hash(label.as_ref()));
         let outpoint = match src.get_space_outpoint(&space_key)? {
-            None => return Err(anyhow::anyhow!("Unknown space {} - no outpoint found", listing.space)),
-            Some(outpoint) => outpoint
+            None => {
+                return Err(anyhow::anyhow!(
+                    "Unknown space {} - no outpoint found",
+                    listing.space
+                ))
+            }
+            Some(outpoint) => outpoint,
         };
 
         let spaceout = match src.get_spaceout(&outpoint)? {
@@ -707,22 +804,36 @@ impl SpacesWallet {
         if spaceout.space.is_none() {
             return Err(anyhow!("No associated space"));
         }
-        if !matches!(spaceout.space.as_ref().unwrap().covenant, Covenant::Transfer { ..}) {
+        if !matches!(
+            spaceout.space.as_ref().unwrap().covenant,
+            Covenant::Transfer { .. }
+        ) {
             return Err(anyhow::anyhow!("Space not registered"));
         }
 
-        let recipient = Self::verify_listing_signature(&listing, outpoint, TxOut {
-            value: spaceout.value,
-            script_pubkey: spaceout.script_pubkey.clone(),
-        })?;
+        let recipient = Self::verify_listing_signature(
+            &listing,
+            outpoint,
+            TxOut {
+                value: spaceout.value,
+                script_pubkey: spaceout.script_pubkey.clone(),
+            },
+        )?;
 
-        Ok((recipient, FullSpaceOut {
-            txid: outpoint.txid,
-            spaceout,
-        }))
+        Ok((
+            recipient,
+            FullSpaceOut {
+                txid: outpoint.txid,
+                spaceout,
+            },
+        ))
     }
 
-    fn verify_listing_signature(listing: &Listing, outpoint: OutPoint, txout: TxOut) -> anyhow::Result<SpaceAddress> {
+    fn verify_listing_signature(
+        listing: &Listing,
+        outpoint: OutPoint,
+        txout: TxOut,
+    ) -> anyhow::Result<SpaceAddress> {
         let prevouts = Prevouts::One(0, txout.clone());
         let addr = SpaceAddress::from_str(&listing.seller)?;
 
@@ -775,17 +886,24 @@ impl SpacesWallet {
             None => return Err(anyhow::anyhow!("Space not found")),
             Some(spaceout) => spaceout,
         };
-        if !matches!(spaceout.space.as_ref().unwrap().covenant, Covenant::Transfer { ..}) {
+        if !matches!(
+            spaceout.space.as_ref().unwrap().covenant,
+            Covenant::Transfer { .. }
+        ) {
             return Err(anyhow::anyhow!("Space not registered"));
         }
 
         let utxo = match self.internal.get_utxo(space_outpoint) {
-            None => return Err(anyhow::anyhow!("Wallet does not own a space with outpoint {}", space_outpoint)),
-            Some(utxo) => utxo
+            None => {
+                return Err(anyhow::anyhow!(
+                    "Wallet does not own a space with outpoint {}",
+                    space_outpoint
+                ))
+            }
+            Some(utxo) => utxo,
         };
 
         let recipient = self.next_unused_space_address();
-
 
         let mut sell_psbt = {
             let mut builder = self
@@ -803,10 +921,7 @@ impl SpacesWallet {
                 .manually_selected_only()
                 .sighash(TapSighashType::SinglePlusAnyoneCanPay.into())
                 .add_utxo(utxo.outpoint)?
-                .add_recipient(
-                    recipient.script_pubkey(),
-                    total,
-                );
+                .add_recipient(recipient.script_pubkey(), total);
             builder.finish()?
         };
 
@@ -821,10 +936,14 @@ impl SpacesWallet {
             return Err(anyhow::anyhow!("signing listing psbt failed"));
         }
 
-        let witness = sell_psbt.inputs[0].clone().final_script_witness
+        let witness = sell_psbt.inputs[0]
+            .clone()
+            .final_script_witness
             .expect("signed listing psbt has a witness");
 
-        let signature = witness.iter().next()
+        let signature = witness
+            .iter()
+            .next()
             .expect("signed listing must have a single witness item");
 
         Ok(Listing {
@@ -926,11 +1045,19 @@ impl SpacesWallet {
         }
     }
 
-    pub fn get_taproot_keypair(&self, keychain: KeychainKind, derivation_index: u32) -> anyhow::Result<TweakedKeypair> {
-        let secret = match self.internal.get_signers(keychain)
+    pub fn get_taproot_keypair(
+        &self,
+        keychain: KeychainKind,
+        derivation_index: u32,
+    ) -> anyhow::Result<TweakedKeypair> {
+        let secret = match self
+            .internal
+            .get_signers(keychain)
             .signers()
             .iter()
-            .filter_map(|s| s.descriptor_secret_key()).next() {
+            .filter_map(|s| s.descriptor_secret_key())
+            .next()
+        {
             None => return Err(anyhow::anyhow!("No secret key found in signer")),
             Some(secret) => secret,
         };
@@ -938,8 +1065,9 @@ impl SpacesWallet {
             DescriptorSecretKey::XPrv(xprv) => xprv,
             _ => return Err(anyhow::anyhow!("No xprv found")),
         };
-        let full_path = descriptor_x_key.derivation_path
-            .child(ChildNumber::Normal { index: derivation_index });
+        let full_path = descriptor_x_key.derivation_path.child(ChildNumber::Normal {
+            index: derivation_index,
+        });
         let ctx = secp256k1::Secp256k1::new();
         let xprv = descriptor_x_key.xkey.derive_priv(&ctx, &full_path)?;
         let keypair = UntweakedKeypair::from_secret_key(&ctx, &xprv.private_key);
@@ -976,9 +1104,12 @@ impl SpacesWallet {
                 }
 
                 let previous_output = psbt.unsigned_tx.input[input_index].previous_output;
-                let signing_info =
-                    self.get_signing_info(previous_output, &input.witness_utxo.as_ref().unwrap().script_pubkey)
-                        .context("could not retrieve signing info for script")?;
+                let signing_info = self
+                    .get_signing_info(
+                        previous_output,
+                        &input.witness_utxo.as_ref().unwrap().script_pubkey,
+                    )
+                    .context("could not retrieve signing info for script")?;
                 if let Some(info) = signing_info {
                     input
                         .proprietary
@@ -1059,7 +1190,7 @@ impl SpacesWallet {
                     signature,
                     sighash_type,
                 }
-                    .to_vec(),
+                .to_vec(),
             );
             witness.push(&signing_info.script);
             witness.push(&signing_info.control_block.serialize());
@@ -1068,9 +1199,14 @@ impl SpacesWallet {
         Ok(tx)
     }
 
-    fn get_signing_info(&mut self, previous_output: OutPoint, script: &ScriptBuf)
-                        -> anyhow::Result<Option<SpaceScriptSigningInfo>> {
-        let db_tx = self.connection.transaction()
+    fn get_signing_info(
+        &mut self,
+        previous_output: OutPoint,
+        script: &ScriptBuf,
+    ) -> anyhow::Result<Option<SpaceScriptSigningInfo>> {
+        let db_tx = self
+            .connection
+            .transaction()
             .context("couldn't create db transaction")?;
         let info = TxEvent::get_signing_info(&db_tx, previous_output.txid, script)?;
         Ok(info)
@@ -1105,9 +1241,16 @@ impl CoinSelectionAlgorithm for RequiredUtxosOnlyCoinSelectionAlgorithm {
 
 /// Creates a dummy revert transaction double spending the foreign input
 /// to be applied to the wallet's tx graph
-fn revert_unconfirmed_bid_tx(bid: &WalletTx, foreign_outpoint: OutPoint) -> Option<(Transaction, u64)> {
-    let foreign_input = bid.tx_node.input.iter()
-        .find(|input| input.previous_output == foreign_outpoint)?.clone();
+fn revert_unconfirmed_bid_tx(
+    bid: &WalletTx,
+    foreign_outpoint: OutPoint,
+) -> Option<(Transaction, u64)> {
+    let foreign_input = bid
+        .tx_node
+        .input
+        .iter()
+        .find(|input| input.previous_output == foreign_outpoint)?
+        .clone();
 
     let op_return_output = bid.tx_node.output.first()?.clone();
     if !op_return_output.script_pubkey.is_op_return() {
@@ -1121,17 +1264,16 @@ fn revert_unconfirmed_bid_tx(bid: &WalletTx, foreign_outpoint: OutPoint) -> Opti
     };
     let revert_tx_last_seen = match bid.chain_position {
         ChainPosition::Confirmed { .. } => panic!("must be unconfirmed"),
-        ChainPosition::Unconfirmed { last_seen } =>
-            last_seen.map(|last_seen| last_seen + 1),
+        ChainPosition::Unconfirmed { last_seen } => last_seen.map(|last_seen| last_seen + 1),
     };
     Some((revert_tx, revert_tx_last_seen.unwrap_or(1)))
 }
 
 fn is_revert_tx(tx: &WalletTx) -> bool {
-    !tx.chain_position.is_confirmed() &&
-        tx.tx_node.input.len() == 1 &&
-        tx.tx_node.output.len() == 1 &&
-        tx.tx_node.output[0].script_pubkey.is_op_return()
+    !tx.chain_position.is_confirmed()
+        && tx.tx_node.input.len() == 1
+        && tx.tx_node.output.len() == 1
+        && tx.tx_node.output[0].script_pubkey.is_op_return()
 }
 
 impl SpaceScriptSigningInfo {
@@ -1174,7 +1316,7 @@ impl SpaceScriptSigningInfo {
                     1 + 65
             ) as _,
         )
-            .expect("valid weight")
+        .expect("valid weight")
     }
 
     pub(crate) fn to_vec(&self) -> Vec<u8> {
@@ -1255,13 +1397,4 @@ impl<'de> Deserialize<'de> for SpaceScriptSigningInfo {
 
         deserializer.deserialize_seq(OpenSigningInfoVisitor)
     }
-}
-
-pub fn signed_msg_hash(msg: impl AsRef<[u8]>) -> sha256d::Hash {
-    let msg_bytes = msg.as_ref();
-    let mut engine = sha256d::Hash::engine();
-    engine.input(SPACES_SIGNED_MSG_PREFIX);
-    VarInt::from(msg_bytes.len()).consensus_encode(&mut engine).expect("varint serialization");
-    engine.input(msg_bytes);
-    sha256d::Hash::from_engine(engine)
 }
