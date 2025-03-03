@@ -868,7 +868,7 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
             };
 
             let result = cli.sign_event(space, event, anchor, false).await?;
-            println!("{}", serde_json::to_string_pretty(&result).expect("result"));
+            println!("{}", serde_json::to_string(&result).expect("result"));
         }
         Commands::SignZone {
             space,
@@ -879,7 +879,7 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
                 .map_err(|e| ClientError::Custom(format!("Parse error: {}", e)))?;
             let result = cli.sign_event(space, update, !skip_anchor, false).await?;
 
-            println!("{}", serde_json::to_string_pretty(&result).expect("result"));
+            println!("{}", serde_json::to_string(&result).expect("result"));
         }
         Commands::RefreshAnchor {
             input,
@@ -904,7 +904,7 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
             event.proof = None;
             event = cli.add_anchor(event, prefer_recent).await?;
 
-            println!("{}", serde_json::to_string_pretty(&event).expect("result"));
+            println!("{}", serde_json::to_string(&event).expect("result"));
         }
         Commands::VerifyEvent { space, input } => {
             let event = read_event(input)
@@ -915,7 +915,7 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
                 .await
                 .map_err(|e| ClientError::Custom(e.to_string()))?;
 
-            println!("{}", serde_json::to_string_pretty(&event).expect("result"));
+            println!("{}", serde_json::to_string(&event).expect("result"));
         }
     }
 
