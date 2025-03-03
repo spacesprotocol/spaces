@@ -1,5 +1,4 @@
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
 use anyhow::anyhow;
 use env_logger::Env;
@@ -153,7 +152,16 @@ async fn create_async_store(
     let async_store = AsyncChainState::new(tx);
     let client = reqwest::Client::new();
     let handle = tokio::spawn(async move {
-        AsyncChainState::handler(&client, rpc, anchors, chain_state, block_index, rx, shutdown).await
+        AsyncChainState::handler(
+            &client,
+            rpc,
+            anchors,
+            chain_state,
+            block_index,
+            rx,
+            shutdown,
+        )
+        .await
     });
     (async_store, handle)
 }

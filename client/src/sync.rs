@@ -44,7 +44,7 @@ pub struct Spaced {
     pub bind: Vec<SocketAddr>,
     pub num_workers: usize,
     pub anchors_path: Option<PathBuf>,
-    pub synced: bool
+    pub synced: bool,
 }
 
 impl Spaced {
@@ -116,7 +116,7 @@ impl Spaced {
 
     pub fn update_anchors(&self) -> anyhow::Result<()> {
         if !self.synced {
-            return Ok(()) ;
+            return Ok(());
         }
         info!("Updating root anchors ...");
         let anchors_path = match self.anchors_path.as_ref() {
@@ -124,11 +124,18 @@ impl Spaced {
             Some(path) => path,
         };
 
-        let result = self.chain.store.update_anchors(anchors_path, ROOT_ANCHORS_COUNT)
-            .or_else(|e| Err(anyhow!("Could not update trust anchors: {}",e)))?;
+        let result = self
+            .chain
+            .store
+            .update_anchors(anchors_path, ROOT_ANCHORS_COUNT)
+            .or_else(|e| Err(anyhow!("Could not update trust anchors: {}", e)))?;
 
         if let Some(result) = result.first() {
-            info!("Latest root anchor {} (height: {})", hex::encode(result.root), result.block.height)
+            info!(
+                "Latest root anchor {} (height: {})",
+                hex::encode(result.root),
+                result.block.height
+            )
         }
         Ok(())
     }
@@ -194,10 +201,14 @@ impl Spaced {
                 Ok(event) => match event {
                     BlockEvent::Tip(_) => {
                         self.synced = true;
-                        if self.anchors_path.as_ref().is_some_and(|file| !file.exists()) {
+                        if self
+                            .anchors_path
+                            .as_ref()
+                            .is_some_and(|file| !file.exists())
+                        {
                             self.update_anchors()?;
                         }
-                    },
+                    }
                     BlockEvent::Block(id, block) => {
                         self.handle_block(&mut node, id, block)?;
                         info!("block={} height={}", id.hash, id.height);

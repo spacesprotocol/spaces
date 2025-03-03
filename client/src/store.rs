@@ -1,6 +1,14 @@
-use std::{collections::{BTreeMap, BTreeSet}, fs, fs::OpenOptions, io, io::ErrorKind, mem, path::PathBuf, sync::{Arc, RwLock}};
-use std::collections::HashMap;
-use std::path::Path;
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap},
+    fs,
+    fs::OpenOptions,
+    io,
+    io::ErrorKind,
+    mem,
+    path::{Path, PathBuf},
+    sync::{Arc, RwLock},
+};
+
 use anyhow::{anyhow, Context, Result};
 use bincode::{config, Decode, Encode};
 use jsonrpsee::core::Serialize;
@@ -8,12 +16,18 @@ use serde::Deserialize;
 use spacedb::{
     db::{Database, SnapshotIterator},
     fs::FileBackend,
-    tx::{KeyIterator, ReadTransaction, WriteTransaction},
+    subtree::SubTree,
+    tx::{KeyIterator, ProofType, ReadTransaction, WriteTransaction},
     Configuration, Hash, NodeHasher, Sha256Hasher,
 };
-use spacedb::subtree::SubTree;
-use spacedb::tx::ProofType;
-use spaces_protocol::{bitcoin::{BlockHash, OutPoint}, constants::{ChainAnchor, ROLLOUT_BATCH_SIZE}, hasher::{BidKey, KeyHash, OutpointKey, SpaceKey}, prepare::DataSource, Covenant, FullSpaceOut, SpaceOut};
+use spaces_protocol::{
+    bitcoin::{BlockHash, OutPoint},
+    constants::{ChainAnchor, ROLLOUT_BATCH_SIZE},
+    hasher::{BidKey, KeyHash, OutpointKey, SpaceKey},
+    prepare::DataSource,
+    Covenant, FullSpaceOut, SpaceOut,
+};
+
 use crate::rpc::RootAnchor;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,7 +66,6 @@ pub struct Staged {
     /// Stores changes until committed
     memory: WriteMemory,
 }
-
 
 impl Store {
     pub fn open(path: PathBuf) -> Result<Self> {
@@ -233,9 +246,12 @@ impl LiveSnapshot {
         };
     }
 
-    pub fn prove_with_snapshot(&self, keys: &[Hash], snapshot_block_height: u32) -> Result<SubTree<Sha256Hasher>> {
-        let snapshot = self.db.iter()
-            .filter_map(|s| s.ok()).find(|s| {
+    pub fn prove_with_snapshot(
+        &self,
+        keys: &[Hash],
+        snapshot_block_height: u32,
+    ) -> Result<SubTree<Sha256Hasher>> {
+        let snapshot = self.db.iter().filter_map(|s| s.ok()).find(|s| {
             let anchor: ChainAnchor = match s.metadata().try_into() {
                 Ok(a) => a,
                 _ => return false,
@@ -243,10 +259,14 @@ impl LiveSnapshot {
             anchor.height == snapshot_block_height
         });
         if let Some(mut snapshot) = snapshot {
-            return snapshot.prove(keys, ProofType::Standard)
-                .or_else(|err| Err(anyhow!("Could not prove: {}", err)))
+            return snapshot
+                .prove(keys, ProofType::Standard)
+                .or_else(|err| Err(anyhow!("Could not prove: {}", err)));
         }
-        Err(anyhow!("Older snapshot targeting block {} could not be found", snapshot_block_height))
+        Err(anyhow!(
+            "Older snapshot targeting block {} could not be found",
+            snapshot_block_height
+        ))
     }
 
     pub fn inner(&mut self) -> anyhow::Result<&mut ReadTx> {

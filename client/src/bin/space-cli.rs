@@ -1,30 +1,46 @@
 extern crate core;
 
-use std::{fs, io, path::PathBuf};
-use std::io::{Cursor, IsTerminal};
+use std::{
+    fs, io,
+    io::{Cursor, IsTerminal},
+    path::PathBuf,
+};
+
 use anyhow::anyhow;
 use base64::Engine;
 use clap::{Parser, Subcommand};
 use colored::{Color, Colorize};
-use domain::base::{MessageBuilder, TreeCompressor};
-use domain::base::iana::Opcode;
-use domain::zonefile::inplace::{Entry, Zonefile};
+use domain::{
+    base::{iana::Opcode, MessageBuilder, TreeCompressor},
+    zonefile::inplace::{Entry, Zonefile},
+};
 use jsonrpsee::{
     core::{client::Error, ClientError},
     http_client::{HttpClient, HttpClientBuilder},
 };
 use serde::{Deserialize, Serialize};
-use spaces_client::{config::{default_spaces_rpc_port, ExtendedNetwork}, serialize_base64, deserialize_base64, format::{
-    print_error_rpc_response, print_list_bidouts, print_list_spaces_response,
-    print_list_transactions, print_list_unspent, print_server_info,
-    print_wallet_balance_response, print_wallet_info, print_wallet_response, Format,
-}, rpc::{
-    BidParams, ExecuteParams, OpenParams, RegisterParams, RpcClient, RpcWalletRequest,
-    RpcWalletTxBuilder, SendCoinsParams, TransferSpacesParams,
-}, wallets::{AddressKind, WalletResponse}};
-use spaces_protocol::{bitcoin::{Amount, FeeRate, OutPoint, Txid}};
-use spaces_wallet::{bitcoin::secp256k1::schnorr::Signature, export::WalletExport, Listing};
-use spaces_wallet::nostr::{NostrEvent, NostrTag};
+use spaces_client::{
+    config::{default_spaces_rpc_port, ExtendedNetwork},
+    deserialize_base64,
+    format::{
+        print_error_rpc_response, print_list_bidouts, print_list_spaces_response,
+        print_list_transactions, print_list_unspent, print_server_info,
+        print_wallet_balance_response, print_wallet_info, print_wallet_response, Format,
+    },
+    rpc::{
+        BidParams, ExecuteParams, OpenParams, RegisterParams, RpcClient, RpcWalletRequest,
+        RpcWalletTxBuilder, SendCoinsParams, TransferSpacesParams,
+    },
+    serialize_base64,
+    wallets::{AddressKind, WalletResponse},
+};
+use spaces_protocol::bitcoin::{Amount, FeeRate, OutPoint, Txid};
+use spaces_wallet::{
+    bitcoin::secp256k1::schnorr::Signature,
+    export::WalletExport,
+    nostr::{NostrEvent, NostrTag},
+    Listing,
+};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -357,7 +373,7 @@ struct Base64Bytes(
         serialize_with = "serialize_base64",
         deserialize_with = "deserialize_base64"
     )]
-    Vec<u8>
+    Vec<u8>,
 );
 
 impl SpaceCli {
@@ -383,14 +399,16 @@ impl SpaceCli {
         ))
     }
 
-    async fn sign_event(&self, space: String, event: NostrEvent, anchor: bool, most_recent: bool) -> Result<NostrEvent, ClientError> {
+    async fn sign_event(
+        &self,
+        space: String,
+        event: NostrEvent,
+        anchor: bool,
+        most_recent: bool,
+    ) -> Result<NostrEvent, ClientError> {
         let mut result = self
             .client
-            .wallet_sign_event(
-                &self.wallet,
-                &space,
-                event,
-            )
+            .wallet_sign_event(&self.wallet, &space, event)
             .await?;
 
         if anchor {
@@ -399,21 +417,45 @@ impl SpaceCli {
 
         Ok(result)
     }
-    async fn add_anchor(&self, mut event: NostrEvent, most_recent: bool) -> Result<NostrEvent, ClientError> {
+    async fn add_anchor(
+        &self,
+        mut event: NostrEvent,
+        most_recent: bool,
+    ) -> Result<NostrEvent, ClientError> {
         let space = match event.space() {
-            None => return Err(ClientError::Custom("A space tag is required to add an anchor".to_string())),
-            Some(space) => space
+            None => {
+                return Err(ClientError::Custom(
+                    "A space tag is required to add an anchor".to_string(),
+                ))
+            }
+            Some(space) => space,
         };
 
-        let spaceout = self.client.get_space(&space).await
+        let spaceout = self
+            .client
+            .get_space(&space)
+            .await
             .map_err(|e| ClientError::Custom(e.to_string()))?
-            .ok_or(ClientError::Custom(format!("Space not found \"{}\"", space)))?;
+            .ok_or(ClientError::Custom(format!(
+                "Space not found \"{}\"",
+                space
+            )))?;
 
-        event.proof = Some(base64::prelude::BASE64_STANDARD.encode(self.client.prove_spaceout(OutPoint {
-            txid: spaceout.txid,
-            vout: spaceout.spaceout.n as _,
-        }, Some(most_recent)).await.map_err(|e| ClientError::Custom(e.to_string()))?
-            .proof));
+        event.proof = Some(
+            base64::prelude::BASE64_STANDARD.encode(
+                self.client
+                    .prove_spaceout(
+                        OutPoint {
+                            txid: spaceout.txid,
+                            vout: spaceout.spaceout.n as _,
+                        },
+                        Some(most_recent),
+                    )
+                    .await
+                    .map_err(|e| ClientError::Custom(e.to_string()))?
+                    .proof,
+            ),
+        );
 
         Ok(event)
     }
@@ -510,10 +552,7 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn handle_commands(
-    cli: &SpaceCli,
-    command: Commands,
-) -> Result<(), ClientError> {
+async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), ClientError> {
     match command {
         Commands::GetRollout {
             target_interval: target,
@@ -575,7 +614,7 @@ async fn handle_commands(
                 fee_rate,
                 false,
             )
-                .await?
+            .await?
         }
         Commands::Bid {
             space,
@@ -592,7 +631,7 @@ async fn handle_commands(
                 fee_rate,
                 confirmed_only,
             )
-                .await?
+            .await?
         }
         Commands::CreateBidOuts { pairs, fee_rate } => {
             cli.send_request(None, Some(pairs), fee_rate, false).await?
@@ -611,7 +650,7 @@ async fn handle_commands(
                 fee_rate,
                 false,
             )
-                .await?
+            .await?
         }
         Commands::Renew { spaces, fee_rate } => {
             let spaces: Vec<_> = spaces.into_iter().map(|s| normalize_space(&s)).collect();
@@ -624,7 +663,7 @@ async fn handle_commands(
                 fee_rate,
                 false,
             )
-                .await?
+            .await?
         }
         Commands::Transfer {
             spaces,
@@ -641,7 +680,7 @@ async fn handle_commands(
                 fee_rate,
                 false,
             )
-                .await?
+            .await?
         }
         Commands::SendCoins {
             amount,
@@ -657,7 +696,7 @@ async fn handle_commands(
                 fee_rate,
                 false,
             )
-                .await?
+            .await?
         }
         Commands::SetRawFallback {
             mut space,
@@ -687,7 +726,7 @@ async fn handle_commands(
                 fee_rate,
                 false,
             )
-                .await?;
+            .await?;
         }
         Commands::ListUnspent => {
             let utxos = cli.client.wallet_list_unspent(&cli.wallet).await?;
@@ -757,7 +796,7 @@ async fn handle_commands(
                         })?
                         .as_slice(),
                 )
-                    .map_err(|_| ClientError::Custom("Invalid signature".to_string()))?,
+                .map_err(|_| ClientError::Custom("Invalid signature".to_string()))?,
             };
             let result = cli
                 .client
@@ -798,54 +837,70 @@ async fn handle_commands(
                         })?
                         .as_slice(),
                 )
-                    .map_err(|_| ClientError::Custom("Invalid signature".to_string()))?,
+                .map_err(|_| ClientError::Custom("Invalid signature".to_string()))?,
             };
 
             cli.client.verify_listing(listing).await?;
             println!("{} Listing verified", "✓".color(Color::Green));
         }
-        Commands::SignEvent { mut space, input, anchor } => {
+        Commands::SignEvent {
+            mut space,
+            input,
+            anchor,
+        } => {
             let mut event = read_event(input)
                 .map_err(|e| ClientError::Custom(format!("input error: {}", e.to_string())))?;
 
             space = normalize_space(&space);
             match event.space() {
-                None if anchor => {
-                    event.tags.insert(0, NostrTag(vec!["space".to_string(), space.clone()]))
-                }
+                None if anchor => event
+                    .tags
+                    .insert(0, NostrTag(vec!["space".to_string(), space.clone()])),
                 Some(tag) => {
                     if tag != space {
-                        return Err(ClientError::Custom(
-                            format!("Expected a space tag with value '{}', got '{}'", space, tag)
-                        ));
+                        return Err(ClientError::Custom(format!(
+                            "Expected a space tag with value '{}', got '{}'",
+                            space, tag
+                        )));
                     }
                 }
                 _ => {}
             };
 
-            let result = cli.sign_event(space, event, anchor, false)
-                .await?;
+            let result = cli.sign_event(space, event, anchor, false).await?;
             println!("{}", serde_json::to_string_pretty(&result).expect("result"));
         }
-        Commands::SignZone { space, input, skip_anchor } => {
+        Commands::SignZone {
+            space,
+            input,
+            skip_anchor,
+        } => {
             let update = encode_dns_update(&space, input)
                 .map_err(|e| ClientError::Custom(format!("Parse error: {}", e)))?;
             let result = cli.sign_event(space, update, !skip_anchor, false).await?;
 
             println!("{}", serde_json::to_string_pretty(&result).expect("result"));
         }
-        Commands::RefreshAnchor { input, prefer_recent } => {
+        Commands::RefreshAnchor {
+            input,
+            prefer_recent,
+        } => {
             let event = read_event(input)
                 .map_err(|e| ClientError::Custom(format!("input error: {}", e.to_string())))?;
             let space = match event.space() {
                 None => {
-                    return Err(ClientError::Custom("Not a space-anchored event (no space tag)".to_string()))
+                    return Err(ClientError::Custom(
+                        "Not a space-anchored event (no space tag)".to_string(),
+                    ))
                 }
-                Some(space) => space
+                Some(space) => space,
             };
 
-            let mut event = cli.client.verify_event(&space, event)
-                .await.map_err(|e| ClientError::Custom(e.to_string()))?;
+            let mut event = cli
+                .client
+                .verify_event(&space, event)
+                .await
+                .map_err(|e| ClientError::Custom(e.to_string()))?;
             event.proof = None;
             event = cli.add_anchor(event, prefer_recent).await?;
 
@@ -854,8 +909,11 @@ async fn handle_commands(
         Commands::VerifyEvent { space, input } => {
             let event = read_event(input)
                 .map_err(|e| ClientError::Custom(format!("input error: {}", e.to_string())))?;
-            let event = cli.client.verify_event(&space, event)
-                .await.map_err(|e| ClientError::Custom(e.to_string()))?;
+            let event = cli
+                .client
+                .verify_event(&space, event)
+                .await
+                .map_err(|e| ClientError::Custom(e.to_string()))?;
 
             println!("{}", serde_json::to_string_pretty(&event).expect("result"));
         }
@@ -872,33 +930,28 @@ fn encode_dns_update(space: &str, zone_file: Option<PathBuf>) -> anyhow::Result<
     // domain crate panics if zone doesn't end in a new line
     let zone = get_input(zone_file)? + "\n";
 
-    let mut builder = MessageBuilder::from_target(
-        TreeCompressor::new(
-            Vec::new()
-        )
-    )?.authority();
+    let mut builder = MessageBuilder::from_target(TreeCompressor::new(Vec::new()))?.authority();
 
     builder.header_mut().set_opcode(Opcode::UPDATE);
 
     let mut cursor = Cursor::new(zone);
     let mut reader = Zonefile::load(&mut cursor)?;
 
-    while let Some(entry) = reader.next_entry()
-        .or_else(|e| Err(anyhow!("Error reading zone entry: {}", e)))? {
+    while let Some(entry) = reader
+        .next_entry()
+        .or_else(|e| Err(anyhow!("Error reading zone entry: {}", e)))?
+    {
         if let Entry::Record(record) = &entry {
             builder.push(record)?;
         }
     }
 
     let msg = builder.finish();
-    Ok(
-        NostrEvent::new(
-            871_222,
-            &base64::prelude::BASE64_STANDARD.encode(msg.as_slice()),
-            vec![
-                NostrTag(vec!["space".to_string(), space.to_string()])
-            ])
-    )
+    Ok(NostrEvent::new(
+        871_222,
+        &base64::prelude::BASE64_STANDARD.encode(msg.as_slice()),
+        vec![NostrTag(vec!["space".to_string(), space.to_string()])],
+    ))
 }
 
 fn read_event(file: Option<PathBuf>) -> anyhow::Result<NostrEvent> {
@@ -915,9 +968,7 @@ fn get_input(input: Option<PathBuf>) -> anyhow::Result<String> {
             let input = io::stdin();
             match input.is_terminal() {
                 true => return Err(anyhow!("no input provided: specify file path or stdin")),
-                false => input
-                    .lines()
-                    .collect::<Result<String, _>>()?
+                false => input.lines().collect::<Result<String, _>>()?,
             }
         }
     })

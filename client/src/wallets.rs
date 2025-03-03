@@ -23,6 +23,7 @@ use spaces_wallet::{
     bitcoin,
     bitcoin::{Address, Amount, FeeRate, OutPoint},
     builder::{CoinTransfer, SpaceTransfer, SpacesAwareCoinSelection},
+    nostr::NostrEvent,
     tx_event::{TxEvent, TxEventKind, TxRecord},
     Balance, DoubleUtxo, Listing, SpacesWallet, WalletInfo, WalletOutput,
 };
@@ -32,7 +33,7 @@ use tokio::{
     sync::{broadcast, mpsc, mpsc::Receiver, oneshot},
     time::Instant,
 };
-use spaces_wallet::nostr::NostrEvent;
+
 use crate::{
     checker::TxChecker,
     client::BlockSource,

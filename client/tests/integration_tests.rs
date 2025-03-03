@@ -1,11 +1,5 @@
 use std::{path::PathBuf, str::FromStr};
 
-use spaces_protocol::{
-    bitcoin::{Amount, FeeRate},
-    constants::RENEWAL_INTERVAL,
-    script::SpaceScript,
-    Bytes, Covenant,
-};
 use spaces_client::{
     rpc::{
         BidParams, ExecuteParams, OpenParams, RegisterParams, RpcClient, RpcWalletRequest,
@@ -13,9 +7,14 @@ use spaces_client::{
     },
     wallets::{AddressKind, WalletResponse},
 };
+use spaces_protocol::{
+    bitcoin::{Amount, FeeRate},
+    constants::RENEWAL_INTERVAL,
+    script::SpaceScript,
+    Covenant,
+};
 use spaces_testutil::TestRig;
-use spaces_wallet::{export::WalletExport, tx_event::TxEventKind};
-use spaces_wallet::nostr::NostrEvent;
+use spaces_wallet::{export::WalletExport, nostr::NostrEvent, tx_event::TxEventKind};
 
 const ALICE: &str = "wallet_99";
 const BOB: &str = "wallet_98";
@@ -1267,16 +1266,12 @@ async fn it_should_allow_sign_verify_messages(rig: &TestRig) -> anyhow::Result<(
     let signed = rig
         .spaced
         .client
-        .wallet_sign_event(BOB, &space_name,  msg.clone())
+        .wallet_sign_event(BOB, &space_name, msg.clone())
         .await
         .expect("sign");
 
     println!("signed\n{}", serde_json::to_string_pretty(&signed).unwrap());
-    assert_eq!(
-        signed.content,
-        msg.content,
-        "msg content must match"
-    );
+    assert_eq!(signed.content, msg.content, "msg content must match");
 
     rig.spaced
         .client

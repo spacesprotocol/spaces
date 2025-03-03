@@ -102,8 +102,7 @@ impl ChainAnchor {
 
 #[cfg(feature = "bincode")]
 pub mod bincode_impl {
-    use crate::alloc::borrow::ToOwned;
-use alloc::vec::Vec;
+    use alloc::vec::Vec;
 
     use bincode::{
         config,
@@ -114,7 +113,7 @@ use alloc::vec::Vec;
     };
     use bitcoin::{hashes::Hash, BlockHash};
 
-    use crate::constants::ChainAnchor;
+    use crate::{alloc::borrow::ToOwned, constants::ChainAnchor};
 
     impl Encode for ChainAnchor {
         fn encode<E: Encoder>(&self, encoder: &mut E) -> Result<(), EncodeError> {

@@ -4,15 +4,21 @@ mod wasm;
 
 extern crate alloc;
 
-use alloc::vec::Vec;
-use alloc::collections::BTreeSet;
-use bincode::{config};
-use spacedb::{encode::SubTreeEncoder, subtree::{SubTree, SubtreeIter}, Hash, Sha256Hasher, VerifyError};
-use spaces_protocol::{hasher, hasher::{OutpointKey, SpaceKey}, SpaceOut};
-use spaces_protocol::bitcoin::key::Secp256k1;
-use spaces_protocol::bitcoin::{secp256k1, OutPoint, XOnlyPublicKey};
-use spaces_protocol::bitcoin::secp256k1::{VerifyOnly};
-use spaces_protocol::slabel::SLabel;
+use alloc::{collections::BTreeSet, vec::Vec};
+
+use bincode::config;
+use spacedb::{
+    encode::SubTreeEncoder,
+    subtree::{SubTree, SubtreeIter},
+    Hash, Sha256Hasher, VerifyError,
+};
+use spaces_protocol::{
+    bitcoin::{key::Secp256k1, secp256k1, secp256k1::VerifyOnly, OutPoint, XOnlyPublicKey},
+    hasher,
+    hasher::{OutpointKey, SpaceKey},
+    slabel::SLabel,
+    SpaceOut,
+};
 
 pub struct Veritas {
     anchors: BTreeSet<hasher::Hash>,
@@ -67,15 +73,10 @@ impl Veritas {
         let inner = SubTree::from_slice(proof.as_ref()).map_err(|_| Error::MalformedSubtree)?;
         let root = inner.compute_root()?;
 
-        if !self
-            .anchors
-            .contains(&root) {
+        if !self.anchors.contains(&root) {
             return Err(Error::NoMatchingAnchor);
         }
-        Ok(Proof {
-            root,
-            inner,
-        })
+        Ok(Proof { root, inner })
     }
 
     pub fn verify_schnorr(&self, pubkey: &[u8], digest: &[u8], sig: &[u8]) -> bool {
@@ -94,7 +95,10 @@ impl Veritas {
         let mut msg_digest = [0u8; 32];
         msg_digest.copy_from_slice(digest.as_ref());
         let msg_digest = secp256k1::Message::from_digest(msg_digest);
-        self.ctx.verify_schnorr(&sig, &msg_digest, &pubkey).map(|_| true).unwrap_or(false)
+        self.ctx
+            .verify_schnorr(&sig, &msg_digest, &pubkey)
+            .map(|_| true)
+            .unwrap_or(false)
     }
 }
 
@@ -117,7 +121,7 @@ impl Proof {
     pub fn get_utxo(&self, utxo_key: &Hash) -> Result<Option<SpaceOut>, Error> {
         let (_, value) = match self.inner.iter().find(|(k, _)| *k == utxo_key) {
             None => return Ok(None),
-            Some(kv) => kv
+            Some(kv) => kv,
         };
         let (utxo, _): (SpaceOut, _) = bincode::decode_from_slice(value, config::standard())
             .map_err(|_| Error::MalformedValue)?;
@@ -129,8 +133,12 @@ impl Proof {
         for (_, v) in self.iter() {
             match v {
                 Value::UTXO(utxo) => {
-                    if utxo.space.as_ref().is_some_and(|s| s.name.as_ref() == space.as_ref()) {
-                        return Ok(Some(utxo))
+                    if utxo
+                        .space
+                        .as_ref()
+                        .is_some_and(|s| s.name.as_ref() == space.as_ref())
+                    {
+                        return Ok(Some(utxo));
                     }
                 }
                 _ => continue,
@@ -147,7 +155,7 @@ impl From<spacedb::Error> for Error {
                 VerifyError::KeyExists => Error::KeyExists,
                 VerifyError::IncompleteProof => Error::IncompleteProof,
                 VerifyError::KeyNotFound => Error::KeyNotFound,
-            }
+            },
             _ => Error::MalformedSubtree,
         }
     }
@@ -157,7 +165,7 @@ impl SpaceoutExt for SpaceOut {
     fn public_key(&self) -> Option<XOnlyPublicKey> {
         match self.script_pubkey.is_p2tr() {
             true => XOnlyPublicKey::from_slice(&self.script_pubkey.as_bytes()[2..]).ok(),
-            false => None
+            false => None,
         }
     }
 }

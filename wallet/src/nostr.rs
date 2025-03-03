@@ -1,26 +1,27 @@
-use anyhow::{Result, anyhow};
-use serde::{Serialize, Deserialize};
-use serde_json::{json};
-use secp256k1::{Secp256k1, XOnlyPublicKey, Keypair, schnorr::Signature, Verification, Signing};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use anyhow::{anyhow, Result};
 use bitcoin::hashes::{sha256, Hash, HashEngine};
+use secp256k1::{schnorr::Signature, Keypair, Secp256k1, Signing, Verification, XOnlyPublicKey};
+use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct NostrTag(pub Vec<String>);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NostrEvent {
-    #[serde(skip_serializing_if="Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<sha256::Hash>,
-    #[serde(skip_serializing_if="Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub pubkey: Option<XOnlyPublicKey>,
     pub created_at: u64,
     pub kind: u32,
     pub tags: Vec<NostrTag>,
     pub content: String,
-    #[serde(skip_serializing_if="Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub sig: Option<Signature>,
-    #[serde(skip_serializing_if="Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub proof: Option<String>,
 }
 
@@ -43,17 +44,22 @@ impl NostrEvent {
     }
 
     pub fn space(&self) -> Option<String> {
-        self.tags.iter().find(|tag| if tag.0.len() >= 1 {
-            tag.0[0] == "space"
-        } else {
-            false
-        }).map(|tag| tag.0[1].clone())
+        self.tags
+            .iter()
+            .find(|tag| {
+                if tag.0.len() >= 1 {
+                    tag.0[0] == "space"
+                } else {
+                    false
+                }
+            })
+            .map(|tag| tag.0[1].clone())
     }
 
     pub fn serialize_for_signing(&self) -> Option<String> {
         let pubkey = match &self.pubkey {
             None => return None,
-            Some(pubkey) => pubkey
+            Some(pubkey) => pubkey,
         };
         // Nostr requires a specific serialization format for signing:
         // [0, <pubkey>, <created_at>, <kind>, <tags>, <content>]
@@ -80,11 +86,11 @@ impl NostrEvent {
     pub fn verify<C: Verification>(&self, ctx: Secp256k1<C>) -> bool {
         let pubkey = match &self.pubkey {
             None => return false,
-            Some(pubkey) => pubkey
+            Some(pubkey) => pubkey,
         };
         let digest = match self.compute_id() {
             None => return false,
-            Some(id) => id
+            Some(id) => id,
         };
         if self.id.is_some_and(|id| id != digest) {
             return false;
@@ -104,10 +110,12 @@ impl NostrEvent {
         let (pubkey, _) = keypair.x_only_public_key();
         self.pubkey = match self.pubkey {
             None => Some(pubkey),
-            Some(key) => if key != pubkey {
-                return Err(anyhow!("wrong pubkey"));
-            } else {
-                Some(pubkey)
+            Some(key) => {
+                if key != pubkey {
+                    return Err(anyhow!("wrong pubkey"));
+                } else {
+                    Some(pubkey)
+                }
             }
         };
 

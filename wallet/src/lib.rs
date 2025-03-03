@@ -53,9 +53,9 @@ use crate::{
         is_connector_dust, is_space_dust, space_dust, tap_key_spend_weight,
         SpacesAwareCoinSelection,
     },
+    nostr::NostrEvent,
     tx_event::{TxEvent, TxEventKind, TxRecord},
 };
-use crate::nostr::NostrEvent;
 
 pub extern crate bdk_wallet;
 pub extern crate bitcoin;
@@ -64,9 +64,9 @@ extern crate core;
 pub mod address;
 pub mod builder;
 pub mod export;
+pub mod nostr;
 mod rusqlite_impl;
 pub mod tx_event;
-pub mod nostr;
 
 pub const SPACES_SIGNED_MSG_PREFIX: &[u8] = b"\x17Spaces Signed Message:\n";
 
@@ -394,7 +394,7 @@ impl SpacesWallet {
         mut event: NostrEvent,
     ) -> anyhow::Result<NostrEvent> {
         if event.space().is_some_and(|s| s != space) {
-            return Err(anyhow::anyhow!("Space tag does not match specified space"))
+            return Err(anyhow::anyhow!("Space tag does not match specified space"));
         }
 
         let label = SLabel::from_str(space)?;
@@ -422,7 +422,7 @@ impl SpacesWallet {
         mut event: NostrEvent,
     ) -> anyhow::Result<NostrEvent> {
         if event.space().is_some_and(|s| s != space) {
-            return Err(anyhow::anyhow!("Space tag does not match specified space"))
+            return Err(anyhow::anyhow!("Space tag does not match specified space"));
         }
 
         let label = SLabel::from_str(&space)?;

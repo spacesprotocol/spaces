@@ -1,17 +1,20 @@
 #[cfg(feature = "wasm")]
 mod wasm_api {
-    use alloc::format;
-    use alloc::string::{String, ToString};
-    use wasm_bindgen::prelude::*;
-    use alloc::vec::Vec;
+    use alloc::{
+        format,
+        string::{String, ToString},
+        vec::Vec,
+    };
     use core::str::FromStr;
 
-    use crate::{Veritas as VeritasNative, Proof as ProofNative, Value as ValueNative, Error};
     use spaces_protocol::{
-        Covenant as NativeCovenant, slabel::SLabel as NativeSLabel, Space as NativeSpace,
-        SpaceOut as NativeSpaceOut,
+        bitcoin::hashes::{sha256, Hash, HashEngine},
+        slabel::SLabel as NativeSLabel,
+        Covenant as NativeCovenant, Space as NativeSpace, SpaceOut as NativeSpaceOut,
     };
-    use spaces_protocol::bitcoin::hashes::{sha256, Hash, HashEngine};
+    use wasm_bindgen::prelude::*;
+
+    use crate::{Error, Proof as ProofNative, Value as ValueNative, Veritas as VeritasNative};
 
     #[wasm_bindgen]
     pub struct Veritas {
@@ -63,7 +66,7 @@ mod wasm_api {
         pub fn new(space: &str) -> Result<Self, JsValue> {
             Ok(Self {
                 inner: NativeSLabel::from_str(space)
-                    .map_err(|err| JsValue::from_str(&format!("{:?}", err)))?
+                    .map_err(|err| JsValue::from_str(&format!("{:?}", err)))?,
             })
         }
 
@@ -98,7 +101,7 @@ mod wasm_api {
         pub fn get_public_key(&self) -> Option<Vec<u8>> {
             match self.inner.script_pubkey.is_p2tr() {
                 true => Some(self.inner.script_pubkey.as_bytes()[2..].to_vec()),
-                false => None
+                false => None,
             }
         }
 
@@ -272,19 +275,16 @@ mod wasm_api {
         #[wasm_bindgen]
         pub fn contains(&self, key: &[u8]) -> Result<bool, JsValue> {
             let hash = read_hash(key)?;
-            self.inner
-                .contains(&hash)
-                .map_err(|e| error_to_jsvalue(e))
+            self.inner.contains(&hash).map_err(|e| error_to_jsvalue(e))
         }
 
         #[wasm_bindgen(js_name = "findSpace")]
         pub fn find_space(&self, space: &SLabel) -> Result<Option<SpaceOut>, JsValue> {
-            Ok(
-                self.inner.
-                    find_space(&space.inner)
-                    .map_err(|e| error_to_jsvalue(e))?
-                    .map(|out| SpaceOut { inner: out })
-            )
+            Ok(self
+                .inner
+                .find_space(&space.inner)
+                .map_err(|e| error_to_jsvalue(e))?
+                .map(|out| SpaceOut { inner: out }))
         }
 
         /// Returns all proof entries as an array of objects.
@@ -299,14 +299,10 @@ mod wasm_api {
 
                 // Convert the value.
                 let value_js = match v {
-                    ValueNative::Outpoint(ref op) => {
-                        JsValue::from_str(&op.to_string())
-                    }
-                    ValueNative::UTXO(ref utxo) => {
-                        JsValue::from(SpaceOut {
-                            inner: utxo.clone(),
-                        })
-                    }
+                    ValueNative::Outpoint(ref op) => JsValue::from_str(&op.to_string()),
+                    ValueNative::UTXO(ref utxo) => JsValue::from(SpaceOut {
+                        inner: utxo.clone(),
+                    }),
                     ValueNative::Unknown(ref bytes) => {
                         JsValue::from(js_sys::Uint8Array::from(&bytes[..]))
                     }
