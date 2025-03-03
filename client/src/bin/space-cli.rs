@@ -249,7 +249,7 @@ enum Commands {
         /// Space name (e.g., @example)
         space: String,
 
-        /// Path to a nostr event json file (omit for stdin)
+        /// Path to a Nostr event json file (omit for stdin)
         #[arg(short, long)]
         input: Option<PathBuf>,
 
@@ -263,11 +263,11 @@ enum Commands {
         /// Space name (e.g., @example)
         space: String,
 
-        /// Path to a signed nostr event json file (omit for stdin)
+        /// Path to a signed Nostr event json file (omit for stdin)
         #[arg(short, long)]
         input: Option<PathBuf>,
     },
-    /// Sign a zone file turning it into a space-anchored nostr event
+    /// Sign a zone file turning it into a space-anchored Nostr event
     #[command(name = "signzone")]
     SignZone {
         /// The space to use for signing the DNS file
@@ -278,7 +278,7 @@ enum Commands {
         #[arg(long)]
         skip_anchor: bool,
     },
-    // Refreshes the trust path for space-anchored nostr events
+    /// Updates the Merkle trust path for space-anchored Nostr events
     #[command(name = "refreshanchor")]
     RefreshAnchor {
         /// Path to a Nostr event file (omit for stdin)
