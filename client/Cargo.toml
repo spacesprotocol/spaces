@@ -18,7 +18,7 @@ path = "src/lib.rs"
 [dependencies]
 spaces_wallet = { path = "../wallet" }
 spaces_protocol = { path = "../protocol", version = "*", features = ["std"]}
-spacedb = { git = "https://github.com/spacesprotocol/spacedb", rev = "e07259ac6fc9cea1b06ee2cfdbb93d8c3039658a" }
+spacedb = { git = "https://github.com/spacesprotocol/spacedb", version = "0.0.4" }
 
 tokio = { version = "1.37.0", features = ["signal"] }
 ctrlc = "3.4.4"
