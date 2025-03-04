@@ -2387,7 +2387,7 @@ dependencies = [
 [[package]]
 name = "spacedb"
 version = "0.0.4"
-source = "git+https://github.com/spacesprotocol/spacedb?rev=e07259ac6fc9cea1b06ee2cfdbb93d8c3039658a#e07259ac6fc9cea1b06ee2cfdbb93d8c3039658a"
+source = "git+https://github.com/spacesprotocol/spacedb#e07259ac6fc9cea1b06ee2cfdbb93d8c3039658a"
 dependencies = [
  "bincode",
  "hex",
