@@ -50,8 +50,8 @@ add_to_path() {
   local shell_rc
   local reload_needed=false
 
-  # Detect shell configuration file
-  if [ -n "${ZSH_VERSION-}" ]; then
+  # Detect shell configuration file based on $SHELL environment variable
+  if echo "$SHELL" | grep -q "zsh"; then
     shell_rc="$HOME/.zshrc"
     shell_type="zsh"
   else
@@ -65,7 +65,7 @@ add_to_path() {
     echo "export PATH=\"$install_dir:\$PATH\"" >> "$shell_rc"
     reload_needed=true
   fi
-  
+
   # Return whether reload is needed
   [ "$reload_needed" = true ] && echo "reload" || echo "noreload"
 }
@@ -249,11 +249,16 @@ say "Successfully installed spaces $check_tag to $dest"
 
 # Reload shell if needed
 if [ "$reload_status" = "reload" ]; then
-  if [ -n "${ZSH_VERSION-}" ]; then
-    exec zsh
+  if echo "$SHELL" | grep -q "zsh"; then
+    say "Please run 'source $HOME/.zshrc' to update your PATH"
   else
-    exec bash
+    if [ "$(uname -s)" = "Darwin" ]; then
+      say "Please run 'source $HOME/.bash_profile' to update your PATH"
+    else
+      say "Please run 'source $HOME/.bashrc' to update your PATH"
+    fi
   fi
+  say "Or start a new terminal session to apply changes"
 fi
 
 # Show versions if verbose
