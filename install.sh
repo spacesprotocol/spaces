@@ -118,7 +118,7 @@ download() {
 }
 
 # Initialize default values
-force=false
+force=true
 verbose=false
 dest=""
 tag=""
