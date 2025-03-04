@@ -562,6 +562,9 @@ impl WalletManager {
     }
 
     pub async fn load_wallet(&self, name: &str) -> anyhow::Result<()> {
+        if self.wallets.read().await.contains_key(name) {
+            return Ok(());
+        }
         let wallet_dir = self.data_dir.join(name);
         if !wallet_dir.exists() {
             return Err(anyhow!("Wallet does not exist"));
