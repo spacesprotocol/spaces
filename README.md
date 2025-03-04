@@ -14,7 +14,7 @@ Spaces are sovereign Bitcoin identities. They leverage the existing infrastructu
 
 ## Quick Start
 
-Install the latest version:
+Paste the following into your terminal to install the latest version of Spaces:
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://install.spacesprotocol.org | sh
 ```
