@@ -684,6 +684,10 @@ impl RpcWallet {
             }
         }
 
+        res.outbid = res.outbid.into_iter()
+            .filter(|output| !wallet.is_mine(output.spaceout.script_pubkey.clone()))
+            .collect();
+
         for wallet_output in unspent.into_iter().filter(|output| output.space.is_some()) {
             let entry = FullSpaceOut {
                 txid: wallet_output.output.outpoint.txid,
