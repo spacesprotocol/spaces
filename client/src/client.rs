@@ -38,7 +38,7 @@ pub struct Client {
 
 /// A block structure containing validated transaction metadata
 /// relevant to the Spaces protocol
-#[derive(Clone, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
 pub struct BlockMeta {
     pub height: u32,
     pub tx_meta: Vec<TxEntry>,

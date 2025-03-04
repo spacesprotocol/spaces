@@ -82,7 +82,7 @@ pub struct RootAnchor {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
-pub enum BlockIdentifier {
+pub enum HeightOrHash {
     Hash(BlockHash),
     Height(u32),
 }
@@ -90,8 +90,8 @@ pub enum BlockIdentifier {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlockMetaWithHash {
     pub hash: BlockHash,
-    pub height: u32,
-    pub tx_meta: Vec<TxEntry>,
+    #[serde(flatten)]
+    pub block_meta: BlockMeta,
 }
 
 pub enum ChainStateCommand {
@@ -119,7 +119,7 @@ pub enum ChainStateCommand {
         resp: Responder<anyhow::Result<Option<TxEntry>>>,
     },
     GetBlockMeta {
-        block_identifier: BlockIdentifier,
+        height_or_hash: HeightOrHash,
         resp: Responder<anyhow::Result<BlockMetaWithHash>>,
     },
     EstimateBid {
@@ -193,7 +193,7 @@ pub trait Rpc {
     #[method(name = "getblockmeta")]
     async fn get_block_meta(
         &self,
-        block_identifier: BlockIdentifier,
+        height_or_hash: HeightOrHash,
     ) -> Result<BlockMetaWithHash, ErrorObjectOwned>;
 
     #[method(name = "gettxmeta")]
@@ -798,11 +798,11 @@ impl RpcServer for RpcServerImpl {
 
     async fn get_block_meta(
         &self,
-        block_identifier: BlockIdentifier,
+        height_or_hash: HeightOrHash,
     ) -> Result<BlockMetaWithHash, ErrorObjectOwned> {
         let data = self
             .store
-            .get_block_meta(block_identifier)
+            .get_block_meta(height_or_hash)
             .await
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))?;
 
@@ -1075,7 +1075,7 @@ impl AsyncChainState {
             )?)?;
         let block = Self::get_indexed_block(
             index,
-            BlockIdentifier::Hash(block_hash),
+            HeightOrHash::Hash(block_hash),
             client,
             rpc,
             chain_state,
@@ -1083,6 +1083,7 @@ impl AsyncChainState {
         .await?;
 
         Ok(block
+            .block_meta
             .tx_meta
             .into_iter()
             .find(|tx| &tx.changeset.txid == txid))
@@ -1090,7 +1091,7 @@ impl AsyncChainState {
 
     async fn get_indexed_block(
         index: &mut Option<LiveSnapshot>,
-        block_identifier: BlockIdentifier,
+        height_or_hash: HeightOrHash,
         client: &reqwest::Client,
         rpc: &BitcoinRpc,
         chain_state: &mut LiveSnapshot,
@@ -1098,22 +1099,21 @@ impl AsyncChainState {
         let index = index
             .as_mut()
             .ok_or_else(|| anyhow!("block index must be enabled"))?;
-        let hash = match block_identifier {
-            BlockIdentifier::Hash(hash) => hash,
-            BlockIdentifier::Height(height) => rpc
+        let hash = match height_or_hash {
+            HeightOrHash::Hash(hash) => hash,
+            HeightOrHash::Height(height) => rpc
                 .send_json(client, &rpc.get_block_hash(height))
                 .await
                 .map_err(|e| anyhow!("Could not retrieve block hash ({})", e))?,
         };
 
-        if let Some(BlockMeta { height, tx_meta }) = index
+        if let Some(block_meta) = index
             .get(BaseHash::from_slice(hash.as_ref()))
             .context("Could not fetch block from index")?
         {
             return Ok(BlockMetaWithHash {
                 hash,
-                height,
-                tx_meta,
+                block_meta,
             });
         }
 
@@ -1138,8 +1138,10 @@ impl AsyncChainState {
         }
         Ok(BlockMetaWithHash {
             hash,
-            height,
-            tx_meta: Vec::new(),
+            block_meta: BlockMeta {
+                height,
+                tx_meta: Vec::new(),
+            },
         })
     }
 
@@ -1189,12 +1191,12 @@ impl AsyncChainState {
                 let _ = resp.send(result);
             }
             ChainStateCommand::GetBlockMeta {
-                block_identifier,
+                height_or_hash,
                 resp,
             } => {
                 let res = Self::get_indexed_block(
                     block_index,
-                    block_identifier,
+                    height_or_hash,
                     client,
                     rpc,
                     chain_state,
@@ -1509,12 +1511,12 @@ impl AsyncChainState {
 
     pub async fn get_block_meta(
         &self,
-        block_identifier: BlockIdentifier,
+        height_or_hash: HeightOrHash,
     ) -> anyhow::Result<BlockMetaWithHash> {
         let (resp, resp_rx) = oneshot::channel();
         self.sender
             .send(ChainStateCommand::GetBlockMeta {
-                block_identifier,
+                height_or_hash,
                 resp,
             })
             .await?;
