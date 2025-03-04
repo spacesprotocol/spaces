@@ -689,7 +689,7 @@ async fn it_should_replace_mempool_bids(rig: &TestRig) -> anyhow::Result<()> {
         .wallet_list_transactions(ALICE, 1000, 0)
         .await
         .expect("list transactions");
-    let unconfirmed: Vec<_> = txs.iter().filter(|tx| !tx.confirmed).collect();
+    let unconfirmed: Vec<_> = txs.iter().filter(|tx| tx.block_height.is_none()).collect();
     for tx in &unconfirmed {
         println!("Alice's unconfiremd: {}", tx.txid);
     }
@@ -726,7 +726,7 @@ async fn it_should_replace_mempool_bids(rig: &TestRig) -> anyhow::Result<()> {
     assert!(
         eve_txs
             .iter()
-            .any(|tx| tx.txid == eve_replacement_txid && tx.confirmed),
+            .any(|tx| tx.txid == eve_replacement_txid && tx.block_height.is_some()),
         "Eve's tx should be confirmed"
     );
 
