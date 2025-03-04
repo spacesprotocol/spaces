@@ -7,7 +7,6 @@ Checkout [releases](https://github.com/spacesprotocol/spaces/releases) for an im
 
 Spaces are sovereign Bitcoin identities. They leverage the existing infrastructure and security of Bitcoin without requiring a new blockchain or any modifications to Bitcoin itself [learn more](https://spacesprotocol.org).
 
-
 `spaced` is a tiny layer that connects to Bitcoin Core over RPC and scans transactions relevant to the protocol.
 
 `space-cli` is a Bitcoin wallet that supports opening auctions, bidding and registering spaces.
@@ -19,15 +18,14 @@ Paste the following into your terminal to install the latest version of Spaces:
 curl --proto '=https' --tlsv1.2 -sSf https://install.spacesprotocol.org | sh
 ```
 
+## Documentation
 
-## Development setup on testnet4
+Visit [docs](https://spacesprotocol.org/) to learn how to get started.
 
-### Install Bitcoin Core
-Bitcoin Core of version 28+ is required. It can be installed from the official [download page](https://bitcoincore.org/en/download/).
 
-### Install Spaces Daemon
+## Build from source
 
-`spaced` is a tiny layer that connects to Bitcoin Core over RPC and scans transactions relevant to the protocol. Make sure you have [Rust](https://www.rust-lang.org/tools/install) installed before proceeding.
+To build it from source:
 
 ```sh
 git clone https://github.com/spacesprotocol/spaced && cd spaced
@@ -47,6 +45,8 @@ Verify installation
 spaced --version
 space-cli --version
 ```
+
+## Development setup on testnet4
 
 ### Setup
 
@@ -78,9 +78,6 @@ spaced --chain testnet4 --bitcoin-rpc-user testnet4 --bitcoin-rpc-password testn
 | protocol | No              | Protocol consensus library                                                                      |
 | veritas  | No              | Stateless verifier library for mobile and other resource constrained devices with wasm support. | 
 
-## Documentation
-
-Visit [docs](https://docs.spacesprotocol.org/) to get more information about Spaces protocol.
 
 
 ## License
