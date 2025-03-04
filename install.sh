@@ -51,7 +51,7 @@ add_to_path() {
   local reload_needed=false
 
   # Detect shell configuration file based on $SHELL environment variable
-  if echo "$SHELL" | grep -q "zsh"; then
+  if [[ "$SHELL" == */zsh ]]; then
     shell_rc="$HOME/.zshrc"
     shell_type="zsh"
   else
@@ -249,7 +249,7 @@ say "Successfully installed spaces $check_tag to $dest"
 
 # Reload shell if needed
 if [ "$reload_status" = "reload" ]; then
-  if echo "$SHELL" | grep -q "zsh"; then
+  if [[ "$SHELL" == */zsh ]]; then
     say "Please run 'source $HOME/.zshrc' to update your PATH"
   else
     if [ "$(uname -s)" = "Darwin" ]; then
