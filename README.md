@@ -16,7 +16,7 @@ Spaces are sovereign Bitcoin identities. They leverage the existing infrastructu
 
 Install the latest version:
 ```bash
-curl -sSf https://raw.githubusercontent.com/spacesprotocol/spaces/main/install.sh | sudo sh
+curl --proto '=https' --tlsv1.2 -sSf https://install.spacesprotocol.org | sh
 ```
 
 
@@ -75,6 +75,10 @@ spaced --chain testnet4 --bitcoin-rpc-user testnet4 --bitcoin-rpc-password testn
 | node     | Yes              | Daemon and wallet service                      |
 | wallet   | Yes (no-std WIP) | wallet library for building spaces transactions|
 | protocol | No               | Protocol consensus library                     |
+
+## Documentation
+
+Visit [docs](https://docs.spacesprotocol.org/) to get more information about Spaces protocol.
 
 
 ## License
