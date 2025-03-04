@@ -1,9 +1,9 @@
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
 use anyhow::anyhow;
 use env_logger::Env;
 use log::error;
-use spaced::{
+use spaces_client::{
     config::{safe_exit, Args},
     rpc::{AsyncChainState, RpcServerImpl, WalletLoadRequest, WalletManager},
     source::{BitcoinBlockSource, BitcoinRpc},
@@ -83,6 +83,7 @@ impl Composer {
 
         let (async_chain_state, async_chain_state_handle) = create_async_store(
             spaced.rpc.clone(),
+            spaced.anchors_path.clone(),
             spaced.chain.state.clone(),
             spaced.block_index.as_ref().map(|index| index.state.clone()),
             self.shutdown.subscribe(),
@@ -142,6 +143,7 @@ impl Composer {
 
 async fn create_async_store(
     rpc: BitcoinRpc,
+    anchors: Option<PathBuf>,
     chain_state: LiveSnapshot,
     block_index: Option<LiveSnapshot>,
     shutdown: broadcast::Receiver<()>,
@@ -150,7 +152,16 @@ async fn create_async_store(
     let async_store = AsyncChainState::new(tx);
     let client = reqwest::Client::new();
     let handle = tokio::spawn(async move {
-        AsyncChainState::handler(&client, rpc, chain_state, block_index, rx, shutdown).await
+        AsyncChainState::handler(
+            &client,
+            rpc,
+            anchors,
+            chain_state,
+            block_index,
+            rx,
+            shutdown,
+        )
+        .await
     });
     (async_store, handle)
 }

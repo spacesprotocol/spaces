@@ -214,6 +214,8 @@ pub mod serde_bytes_impl {
 
 #[cfg(feature = "bincode")]
 pub mod bincode_bytes_impl {
+    use alloc::vec::Vec;
+
     use bincode::{
         de::Decoder,
         enc::Encoder,

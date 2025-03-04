@@ -31,7 +31,7 @@ Bitcoin Core of version 28+ is required. It can be installed from the official [
 
 ```sh
 git clone https://github.com/spacesprotocol/spaced && cd spaced
-cargo install --path node --locked
+cargo install --path client --locked
 ```
 
 Make sure it's in your path
@@ -70,11 +70,13 @@ spaced --chain testnet4 --bitcoin-rpc-user testnet4 --bitcoin-rpc-password testn
 
 ## Project Structure
 
-| Package  | Requires std     | Description                                    |
-|----------|------------------|------------------------------------------------|
-| node     | Yes              | Daemon and wallet service                      |
-| wallet   | Yes (no-std WIP) | wallet library for building spaces transactions|
-| protocol | No               | Protocol consensus library                     |
+
+| Package  | Requires std    | Description                                                                                     |
+|----------|-----------------|-------------------------------------------------------------------------------------------------|
+| client   | Yes             | Bitcoin consensus client and wallet service                                                     |
+| wallet   | Yes (no-std WIP) | Wallet library for building spaces transactions                                                 |
+| protocol | No              | Protocol consensus library                                                                      |
+| veritas  | No              | Stateless verifier library for mobile and other resource constrained devices with wasm support. | 
 
 ## Documentation
 

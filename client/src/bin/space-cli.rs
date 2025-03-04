@@ -1,33 +1,46 @@
 extern crate core;
 
-use std::{fs, path::PathBuf, str::FromStr};
+use std::{
+    fs, io,
+    io::{Cursor, IsTerminal},
+    path::PathBuf,
+};
 
+use anyhow::anyhow;
+use base64::Engine;
 use clap::{Parser, Subcommand};
 use colored::{Color, Colorize};
+use domain::{
+    base::{iana::Opcode, MessageBuilder, TreeCompressor},
+    zonefile::inplace::{Entry, Zonefile},
+};
 use jsonrpsee::{
     core::{client::Error, ClientError},
     http_client::{HttpClient, HttpClientBuilder},
 };
-use protocol::{
-    bitcoin::{Amount, FeeRate, OutPoint, Txid},
-    hasher::KeyHasher,
-    slabel::SLabel,
-};
-use spaced::{
+use serde::{Deserialize, Serialize};
+use spaces_client::{
     config::{default_spaces_rpc_port, ExtendedNetwork},
+    deserialize_base64,
+    format::{
+        print_error_rpc_response, print_list_bidouts, print_list_spaces_response,
+        print_list_transactions, print_list_unspent, print_server_info,
+        print_wallet_balance_response, print_wallet_info, print_wallet_response, Format,
+    },
     rpc::{
         BidParams, ExecuteParams, OpenParams, RegisterParams, RpcClient, RpcWalletRequest,
         RpcWalletTxBuilder, SendCoinsParams, TransferSpacesParams,
     },
-    store::Sha256,
-    wallets::AddressKind,
+    serialize_base64,
+    wallets::{AddressKind, WalletResponse},
 };
-use spaced::format::{print_error_rpc_response, print_list_bidouts, print_list_spaces_response, print_list_transactions, print_list_unspent, print_server_info, print_wallet_balance_response, print_wallet_info, print_wallet_response, Format};
-use spaced::rpc::SignedMessage;
-use spaced::wallets::WalletResponse;
-use wallet::bitcoin::secp256k1::schnorr::Signature;
-use wallet::export::WalletExport;
-use wallet::Listing;
+use spaces_protocol::bitcoin::{Amount, FeeRate, OutPoint, Txid};
+use spaces_wallet::{
+    bitcoin::secp256k1::schnorr::Signature,
+    export::WalletExport,
+    nostr::{NostrEvent, NostrTag},
+    Listing,
+};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -138,7 +151,7 @@ enum Commands {
         fee_rate: Option<u64>,
     },
     /// Renew ownership of a space
-    #[command(name = "renew", )]
+    #[command(name = "renew")]
     Renew {
         /// Spaces to renew
         #[arg(display_order = 0)]
@@ -216,28 +229,6 @@ enum Commands {
         #[arg(long, short)]
         fee_rate: Option<u64>,
     },
-    /// Sign a message using the owner address of the specified space
-    #[command(name = "signmessage")]
-    SignMessage {
-        /// The space to use
-        space: String,
-        /// The message to sign
-        message: String,
-    },
-    /// Verify a message using the owner address of the specified space
-    #[command(name = "verifymessage")]
-    VerifyMessage {
-        /// The space to verify
-        space: String,
-
-        /// The message to verify
-        message: String,
-
-        /// The signature to verify
-        #[arg(long)]
-        signature: String,
-    },
-
     /// Verify a listing
     #[command(name = "verifylisting")]
     VerifyListing {
@@ -252,7 +243,50 @@ enum Commands {
         #[arg(long)]
         seller: String,
     },
+    /// Sign any Nostr event using the space's private key
+    #[command(name = "signevent")]
+    SignEvent {
+        /// Space name (e.g., @example)
+        space: String,
 
+        /// Path to a Nostr event json file (omit for stdin)
+        #[arg(short, long)]
+        input: Option<PathBuf>,
+
+        /// Include a space-tag and trust path data
+        #[arg(short, long)]
+        anchor: bool,
+    },
+    /// Verify a signed Nostr event against the space's public key
+    #[command(name = "verifyevent")]
+    VerifyEvent {
+        /// Space name (e.g., @example)
+        space: String,
+
+        /// Path to a signed Nostr event json file (omit for stdin)
+        #[arg(short, long)]
+        input: Option<PathBuf>,
+    },
+    /// Sign a zone file turning it into a space-anchored Nostr event
+    #[command(name = "signzone")]
+    SignZone {
+        /// The space to use for signing the DNS file
+        space: String,
+        /// The DNS zone file path (omit for stdin)
+        input: Option<PathBuf>,
+        /// Skip including bundled Merkle proof in the event.
+        #[arg(long)]
+        skip_anchor: bool,
+    },
+    /// Updates the Merkle trust path for space-anchored Nostr events
+    #[command(name = "refreshanchor")]
+    RefreshAnchor {
+        /// Path to a Nostr event file (omit for stdin)
+        input: Option<PathBuf>,
+        /// Prefer the most recent trust path (not recommended)
+        #[arg(long)]
+        prefer_recent: bool,
+    },
     /// Get a spaceout - a Bitcoin output relevant to the Spaces protocol.
     #[command(name = "getspaceout")]
     GetSpaceOut {
@@ -306,9 +340,6 @@ enum Commands {
     /// compatible with most bitcoin wallets
     #[command(name = "getnewaddress")]
     GetCoinAddress,
-    /// DNS encodes the space and calculates the SHA-256 hash
-    #[command(name = "hashspace")]
-    HashSpace { space: String },
 }
 
 struct SpaceCli {
@@ -321,6 +352,29 @@ struct SpaceCli {
     rpc_url: String,
     client: HttpClient,
 }
+
+#[derive(Serialize, Deserialize)]
+struct SignedDnsUpdate {
+    serial: u32,
+    space: String,
+    #[serde(
+        serialize_with = "serialize_base64",
+        deserialize_with = "deserialize_base64"
+    )]
+    packet: Vec<u8>,
+    signature: Signature,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    proof: Option<Base64Bytes>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Base64Bytes(
+    #[serde(
+        serialize_with = "serialize_base64",
+        deserialize_with = "deserialize_base64"
+    )]
+    Vec<u8>,
+);
 
 impl SpaceCli {
     async fn configure() -> anyhow::Result<(Self, Args)> {
@@ -345,6 +399,66 @@ impl SpaceCli {
         ))
     }
 
+    async fn sign_event(
+        &self,
+        space: String,
+        event: NostrEvent,
+        anchor: bool,
+        most_recent: bool,
+    ) -> Result<NostrEvent, ClientError> {
+        let mut result = self
+            .client
+            .wallet_sign_event(&self.wallet, &space, event)
+            .await?;
+
+        if anchor {
+            result = self.add_anchor(result, most_recent).await?
+        }
+
+        Ok(result)
+    }
+    async fn add_anchor(
+        &self,
+        mut event: NostrEvent,
+        most_recent: bool,
+    ) -> Result<NostrEvent, ClientError> {
+        let space = match event.space() {
+            None => {
+                return Err(ClientError::Custom(
+                    "A space tag is required to add an anchor".to_string(),
+                ))
+            }
+            Some(space) => space,
+        };
+
+        let spaceout = self
+            .client
+            .get_space(&space)
+            .await
+            .map_err(|e| ClientError::Custom(e.to_string()))?
+            .ok_or(ClientError::Custom(format!(
+                "Space not found \"{}\"",
+                space
+            )))?;
+
+        event.proof = Some(
+            base64::prelude::BASE64_STANDARD.encode(
+                self.client
+                    .prove_spaceout(
+                        OutPoint {
+                            txid: spaceout.txid,
+                            vout: spaceout.spaceout.n as _,
+                        },
+                        Some(most_recent),
+                    )
+                    .await
+                    .map_err(|e| ClientError::Custom(e.to_string()))?
+                    .proof,
+            ),
+        );
+
+        Ok(event)
+    }
     async fn send_request(
         &self,
         req: Option<RpcWalletRequest>,
@@ -372,7 +486,6 @@ impl SpaceCli {
             )
             .await?;
 
-
         print_wallet_response(self.network.fallback_network(), result, self.format);
         Ok(())
     }
@@ -386,8 +499,6 @@ fn normalize_space(space: &str) -> String {
         format!("@{}", lowercase)
     }
 }
-
-
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -441,16 +552,7 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn hash_space(spaceish: &str) -> anyhow::Result<String> {
-    let space = normalize_space(&spaceish);
-    let sname = SLabel::from_str(&space)?;
-    Ok(hex::encode(Sha256::hash(sname.as_ref())))
-}
-
-async fn handle_commands(
-    cli: &SpaceCli,
-    command: Commands,
-) -> std::result::Result<(), ClientError> {
+async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), ClientError> {
     match command {
         Commands::GetRollout {
             target_interval: target,
@@ -463,8 +565,8 @@ async fn handle_commands(
             println!("{} sat", Amount::from_sat(response).to_sat());
         }
         Commands::GetSpace { space } => {
-            let space_hash = hash_space(&space).map_err(|e| ClientError::Custom(e.to_string()))?;
-            let response = cli.client.get_space(&space_hash).await?;
+            let space = normalize_space(&space);
+            let response = cli.client.get_space(&space).await?;
             println!("{}", serde_json::to_string_pretty(&response)?);
         }
         Commands::GetSpaceOut { outpoint } => {
@@ -512,7 +614,7 @@ async fn handle_commands(
                 fee_rate,
                 false,
             )
-                .await?
+            .await?
         }
         Commands::Bid {
             space,
@@ -529,7 +631,7 @@ async fn handle_commands(
                 fee_rate,
                 confirmed_only,
             )
-                .await?
+            .await?
         }
         Commands::CreateBidOuts { pairs, fee_rate } => {
             cli.send_request(None, Some(pairs), fee_rate, false).await?
@@ -548,7 +650,7 @@ async fn handle_commands(
                 fee_rate,
                 false,
             )
-                .await?
+            .await?
         }
         Commands::Renew { spaces, fee_rate } => {
             let spaces: Vec<_> = spaces.into_iter().map(|s| normalize_space(&s)).collect();
@@ -561,7 +663,7 @@ async fn handle_commands(
                 fee_rate,
                 false,
             )
-                .await?
+            .await?
         }
         Commands::Transfer {
             spaces,
@@ -578,7 +680,7 @@ async fn handle_commands(
                 fee_rate,
                 false,
             )
-                .await?
+            .await?
         }
         Commands::SendCoins {
             amount,
@@ -594,7 +696,7 @@ async fn handle_commands(
                 fee_rate,
                 false,
             )
-                .await?
+            .await?
         }
         Commands::SetRawFallback {
             mut space,
@@ -612,7 +714,8 @@ async fn handle_commands(
                 }
             };
 
-            let space_script = protocol::script::SpaceScript::create_set_fallback(data.as_slice());
+            let space_script =
+                spaces_protocol::script::SpaceScript::create_set_fallback(data.as_slice());
 
             cli.send_request(
                 Some(RpcWalletRequest::Execute(ExecuteParams {
@@ -623,7 +726,7 @@ async fn handle_commands(
                 fee_rate,
                 false,
             )
-                .await?;
+            .await?;
         }
         Commands::ListUnspent => {
             let utxos = cli.client.wallet_list_unspent(&cli.wallet).await?;
@@ -670,24 +773,30 @@ async fn handle_commands(
                 .wallet_bump_fee(&cli.wallet, txid, fee_rate, cli.skip_tx_check)
                 .await?;
             print_wallet_response(
-                cli.network.fallback_network(), WalletResponse {
-                result: response,
-            }, cli.format);
-        }
-        Commands::HashSpace { space } => {
-            println!(
-                "{}",
-                hash_space(&space).map_err(|e| ClientError::Custom(e.to_string()))?
+                cli.network.fallback_network(),
+                WalletResponse { result: response },
+                cli.format,
             );
         }
-        Commands::Buy { space, price, signature, seller, fee_rate } => {
+        Commands::Buy {
+            space,
+            price,
+            signature,
+            seller,
+            fee_rate,
+        } => {
             let listing = Listing {
                 space: normalize_space(&space),
                 price,
                 seller,
-                signature: Signature::from_slice(hex::decode(signature)
-                    .map_err(|_| ClientError::Custom("Signature must be in hex format".to_string()))?.as_slice())
-                    .map_err(|_| ClientError::Custom("Invalid signature".to_string()))?,
+                signature: Signature::from_slice(
+                    hex::decode(signature)
+                        .map_err(|_| {
+                            ClientError::Custom("Signature must be in hex format".to_string())
+                        })?
+                        .as_slice(),
+                )
+                .map_err(|_| ClientError::Custom("Invalid signature".to_string()))?,
             };
             let result = cli
                 .client
@@ -696,57 +805,118 @@ async fn handle_commands(
                     listing,
                     fee_rate.map(|rate| FeeRate::from_sat_per_vb(rate).expect("valid fee rate")),
                     cli.skip_tx_check,
-                ).await?;
-            print_wallet_response(cli.network.fallback_network(), WalletResponse {
-                result: vec![result],
-            }, cli.format
+                )
+                .await?;
+            print_wallet_response(
+                cli.network.fallback_network(),
+                WalletResponse {
+                    result: vec![result],
+                },
+                cli.format,
             );
         }
-        Commands::Sell { mut space, price,  } => {
+        Commands::Sell { mut space, price } => {
             space = normalize_space(&space);
-            let result = cli
-                .client
-                .wallet_sell(
-                    &cli.wallet,
-                    space,
-                    price,
-                ).await?;
+            let result = cli.client.wallet_sell(&cli.wallet, space, price).await?;
             println!("{}", serde_json::to_string_pretty(&result).expect("result"));
         }
-        Commands::VerifyListing { space, price, signature, seller  } => {
+        Commands::VerifyListing {
+            space,
+            price,
+            signature,
+            seller,
+        } => {
             let listing = Listing {
                 space: normalize_space(&space),
                 price,
                 seller,
-                signature: Signature::from_slice(hex::decode(signature)
-                    .map_err(|_| ClientError::Custom("Signature must be in hex format".to_string()))?.as_slice())
-                    .map_err(|_| ClientError::Custom("Invalid signature".to_string()))?,
+                signature: Signature::from_slice(
+                    hex::decode(signature)
+                        .map_err(|_| {
+                            ClientError::Custom("Signature must be in hex format".to_string())
+                        })?
+                        .as_slice(),
+                )
+                .map_err(|_| ClientError::Custom("Invalid signature".to_string()))?,
             };
 
-            cli.client
-                .verify_listing(listing).await?;
+            cli.client.verify_listing(listing).await?;
             println!("{} Listing verified", "✓".color(Color::Green));
         }
-        Commands::SignMessage { mut space, message } => {
-            space = normalize_space(&space);
-            let result = cli.client
-                .wallet_sign_message(&cli.wallet, &space, protocol::Bytes::new(message.as_bytes().to_vec())).await?;
-            println!("{}", result.signature);
-        }
-        Commands::VerifyMessage { mut space, message, signature } => {
-            space = normalize_space(&space);
-            let raw = hex::decode(signature)
-                .map_err(|_| ClientError::Custom("Invalid signature".to_string()))?;
-            let signature = Signature::from_slice(raw.as_slice())
-                .map_err(|_| ClientError::Custom("Invalid signature".to_string()))?;
-            cli.client.verify_message(SignedMessage {
-                space,
-                message: protocol::Bytes::new(message.as_bytes().to_vec()),
-                signature,
-            }).await?;
-            println!("{} Message verified", "✓".color(Color::Green));
-        }
+        Commands::SignEvent {
+            mut space,
+            input,
+            anchor,
+        } => {
+            let mut event = read_event(input)
+                .map_err(|e| ClientError::Custom(format!("input error: {}", e.to_string())))?;
 
+            space = normalize_space(&space);
+            match event.space() {
+                None if anchor => event
+                    .tags
+                    .insert(0, NostrTag(vec!["space".to_string(), space.clone()])),
+                Some(tag) => {
+                    if tag != space {
+                        return Err(ClientError::Custom(format!(
+                            "Expected a space tag with value '{}', got '{}'",
+                            space, tag
+                        )));
+                    }
+                }
+                _ => {}
+            };
+
+            let result = cli.sign_event(space, event, anchor, false).await?;
+            println!("{}", serde_json::to_string(&result).expect("result"));
+        }
+        Commands::SignZone {
+            space,
+            input,
+            skip_anchor,
+        } => {
+            let update = encode_dns_update(&space, input)
+                .map_err(|e| ClientError::Custom(format!("Parse error: {}", e)))?;
+            let result = cli.sign_event(space, update, !skip_anchor, false).await?;
+
+            println!("{}", serde_json::to_string(&result).expect("result"));
+        }
+        Commands::RefreshAnchor {
+            input,
+            prefer_recent,
+        } => {
+            let event = read_event(input)
+                .map_err(|e| ClientError::Custom(format!("input error: {}", e.to_string())))?;
+            let space = match event.space() {
+                None => {
+                    return Err(ClientError::Custom(
+                        "Not a space-anchored event (no space tag)".to_string(),
+                    ))
+                }
+                Some(space) => space,
+            };
+
+            let mut event = cli
+                .client
+                .verify_event(&space, event)
+                .await
+                .map_err(|e| ClientError::Custom(e.to_string()))?;
+            event.proof = None;
+            event = cli.add_anchor(event, prefer_recent).await?;
+
+            println!("{}", serde_json::to_string(&event).expect("result"));
+        }
+        Commands::VerifyEvent { space, input } => {
+            let event = read_event(input)
+                .map_err(|e| ClientError::Custom(format!("input error: {}", e.to_string())))?;
+            let event = cli
+                .client
+                .verify_event(&space, event)
+                .await
+                .map_err(|e| ClientError::Custom(e.to_string()))?;
+
+            println!("{}", serde_json::to_string(&event).expect("result"));
+        }
     }
 
     Ok(())
@@ -754,4 +924,52 @@ async fn handle_commands(
 
 fn default_spaced_rpc_url(chain: &ExtendedNetwork) -> String {
     format!("http://127.0.0.1:{}", default_spaces_rpc_port(chain))
+}
+
+fn encode_dns_update(space: &str, zone_file: Option<PathBuf>) -> anyhow::Result<NostrEvent> {
+    // domain crate panics if zone doesn't end in a new line
+    let zone = get_input(zone_file)? + "\n";
+
+    let mut builder = MessageBuilder::from_target(TreeCompressor::new(Vec::new()))?.authority();
+
+    builder.header_mut().set_opcode(Opcode::UPDATE);
+
+    let mut cursor = Cursor::new(zone);
+    let mut reader = Zonefile::load(&mut cursor)?;
+
+    while let Some(entry) = reader
+        .next_entry()
+        .or_else(|e| Err(anyhow!("Error reading zone entry: {}", e)))?
+    {
+        if let Entry::Record(record) = &entry {
+            builder.push(record)?;
+        }
+    }
+
+    let msg = builder.finish();
+    Ok(NostrEvent::new(
+        871_222,
+        &base64::prelude::BASE64_STANDARD.encode(msg.as_slice()),
+        vec![NostrTag(vec!["space".to_string(), space.to_string()])],
+    ))
+}
+
+fn read_event(file: Option<PathBuf>) -> anyhow::Result<NostrEvent> {
+    let content = get_input(file)?;
+    let event: NostrEvent = serde_json::from_str(&content)?;
+    Ok(event)
+}
+
+// Helper to handle file or stdin input
+fn get_input(input: Option<PathBuf>) -> anyhow::Result<String> {
+    Ok(match input {
+        Some(file) => fs::read_to_string(file)?,
+        None => {
+            let input = io::stdin();
+            match input.is_terminal() {
+                true => return Err(anyhow!("no input provided: specify file path or stdin")),
+                false => input.lines().collect::<Result<String, _>>()?,
+            }
+        }
+    })
 }

@@ -1,4 +1,5 @@
 use std::{fmt, fmt::Display, str::FromStr};
+
 use bdk_wallet::{
     chain, rusqlite,
     rusqlite::{
@@ -8,15 +9,18 @@ use bdk_wallet::{
 };
 use bitcoin::{Amount, OutPoint, ScriptBuf, Transaction, TxOut, Txid};
 use serde::{Deserialize, Serialize};
-use protocol::{Covenant, FullSpaceOut};
-use crate::rusqlite_impl::{migrate_schema, Impl};
-use crate::{SpaceScriptSigningInfo, SpacesWallet};
+use spaces_protocol::{Covenant, FullSpaceOut};
+
+use crate::{
+    rusqlite_impl::{migrate_schema, Impl},
+    SpaceScriptSigningInfo, SpacesWallet,
+};
 
 #[derive(Clone, Debug)]
 pub struct TxRecord {
     pub tx: Transaction,
     pub events: Vec<TxEvent>,
-    pub txouts: Vec<(OutPoint, TxOut)>
+    pub txouts: Vec<(OutPoint, TxOut)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,9 +66,9 @@ pub struct OpenEventDetails {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CommitEventDetails {
-    pub script_pubkey: protocol::Bytes,
+    pub script_pubkey: spaces_protocol::Bytes,
     /// [SpaceScriptSigningInfo] in raw format
-    pub signing_info: protocol::Bytes,
+    pub signing_info: spaces_protocol::Bytes,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -162,7 +166,10 @@ impl TxEvent {
         Ok(results)
     }
 
-    pub fn all_bid_txs(db_tx: &rusqlite::Transaction, txid: Txid) -> rusqlite::Result<Option<Self>> {
+    pub fn all_bid_txs(
+        db_tx: &rusqlite::Transaction,
+        txid: Txid,
+    ) -> rusqlite::Result<Option<Self>> {
         let stmt = db_tx.prepare(&format!(
             "SELECT type, space, previous_spaceout, details
          FROM {} WHERE type = 'bid' AND txid = ?1",
@@ -172,7 +179,11 @@ impl TxEvent {
         Ok(results.get(0).cloned())
     }
 
-    pub fn get_signing_info(db_tx: &rusqlite::Transaction, txid: Txid, script_pubkey: &ScriptBuf) -> rusqlite::Result<Option<SpaceScriptSigningInfo>> {
+    pub fn get_signing_info(
+        db_tx: &rusqlite::Transaction,
+        txid: Txid,
+        script_pubkey: &ScriptBuf,
+    ) -> rusqlite::Result<Option<SpaceScriptSigningInfo>> {
         let stmt = db_tx.prepare(&format!(
             "SELECT type, space, previous_spaceout, details
          FROM {} WHERE type = 'commit' AND txid = ?1",
@@ -183,13 +194,13 @@ impl TxEvent {
             .expect("could not retrieve signing details from sqlite");
         for result in results {
             let details = result.details.expect("signing details in tx event");
-            let details: CommitEventDetails = serde_json::from_value(details)
-                .expect("signing details");
+            let details: CommitEventDetails =
+                serde_json::from_value(details).expect("signing details");
             if details.script_pubkey.as_slice() == script_pubkey.as_bytes() {
                 let raw = details.signing_info.to_vec();
                 let info =
                     SpaceScriptSigningInfo::from_slice(raw.as_slice()).expect("valid signing info");
-                return Ok(Some(info))
+                return Ok(Some(info));
             }
         }
         Ok(None)
@@ -221,8 +232,12 @@ impl TxEvent {
                 TxEvent {
                     kind: row.get("type")?,
                     space: row.get("space")?,
-                    previous_spaceout: row.get::<_, Option<Impl<OutPoint>>>("previous_spaceout")?.map(|x| x.0),
-                    details: row.get::<_, Option<Impl<serde_json::Value>>>("details")?.map(|x| x.0),
+                    previous_spaceout: row
+                        .get::<_, Option<Impl<OutPoint>>>("previous_spaceout")?
+                        .map(|x| x.0),
+                    details: row
+                        .get::<_, Option<Impl<serde_json::Value>>>("details")?
+                        .map(|x| x.0),
                 },
             ))
         })?;
@@ -291,7 +306,6 @@ impl TxEvent {
     }
 }
 
-
 impl TxRecord {
     pub fn new(tx: Transaction) -> Self {
         Self::new_with_events(tx, vec![])
@@ -319,7 +333,10 @@ impl TxRecord {
             kind: TxEventKind::Transfer,
             space: Some(space),
             previous_spaceout: None,
-            details: Some(serde_json::to_value(TransferEventDetails { script_pubkey: to }).expect("json value")),
+            details: Some(
+                serde_json::to_value(TransferEventDetails { script_pubkey: to })
+                    .expect("json value"),
+            ),
         });
     }
 
@@ -328,7 +345,10 @@ impl TxRecord {
             kind: TxEventKind::Renew,
             space: Some(space),
             previous_spaceout: None,
-            details: Some(serde_json::to_value(TransferEventDetails { script_pubkey: to }).expect("json value")),
+            details: Some(
+                serde_json::to_value(TransferEventDetails { script_pubkey: to })
+                    .expect("json value"),
+            ),
         });
     }
 
@@ -357,7 +377,7 @@ impl TxRecord {
                     recipient_script_pubkey: resolved_address,
                     amount,
                 })
-                    .expect("json value"),
+                .expect("json value"),
             ),
         });
     }
@@ -375,10 +395,10 @@ impl TxRecord {
             previous_spaceout: None,
             details: Some(
                 serde_json::to_value(CommitEventDetails {
-                    script_pubkey: protocol::Bytes::new(reveal_address.to_bytes()),
-                    signing_info: protocol::Bytes::new(signing_info),
+                    script_pubkey: spaces_protocol::Bytes::new(reveal_address.to_bytes()),
+                    signing_info: spaces_protocol::Bytes::new(signing_info),
                 })
-                    .expect("json value"),
+                .expect("json value"),
             ),
         });
     }
@@ -392,7 +412,7 @@ impl TxRecord {
                 serde_json::to_value(OpenEventDetails {
                     initial_bid: initial_bid,
                 })
-                    .expect("json value"),
+                .expect("json value"),
             ),
         });
     }
@@ -407,7 +427,7 @@ impl TxRecord {
                 serde_json::to_value(ExecuteEventDetails {
                     n: reveal_input_index,
                 })
-                    .expect("json value"),
+                .expect("json value"),
             ),
         });
     }
@@ -420,14 +440,17 @@ impl TxRecord {
         };
         let previous_spaceout = match wallet.is_mine(previous.spaceout.script_pubkey.clone()) {
             false => Some(previous.outpoint()),
-            true => None
+            true => None,
         };
 
         if previous_spaceout.is_some() {
-            self.txouts.push((previous.outpoint(), TxOut {
-                value: previous.spaceout.value,
-                script_pubkey: previous.spaceout.script_pubkey.clone(),
-            }))
+            self.txouts.push((
+                previous.outpoint(),
+                TxOut {
+                    value: previous.spaceout.value,
+                    script_pubkey: previous.spaceout.script_pubkey.clone(),
+                },
+            ))
         }
 
         self.events.push(TxEvent {
@@ -439,12 +462,11 @@ impl TxRecord {
                     current_bid: amount,
                     previous_bid: previous_bid,
                 })
-                    .expect("json value"),
+                .expect("json value"),
             ),
         });
     }
 }
-
 
 #[cfg(test)]
 mod tests {

@@ -15,8 +15,8 @@ use clap::{
 use directories::ProjectDirs;
 use jsonrpsee::core::Serialize;
 use log::error;
-use protocol::bitcoin::Network;
 use serde::Deserialize;
+use spaces_protocol::bitcoin::Network;
 use toml::Value;
 
 use crate::{
@@ -76,6 +76,9 @@ pub struct Args {
     /// Index blocks including the full transaction data
     #[arg(long, env = "SPACED_BLOCK_INDEX_FULL", default_value = "false")]
     block_index_full: bool,
+    /// Skip maintaining historical root anchors
+    #[arg(long, env = "SPACED_SKIP_ANCHORS", default_value = "false")]
+    skip_anchors: bool,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug, ValueEnum, Serialize, Deserialize)]
@@ -176,6 +179,10 @@ impl Args {
             store: chain_store,
         };
 
+        let anchors_path = match args.skip_anchors {
+            true => None,
+            false => Some(data_dir.join("root_anchors.json")),
+        };
         let block_index_enabled = args.block_index || args.block_index_full;
         let block_index = if block_index_enabled {
             let block_db_path = data_dir.join("block_index.sdb");
@@ -212,6 +219,8 @@ impl Args {
             block_index,
             block_index_full: args.block_index_full,
             num_workers: args.jobs as usize,
+            anchors_path,
+            synced: false,
         })
     }
 
