@@ -80,6 +80,20 @@ pub struct RootAnchor {
     pub block: ChainAnchor,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum BlockIdentifier {
+    Hash(BlockHash),
+    Height(u32),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlockMetaWithHash {
+    pub hash: BlockHash,
+    pub height: u32,
+    pub tx_meta: Vec<TxEntry>,
+}
+
 pub enum ChainStateCommand {
     CheckPackage {
         txs: Vec<String>,
@@ -105,8 +119,8 @@ pub enum ChainStateCommand {
         resp: Responder<anyhow::Result<Option<TxEntry>>>,
     },
     GetBlockMeta {
-        block_hash: BlockHash,
-        resp: Responder<anyhow::Result<Option<BlockMeta>>>,
+        block_identifier: BlockIdentifier,
+        resp: Responder<anyhow::Result<BlockMetaWithHash>>,
     },
     EstimateBid {
         target: usize,
@@ -179,8 +193,8 @@ pub trait Rpc {
     #[method(name = "getblockmeta")]
     async fn get_block_meta(
         &self,
-        block_hash: BlockHash,
-    ) -> Result<Option<BlockMeta>, ErrorObjectOwned>;
+        block_identifier: BlockIdentifier,
+    ) -> Result<BlockMetaWithHash, ErrorObjectOwned>;
 
     #[method(name = "gettxmeta")]
     async fn get_tx_meta(&self, txid: Txid) -> Result<Option<TxEntry>, ErrorObjectOwned>;
@@ -599,19 +613,6 @@ impl WalletManager {
         Ok(())
     }
 
-    pub async fn get_block_hash(
-        &self,
-        client: &reqwest::Client,
-        height: u32,
-    ) -> anyhow::Result<BlockId> {
-        let hash = self
-            .rpc
-            .send_json(&client, &self.rpc.get_block_hash(height))
-            .await?;
-
-        Ok(BlockId { height, hash })
-    }
-
     async fn get_wallet_start_block(&self, client: &reqwest::Client) -> anyhow::Result<BlockId> {
         let count: i32 = self
             .rpc
@@ -797,11 +798,11 @@ impl RpcServer for RpcServerImpl {
 
     async fn get_block_meta(
         &self,
-        block_hash: BlockHash,
-    ) -> Result<Option<BlockMeta>, ErrorObjectOwned> {
+        block_identifier: BlockIdentifier,
+    ) -> Result<BlockMetaWithHash, ErrorObjectOwned> {
         let data = self
             .store
-            .get_block_meta(block_hash)
+            .get_block_meta(block_identifier)
             .await
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))?;
 
@@ -1072,55 +1073,74 @@ impl AsyncChainState {
             BlockHash::from_str(info.get("blockhash").and_then(|t| t.as_str()).ok_or_else(
                 || anyhow!("Could not retrieve block hash for tx (is it in the mempool?)"),
             )?)?;
-        let block = Self::get_indexed_block(index, &block_hash, client, rpc, chain_state).await?;
+        let block = Self::get_indexed_block(
+            index,
+            BlockIdentifier::Hash(block_hash),
+            client,
+            rpc,
+            chain_state,
+        )
+        .await?;
 
-        if let Some(block) = block {
-            return Ok(block
-                .tx_meta
-                .into_iter()
-                .find(|tx| &tx.changeset.txid == txid));
-        }
-        Ok(None)
+        Ok(block
+            .tx_meta
+            .into_iter()
+            .find(|tx| &tx.changeset.txid == txid))
     }
 
     async fn get_indexed_block(
         index: &mut Option<LiveSnapshot>,
-        block_hash: &BlockHash,
+        block_identifier: BlockIdentifier,
         client: &reqwest::Client,
         rpc: &BitcoinRpc,
         chain_state: &mut LiveSnapshot,
-    ) -> Result<Option<BlockMeta>, anyhow::Error> {
+    ) -> Result<BlockMetaWithHash, anyhow::Error> {
         let index = index
             .as_mut()
             .ok_or_else(|| anyhow!("block index must be enabled"))?;
-        let hash = BaseHash::from_slice(block_hash.as_ref());
-        let block: Option<BlockMeta> = index
-            .get(hash)
-            .context("Could not fetch block from index")?;
+        let hash = match block_identifier {
+            BlockIdentifier::Hash(hash) => hash,
+            BlockIdentifier::Height(height) => rpc
+                .send_json(client, &rpc.get_block_hash(height))
+                .await
+                .map_err(|e| anyhow!("Could not retrieve block hash ({})", e))?,
+        };
 
-        if let Some(block_set) = block {
-            return Ok(Some(block_set));
+        if let Some(BlockMeta { height, tx_meta }) = index
+            .get(BaseHash::from_slice(hash.as_ref()))
+            .context("Could not fetch block from index")?
+        {
+            return Ok(BlockMetaWithHash {
+                hash,
+                height,
+                tx_meta,
+            });
         }
 
         let info: serde_json::Value = rpc
-            .send_json(client, &rpc.get_block_header(block_hash))
+            .send_json(client, &rpc.get_block_header(&hash))
             .await
             .map_err(|e| anyhow!("Could not retrieve block ({})", e))?;
 
         let height = info
             .get("height")
             .and_then(|t| t.as_u64())
+            .and_then(|h| u32::try_from(h).ok())
             .ok_or_else(|| anyhow!("Could not retrieve block height"))?;
 
         let tip = chain_state.tip.read().expect("read meta").clone();
-        if height > tip.height as u64 {
+        if height > tip.height {
             return Err(anyhow!(
                 "Spaces is syncing at height {}, requested block height {}",
                 tip.height,
                 height
             ));
         }
-        Ok(None)
+        Ok(BlockMetaWithHash {
+            hash,
+            height,
+            tx_meta: Vec::new(),
+        })
     }
 
     pub async fn handle_command(
@@ -1168,10 +1188,18 @@ impl AsyncChainState {
                     .context("could not fetch spaceout");
                 let _ = resp.send(result);
             }
-            ChainStateCommand::GetBlockMeta { block_hash, resp } => {
-                let res =
-                    Self::get_indexed_block(block_index, &block_hash, client, rpc, chain_state)
-                        .await;
+            ChainStateCommand::GetBlockMeta {
+                block_identifier,
+                resp,
+            } => {
+                let res = Self::get_indexed_block(
+                    block_index,
+                    block_identifier,
+                    client,
+                    rpc,
+                    chain_state,
+                )
+                .await;
                 let _ = resp.send(res);
             }
             ChainStateCommand::GetTxMeta { txid, resp } => {
@@ -1479,10 +1507,16 @@ impl AsyncChainState {
         resp_rx.await?
     }
 
-    pub async fn get_block_meta(&self, block_hash: BlockHash) -> anyhow::Result<Option<BlockMeta>> {
+    pub async fn get_block_meta(
+        &self,
+        block_identifier: BlockIdentifier,
+    ) -> anyhow::Result<BlockMetaWithHash> {
         let (resp, resp_rx) = oneshot::channel();
         self.sender
-            .send(ChainStateCommand::GetBlockMeta { block_hash, resp })
+            .send(ChainStateCommand::GetBlockMeta {
+                block_identifier,
+                resp,
+            })
             .await?;
         resp_rx.await?
     }
