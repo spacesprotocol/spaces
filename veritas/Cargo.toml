@@ -9,7 +9,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 spaces_protocol = { path = "../protocol", default-features = false, features = ["std"]}
 bincode = { version = "2.0.0-rc.3", default-features = false, features = ["alloc"]}
-spacedb = { git = "https://github.com/spacesprotocol/spacedb", version = "0.0.4", default-features = false }
+spacedb = { git = "https://github.com/spacesprotocol/spacedb", version = "0.0.5", default-features = false }
 
 # optional wasm feature
 wasm-bindgen = { version ="0.2.100", optional = true }
