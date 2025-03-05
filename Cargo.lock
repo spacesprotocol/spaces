@@ -413,15 +413,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "block-buffer"
-version = "0.11.0-rc.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3fd016a0ddc7cb13661bf5576073ce07330a693f8608a1320b4e20561cc12cdc"
-dependencies = [
- "hybrid-array",
-]
-
-[[package]]
 name = "bstr"
 version = "1.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -505,7 +496,7 @@ version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "773f3b9af64447d2ce9850330c473515014aa235e6a783b02db81ff39e4a3dad"
 dependencies = [
- "crypto-common 0.1.6",
+ "crypto-common",
  "inout",
 ]
 
@@ -565,12 +556,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "const-oid"
-version = "0.10.0-rc.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "68ff6be19477a1bd5441f382916a89bc2a0b2c35db6d41e0f6e8538bf6d6463f"
-
-[[package]]
 name = "constant_time_eq"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -627,17 +612,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "crypto-common"
-version = "0.2.0-rc.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b0b8ce8218c97789f16356e7896b3714f26c2ee1079b79c0b7ae7064bb9089fa"
-dependencies = [
- "getrandom",
- "hybrid-array",
- "rand_core",
-]
-
-[[package]]
 name = "ctrlc"
 version = "3.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -678,19 +652,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
 dependencies = [
  "block-buffer 0.10.4",
- "crypto-common 0.1.6",
+ "crypto-common",
  "subtle",
-]
-
-[[package]]
-name = "digest"
-version = "0.11.0-pre.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cf2e3d6615d99707295a9673e889bf363a04b2a466bd320c65a72536f7577379"
-dependencies = [
- "block-buffer 0.11.0-rc.3",
- "const-oid",
- "crypto-common 0.2.0-rc.1",
 ]
 
 [[package]]
@@ -1139,15 +1102,6 @@ name = "humantime"
 version = "2.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9a3a5bfb195931eeb336b2a7b4d761daec841b97f947d34394601737a7bba5e4"
-
-[[package]]
-name = "hybrid-array"
-version = "0.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f2d35805454dc9f8662a98d6d61886ffe26bd465f5960e0e55345c70d5c0d2a9"
-dependencies = [
- "typenum",
-]
 
 [[package]]
 name = "hyper"
@@ -1687,7 +1641,7 @@ dependencies = [
  "digest 0.10.7",
  "hmac",
  "password-hash",
- "sha2 0.10.8",
+ "sha2",
 ]
 
 [[package]]
@@ -2324,17 +2278,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sha2"
-version = "0.11.0-pre.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "540c0893cce56cdbcfebcec191ec8e0f470dd1889b6e7a0b503e310a94a168f5"
-dependencies = [
- "cfg-if",
- "cpufeatures",
- "digest 0.11.0-pre.9",
-]
-
-[[package]]
 name = "signal-hook-registry"
 version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2386,13 +2329,13 @@ dependencies = [
 
 [[package]]
 name = "spacedb"
-version = "0.0.4"
-source = "git+https://github.com/spacesprotocol/spacedb#e07259ac6fc9cea1b06ee2cfdbb93d8c3039658a"
+version = "0.0.5"
+source = "git+https://github.com/spacesprotocol/spacedb#d8a2281e360b471f218e7d9756c0c35dc0c4a536"
 dependencies = [
  "bincode",
  "hex",
  "libc",
- "sha2 0.11.0-pre.4",
+ "sha2",
 ]
 
 [[package]]
