@@ -11,6 +11,7 @@ use spaces_protocol::{
     bitcoin::{Amount, FeeRate},
     constants::RENEWAL_INTERVAL,
     script::SpaceScript,
+    slabel::SLabel,
     Covenant,
 };
 use spaces_testutil::TestRig;
@@ -336,7 +337,7 @@ async fn it_should_allow_claim_on_or_after_claim_height(rig: &TestRig) -> anyhow
     assert_eq!(
         all_spaces.owned.len() + 1,
         all_spaces_2.owned.len(),
-        "must be equal"
+        "eve must have one more space"
     );
 
     let space = rig
@@ -1282,6 +1283,140 @@ async fn it_should_allow_sign_verify_messages(rig: &TestRig) -> anyhow::Result<(
     Ok(())
 }
 
+async fn it_should_track_space_state_in_wallets(rig: &TestRig) -> anyhow::Result<()> {
+    let space = SLabel::from_str("@example9999").expect("space name should be correct");
+    macro_rules! assert_space_in_wallet_collection {
+        ($wallet:expr, $collection:ident) => {{
+            let spaces = rig.spaced.client.wallet_list_spaces($wallet).await?;
+            assert!(
+                spaces.$collection.iter().any(|s| s
+                    .spaceout
+                    .space
+                    .as_ref()
+                    .map_or(false, |s| s.name == space)),
+                "{} should have {} in the {} set",
+                stringify!($wallet),
+                space,
+                stringify!($collection),
+            );
+        }};
+    }
+    macro_rules! assert_space_not_in_wallet_collection {
+        ($wallet:expr, $collection:ident) => {{
+            let spaces = rig.spaced.client.wallet_list_spaces($wallet).await?;
+            assert!(
+                !spaces.$collection.iter().any(|s| s
+                    .spaceout
+                    .space
+                    .as_ref()
+                    .map_or(false, |s| s.name == space)),
+                "{} should not have {} in the {} set",
+                stringify!($wallet),
+                space,
+                stringify!($collection),
+            );
+        }};
+    }
+    macro_rules! assert_space_not_in_wallet {
+        ($wallet:expr) => {{
+            assert_space_not_in_wallet_collection!($wallet, outbid);
+            assert_space_not_in_wallet_collection!($wallet, winning);
+            assert_space_not_in_wallet_collection!($wallet, owned);
+        }};
+    }
+
+    rig.wait_until_synced().await?;
+    rig.wait_until_wallet_synced(ALICE).await?;
+
+    wallet_do(
+        rig,
+        ALICE,
+        vec![RpcWalletRequest::Open(OpenParams {
+            name: space.to_string(),
+            amount: 1000,
+        })],
+        false,
+    )
+    .await
+    .expect("send request");
+
+    rig.mine_blocks(1, None).await?;
+    rig.wait_until_synced().await?;
+    rig.wait_until_wallet_synced(ALICE).await?;
+
+    assert_space_in_wallet_collection!(ALICE, winning);
+
+    wallet_do(
+        rig,
+        BOB,
+        vec![RpcWalletRequest::Bid(BidParams {
+            name: space.to_string(),
+            amount: 1000000,
+        })],
+        false,
+    )
+    .await
+    .expect("send request");
+
+    for _ in 0..11 {
+        rig.mine_blocks(144, None).await?;
+        rig.wait_until_synced().await?;
+    }
+    rig.wait_until_wallet_synced(ALICE).await?;
+    rig.wait_until_wallet_synced(BOB).await?;
+
+    assert_space_in_wallet_collection!(ALICE, outbid);
+    assert_space_in_wallet_collection!(BOB, winning);
+
+    wallet_do(
+        rig,
+        BOB,
+        vec![RpcWalletRequest::Register(RegisterParams {
+            name: space.to_string(),
+            to: None,
+        })],
+        false,
+    )
+    .await
+    .expect("send request");
+
+    rig.mine_blocks(1, None).await?;
+    rig.wait_until_synced().await?;
+    rig.wait_until_wallet_synced(ALICE).await?;
+    rig.wait_until_wallet_synced(BOB).await?;
+
+    assert_space_not_in_wallet!(ALICE);
+    assert_space_in_wallet_collection!(BOB, owned);
+    
+    wallet_do(
+        rig,
+        BOB,
+        vec![RpcWalletRequest::Transfer(TransferSpacesParams {
+            spaces: vec![space.to_string()],
+            to: Some(rig
+                .spaced
+                .client
+                .wallet_get_new_address(EVE, AddressKind::Space)
+                .await?),
+        })],
+        false,
+    )
+    .await
+    .expect("send request");
+
+    rig.mine_blocks(1, None).await?;
+    rig.wait_until_synced().await?;
+    rig.wait_until_wallet_synced(ALICE).await?;
+    rig.wait_until_wallet_synced(BOB).await?;
+    rig.wait_until_wallet_synced(EVE).await?;
+
+    assert_space_not_in_wallet!(ALICE);
+    assert_space_not_in_wallet!(BOB);
+    assert_space_in_wallet_collection!(EVE, owned);
+
+    Ok(())
+}
+
 async fn it_should_handle_reorgs(rig: &TestRig) -> anyhow::Result<()> {
     rig.wait_until_wallet_synced(ALICE).await.expect("synced");
     const NAME: &str = "hello_world";
@@ -1350,6 +1485,9 @@ async fn run_auction_tests() -> anyhow::Result<()> {
     it_should_allow_sign_verify_messages(&rig)
         .await
         .expect("should sign verify");
+    it_should_track_space_state_in_wallets(&rig)
+        .await
+        .expect("should track space state");
 
     // keep reorgs last as it can drop some txs from mempool and mess up wallet state
     it_should_handle_reorgs(&rig)
