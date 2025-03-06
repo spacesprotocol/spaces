@@ -668,6 +668,9 @@ impl RpcWallet {
             let spacehash = SpaceKey::from(Sha256::hash(name.as_ref()));
             let space = state.get_space_info(&spacehash)?;
             if let Some(space) = space {
+                if space.spaceout.space.as_ref().unwrap().is_owned() {
+                    continue;
+                }
                 let tx = wallet.get_tx(txid);
                 if tx.is_none() {
                     res.outbid.push(space);
