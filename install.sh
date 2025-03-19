@@ -51,7 +51,7 @@ add_to_path() {
   local reload_needed=false
 
   # Detect shell configuration file based on $SHELL environment variable
-  if [[ "$SHELL" == */zsh ]]; then
+  if echo "$SHELL" | grep -q "zsh"; then
     shell_rc="$HOME/.zshrc"
     shell_type="zsh"
   else
