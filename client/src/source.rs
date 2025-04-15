@@ -12,7 +12,7 @@ use std::{
 use base64::Engine;
 use bitcoin::{Block, BlockHash, Txid};
 use hex::FromHexError;
-use log::error;
+use log::{error, warn};
 use reqwest::StatusCode;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
@@ -20,7 +20,7 @@ use spaces_protocol::constants::ChainAnchor;
 use spaces_wallet::{bitcoin, bitcoin::Transaction};
 use threadpool::ThreadPool;
 use tokio::time::Instant;
-
+use spaces_protocol::bitcoin::Network;
 use crate::{client::BlockSource, std_wait};
 
 const BITCOIN_RPC_IN_WARMUP: i32 = -28; // Client still warming up
@@ -34,9 +34,11 @@ pub struct BitcoinRpc {
     id: Arc<AtomicU64>,
     auth_token: Option<String>,
     url: String,
+    legacy: bool
 }
 
 pub struct BlockFetcher {
+    chain: Network,
     src: BitcoinBlockSource,
     job_id: Arc<AtomicUsize>,
     sender: std::sync::mpsc::SyncSender<BlockEvent>,
@@ -121,18 +123,23 @@ trait ErrorForRpcBlocking {
 }
 
 impl BitcoinRpc {
-    pub fn new(url: &str, auth: BitcoinRpcAuth) -> Self {
+    pub fn new(url: &str, auth: BitcoinRpcAuth, legacy: bool) -> Self {
         Self {
             id: Default::default(),
             auth_token: auth.to_token(),
             url: url.to_string(),
+            legacy,
         }
     }
 
-    pub fn make_request(&self, method: &str, params: serde_json::Value) -> BitcoinRpcRequest {
+    pub fn make_request(&self, method: &str, params: Value) -> BitcoinRpcRequest {
         let id = self.id.fetch_add(1, Ordering::Relaxed);
         let body = serde_json::json!({
-            "jsonrpc": "1.0",
+            "jsonrpc": if self.legacy {
+                "1.0"
+            } else {
+                "2.0"
+            },
             "id": id.to_string(),
             "method": method,
             "params": params,
@@ -381,12 +388,14 @@ impl BitcoinRpcAuth {
 
 impl BlockFetcher {
     pub fn new(
+        chain: Network,
         src: BitcoinBlockSource,
         num_workers: usize,
     ) -> (Self, std::sync::mpsc::Receiver<BlockEvent>) {
         let (tx, rx) = std::sync::mpsc::sync_channel(12);
         (
             Self {
+                chain,
                 src,
                 job_id: Arc::new(AtomicUsize::new(0)),
                 sender: tx,
@@ -401,10 +410,15 @@ impl BlockFetcher {
     }
 
     fn should_sync(
+        expected_chain: Network,
         source: &BitcoinBlockSource,
         start: ChainAnchor,
     ) -> Result<Option<ChainAnchor>, BlockFetchError> {
-        let tip = source.get_best_chain()?;
+        let tip = match source.get_best_chain(Some(start.height), expected_chain)? {
+            Some(tip) => tip,
+            None => return Ok(None),
+        };
+
         if start.height > tip.height {
             return Err(BlockFetchError::BlockMismatch);
         }
@@ -437,6 +451,7 @@ impl BlockFetcher {
         let current_task = self.job_id.clone();
         let task_sender = self.sender.clone();
         let num_workers = self.num_workers;
+        let chain = self.chain;
 
         _ = std::thread::spawn(move || {
             let mut last_check = Instant::now() - Duration::from_secs(2);
@@ -451,7 +466,7 @@ impl BlockFetcher {
                 }
                 last_check = Instant::now();
 
-                let tip = match BlockFetcher::should_sync(&task_src, checkpoint) {
+                let tip = match BlockFetcher::should_sync(chain, &task_src, checkpoint) {
                     Ok(t) => t,
                     Err(e) => {
                         _ = task_sender.send(BlockEvent::Error(e));
@@ -872,21 +887,48 @@ impl BlockSource for BitcoinBlockSource {
             .send_json_blocking(&self.client, &self.rpc.get_block_count())?)
     }
 
-    fn get_best_chain(&self) -> Result<ChainAnchor, BitcoinRpcError> {
+    fn get_best_chain(&self, tip: Option<u32>, expected_chain: Network) -> Result<Option<ChainAnchor>, BitcoinRpcError> {
         #[derive(Deserialize)]
         struct Info {
-            #[serde(rename = "blocks")]
-            height: u64,
+            pub chain: String,
+            pub blocks: u32,
+            pub headers: u32,
             #[serde(rename = "bestblockhash")]
-            hash: BlockHash,
+            pub best_block_hash: BlockHash,
         }
         let info: Info = self
             .rpc
             .send_json_blocking(&self.client, &self.rpc.get_blockchain_info())?;
 
-        Ok(ChainAnchor {
-            hash: info.hash,
-            height: info.height as _,
-        })
+        let expected_chain = match expected_chain {
+            Network::Bitcoin => "main",
+            Network::Regtest => "regtest",
+            _ => "test"
+        };
+        if info.chain != expected_chain {
+            warn!("Invalid chain from connected rpc node - expected {}, got {}", expected_chain, info.chain);
+            return Ok(None);
+        }
+
+        let synced = info.headers == info.blocks;
+        let best_chain =  if !synced {
+            let block_hash = self.get_block_hash(info.blocks)?;
+            ChainAnchor {
+                hash: block_hash,
+                height: info.blocks,
+            }
+        } else {
+            ChainAnchor {
+                hash: info.best_block_hash,
+                height: info.headers,
+            }
+        };
+
+        // If the source is still syncing, and we have a higher tip, wait.
+        if !synced && tip.is_some_and(|tip| tip > info.blocks) {
+            return Ok(None);
+        }
+
+        Ok(Some(best_chain))
     }
 }

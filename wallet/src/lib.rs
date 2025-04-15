@@ -104,6 +104,7 @@ pub struct WalletInfo {
     pub start_block: u32,
     pub tip: u32,
     pub descriptors: Vec<DescriptorInfo>,
+    pub progress: Option<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -589,6 +590,7 @@ impl SpacesWallet {
             start_block: self.config.start_block,
             tip: self.internal.local_chain().tip().height(),
             descriptors,
+            progress: None,
         }
     }
 

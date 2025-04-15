@@ -189,7 +189,11 @@ impl Spaced {
             start_block.hash, start_block.height
         );
 
-        let (fetcher, receiver) = BlockFetcher::new(source.clone(), self.num_workers);
+        let (fetcher, receiver) = BlockFetcher::new(
+            self.network.fallback_network(),
+            source.clone(),
+            self.num_workers,
+        );
         fetcher.start(start_block);
 
         let mut shutdown_signal = shutdown.subscribe();

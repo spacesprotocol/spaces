@@ -79,6 +79,9 @@ pub struct Args {
     /// Skip maintaining historical root anchors
     #[arg(long, env = "SPACED_SKIP_ANCHORS", default_value = "false")]
     skip_anchors: bool,
+    /// The specified Bitcoin RPC is a light client
+    #[arg(long, env = "SPACED_BITCOIN_RPC_LIGHT", default_value = "false")]
+    bitcoin_rpc_light: bool,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug, ValueEnum, Serialize, Deserialize)]
@@ -164,6 +167,7 @@ impl Args {
         let rpc = BitcoinRpc::new(
             &args.bitcoin_rpc_url.expect("bitcoin rpc url"),
             bitcoin_rpc_auth,
+            !args.bitcoin_rpc_light
         );
 
         let genesis = Spaced::genesis(&rpc, args.chain).await?;

@@ -357,7 +357,20 @@ impl RpcWallet {
         synced: bool,
     ) -> anyhow::Result<()> {
         match command {
-            WalletCommand::GetInfo { resp } => _ = resp.send(Ok(wallet.get_info())),
+            WalletCommand::GetInfo { resp } =>{
+                let mut wallet_info = wallet.get_info();
+                let best_chain = source
+                    .get_best_chain(Some(wallet_info.tip), wallet.config.network);
+                if let Ok(Some(best_chain)) = best_chain {
+                    wallet_info.progress = if best_chain.height >= wallet_info.tip {
+                        Some(wallet_info.tip as f32 / best_chain.height as f32)
+                    } else {
+                        None
+                    }
+                }
+
+                _ = resp.send(Ok(wallet_info))
+            },
             WalletCommand::BatchTx { request, resp } => {
                 if !synced && !request.force {
                     _ = resp.send(Err(anyhow::anyhow!("Wallet is syncing")));
@@ -462,14 +475,17 @@ impl RpcWallet {
         protocol: &mut LiveSnapshot,
         wallet: &SpacesWallet,
     ) -> Option<ChainAnchor> {
-        let bitcoin_tip = match bitcoin.get_best_chain() {
-            Ok(tip) => tip,
+        let wallet_tip = wallet.local_chain().tip();
+
+        let bitcoin_tip = match bitcoin.get_best_chain(Some(wallet_tip.height()), wallet.config.network) {
+            Ok(Some(tip)) => tip,
+            Ok(None) => return None,
             Err(e) => {
                 warn!("Sync check failed: {}", e);
                 return None;
             }
         };
-        let wallet_tip = wallet.local_chain().tip();
+
         let protocol_tip = match protocol.tip.read() {
             Ok(tip) => tip.clone(),
             Err(e) => {
@@ -493,7 +509,9 @@ impl RpcWallet {
         shutdown: broadcast::Sender<()>,
         num_workers: usize,
     ) -> anyhow::Result<()> {
-        let (fetcher, receiver) = BlockFetcher::new(source.clone(), num_workers);
+        let (fetcher, receiver) = BlockFetcher::new(network.fallback_network(),
+                                                    source.clone(),
+                                                    num_workers);
 
         let mut wallet_tip = {
             let tip = wallet.local_chain().tip();
@@ -547,8 +565,13 @@ impl RpcWallet {
                     }
                     BlockEvent::Error(e) if matches!(e, BlockFetchError::BlockMismatch) => {
                         let mut checkpoint_in_chain = None;
-                        let best_chain = match source.get_best_chain() {
-                            Ok(best) => best,
+                        let best_chain = match source.get_best_chain(Some(wallet_tip.height), network.fallback_network()) {
+                            Ok(Some(best)) => best,
+                            Ok(None) => {
+                                warn!("Waiting for source to sync");
+                                fetcher.restart(wallet_tip, &receiver);
+                                continue;
+                            }
                             Err(error) => {
                                 warn!("Wallet error: {}", error);
                                 fetcher.restart(wallet_tip, &receiver);

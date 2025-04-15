@@ -66,8 +66,9 @@ pub(crate) type Responder<T> = oneshot::Sender<T>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerInfo {
-    pub chain: ExtendedNetwork,
+    pub chain: String,
     pub tip: ChainAnchor,
+    pub progress: Option<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -99,8 +100,8 @@ pub enum ChainStateCommand {
         txs: Vec<String>,
         resp: Responder<anyhow::Result<Vec<Option<TxChangeSet>>>>,
     },
-    GetTip {
-        resp: Responder<anyhow::Result<ChainAnchor>>,
+    GetServerInfo {
+        resp: Responder<anyhow::Result<ServerInfo>>,
     },
     GetSpace {
         hash: SpaceKey,
@@ -723,13 +724,12 @@ impl RpcServerImpl {
 #[async_trait]
 impl RpcServer for RpcServerImpl {
     async fn get_server_info(&self) -> Result<ServerInfo, ErrorObjectOwned> {
-        let chain = self.wallet_manager.network;
-        let tip = self
+        let info = self
             .store
-            .get_tip()
+            .get_server_info()
             .await
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))?;
-        Ok(ServerInfo { chain, tip })
+        Ok(info)
     }
 
     async fn get_space(
@@ -1092,6 +1092,7 @@ impl AsyncChainState {
             .find(|tx| &tx.changeset.txid == txid))
     }
 
+
     async fn get_indexed_block(
         index: &mut Option<LiveSnapshot>,
         height_or_hash: HeightOrHash,
@@ -1173,9 +1174,9 @@ impl AsyncChainState {
                 let result = emulator.apply_package(tip.height + 1, txs);
                 let _ = resp.send(result);
             }
-            ChainStateCommand::GetTip { resp } => {
+            ChainStateCommand::GetServerInfo { resp } => {
                 let tip = chain_state.tip.read().expect("read meta").clone();
-                _ = resp.send(Ok(tip))
+                _ = resp.send(get_server_info(client, rpc, tip).await)
             }
             ChainStateCommand::GetSpace { hash, resp } => {
                 let result = chain_state.get_space_info(&hash);
@@ -1498,9 +1499,9 @@ impl AsyncChainState {
         resp_rx.await?
     }
 
-    pub async fn get_tip(&self) -> anyhow::Result<ChainAnchor> {
+    pub async fn get_server_info(&self) -> anyhow::Result<ServerInfo> {
         let (resp, resp_rx) = oneshot::channel();
-        self.sender.send(ChainStateCommand::GetTip { resp }).await?;
+        self.sender.send(ChainStateCommand::GetServerInfo { resp }).await?;
         resp_rx.await?
     }
 
@@ -1560,4 +1561,28 @@ fn get_space_key(space_or_hash: &str) -> Result<SpaceKey, ErrorObjectOwned> {
     })?;
 
     Ok(SpaceKey::from(hash))
+}
+
+
+async fn get_server_info(client: &reqwest::Client, rpc: &BitcoinRpc, tip: ChainAnchor) -> anyhow::Result<ServerInfo> {
+    #[derive(Deserialize)]
+    struct Info {
+        pub chain: String,
+        pub headers: u32,
+    }
+
+    let info: Info = rpc
+        .send_json(client, &rpc.get_blockchain_info())
+        .await
+        .map_err(|e| anyhow!("Could not retrieve blockchain info ({})", e))?;
+
+    Ok(ServerInfo {
+        chain: info.chain,
+        tip,
+        progress: if info.headers >= tip.height {
+            Some(tip.height as f32 / info.headers as f32)
+        } else {
+            None
+        }
+    })
 }
