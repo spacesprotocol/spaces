@@ -66,9 +66,16 @@ pub(crate) type Responder<T> = oneshot::Sender<T>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerInfo {
-    pub chain: String,
+    pub network: String,
     pub tip: ChainAnchor,
-    pub progress: Option<f32>,
+    pub chain: ChainInfo,
+    pub progress: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChainInfo {
+    blocks: u32,
+    headers: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1083,7 +1090,7 @@ impl AsyncChainState {
             rpc,
             chain_state,
         )
-        .await?;
+            .await?;
 
         Ok(block
             .block_meta
@@ -1205,7 +1212,7 @@ impl AsyncChainState {
                     rpc,
                     chain_state,
                 )
-                .await;
+                    .await;
                 let _ = resp.send(res);
             }
             ChainStateCommand::GetTxMeta { txid, resp } => {
@@ -1267,7 +1274,7 @@ impl AsyncChainState {
                 File::open(anchors_path)
                     .or_else(|e| Err(anyhow!("Could not open anchors file: {}", e)))?,
             )
-            .or_else(|e| Err(anyhow!("Could not read anchors file: {}", e)))?;
+                .or_else(|e| Err(anyhow!("Could not read anchors file: {}", e)))?;
             return Ok(anchors);
         }
 
@@ -1569,6 +1576,7 @@ async fn get_server_info(client: &reqwest::Client, rpc: &BitcoinRpc, tip: ChainA
     struct Info {
         pub chain: String,
         pub headers: u32,
+        pub blocks: u32,
     }
 
     let info: Info = rpc
@@ -1577,12 +1585,16 @@ async fn get_server_info(client: &reqwest::Client, rpc: &BitcoinRpc, tip: ChainA
         .map_err(|e| anyhow!("Could not retrieve blockchain info ({})", e))?;
 
     Ok(ServerInfo {
-        chain: info.chain,
+        network: info.chain,
         tip,
+        chain: ChainInfo {
+            blocks: info.blocks,
+            headers: info.headers,
+        },
         progress: if info.headers >= tip.height {
-            Some(tip.height as f32 / info.headers as f32)
+            tip.height as f32 / info.headers as f32
         } else {
-            None
-        }
+            0.0
+        },
     })
 }

@@ -152,7 +152,7 @@ pub fn print_list_unspent(utxos: Vec<WalletOutput>, format: Format) {
 pub fn print_server_info(info: ServerInfo, format: Format) {
     match format {
         Format::Text => {
-            println!("CHAIN: {}", info.chain);
+            println!("CHAIN: {}", info.network);
             println!("  Height {}", info.tip.height);
             println!("  Hash {}", info.tip.hash);
         }

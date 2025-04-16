@@ -363,9 +363,9 @@ impl RpcWallet {
                     .get_best_chain(Some(wallet_info.tip), wallet.config.network);
                 if let Ok(Some(best_chain)) = best_chain {
                     wallet_info.progress = if best_chain.height >= wallet_info.tip {
-                        Some(wallet_info.tip as f32 / best_chain.height as f32)
+                        wallet_info.tip as f32 / best_chain.height as f32
                     } else {
-                        None
+                        0.0
                     }
                 }
 
