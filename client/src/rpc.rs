@@ -1591,7 +1591,7 @@ async fn get_server_info(client: &reqwest::Client, rpc: &BitcoinRpc, tip: ChainA
             blocks: info.blocks,
             headers: info.headers,
         },
-        progress: if info.headers >= tip.height {
+        progress: if info.headers != 0 && info.headers >= tip.height {
             tip.height as f32 / info.headers as f32
         } else {
             0.0
