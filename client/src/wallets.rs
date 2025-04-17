@@ -17,7 +17,7 @@ use spaces_protocol::{
 use spaces_wallet::{
     address::SpaceAddress,
     bdk_wallet::{
-        chain::{local_chain::CheckPoint, BlockId},
+        chain::{local_chain::CheckPoint, BlockId, ChainPosition},
         KeychainKind,
     },
     bitcoin,
@@ -69,14 +69,22 @@ pub struct ListSpacesResponse {
 #[derive(Tabled, Debug, Clone, Serialize, Deserialize)]
 #[tabled(rename_all = "UPPERCASE")]
 pub struct TxInfo {
+    #[tabled(display_with = "display_block_height")]
+    pub block_height: Option<u32>,
     pub txid: Txid,
-    pub confirmed: bool,
     pub sent: Amount,
     pub received: Amount,
     #[tabled(display_with = "display_fee")]
     pub fee: Option<Amount>,
     #[tabled(rename = "DETAILS", display_with = "display_events")]
     pub events: Vec<TxEvent>,
+}
+
+fn display_block_height(block_height: &Option<u32>) -> String {
+    match block_height {
+        None => "Unconfirmed".to_string(),
+        Some(block_height) => block_height.to_string(),
+    }
 }
 
 fn display_fee(fee: &Option<Amount>) -> String {
@@ -743,14 +751,17 @@ impl RpcWallet {
             .skip(skip)
             .take(count)
             .map(|ctx| {
+                let block_height = match ctx.chain_position {
+                    ChainPosition::Confirmed { anchor, .. } => Some(anchor.block_id.height),
+                    ChainPosition::Unconfirmed { .. } => None,
+                };
                 let tx = ctx.tx_node.tx.clone();
                 let txid = ctx.tx_node.txid.clone();
-                let confirmed = ctx.chain_position.is_confirmed();
                 let (sent, received) = wallet.sent_and_received(&tx);
                 let fee = wallet.calculate_fee(&tx).ok();
                 TxInfo {
+                    block_height,
                     txid,
-                    confirmed,
                     sent,
                     received,
                     fee,
