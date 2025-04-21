@@ -74,8 +74,8 @@ pub struct ServerInfo {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChainInfo {
-    blocks: u32,
-    headers: u32,
+    pub blocks: u32,
+    pub headers: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
