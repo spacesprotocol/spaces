@@ -129,7 +129,8 @@ impl Composer {
     }
 
     async fn run(&mut self) -> anyhow::Result<()> {
-        let spaced = Args::configure().await?;
+        let shutdown_receiver = self.shutdown.subscribe();
+        let spaced = Args::configure(shutdown_receiver).await?;
         self.setup_rpc_services(&spaced).await;
         self.setup_sync_service(spaced).await;
 
