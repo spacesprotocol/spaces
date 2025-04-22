@@ -896,15 +896,22 @@ impl BlockSource for BitcoinBlockSource {
             #[serde(rename = "bestblockhash")]
             pub best_block_hash: BlockHash,
         }
-        let info: Info = self
+        let mut info: Info = self
             .rpc
             .send_json_blocking(&self.client, &self.rpc.get_blockchain_info())?;
 
+        // TODO: update this check once testnet4 is part of the [Network] type.
+        // use network names from bitcoin core
+        // https://github.com/bitcoin/bitcoin/blob/master/src/util/chaintype.cpp
         let expected_chain = match expected_chain {
             Network::Bitcoin => "main",
             Network::Regtest => "regtest",
+            Network::Signet => "signet",
             _ => "test"
         };
+        if info.chain.starts_with("test") {
+            info.chain = "test".to_string()
+        }
         if info.chain != expected_chain {
             warn!("Invalid chain from connected rpc node - expected {}, got {}", expected_chain, info.chain);
             return Ok(None);
