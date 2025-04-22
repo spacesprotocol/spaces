@@ -267,7 +267,7 @@ impl Spaced {
             _ => panic!("unsupported network"),
         };
 
-        let source = BitcoinBlockSource::new(rpc.clone());
+
 
         // Wait for the RPC node to be ready
         let mut attempts = 0;
@@ -282,8 +282,13 @@ impl Spaced {
                         last_error
                     ));
             }
-            let best_chain =
-                source.get_best_chain(Some(anchor.height), network.fallback_network());
+
+            let rpc_task = rpc.clone();
+            let net_task = network.fallback_network();
+            let best_chain = tokio::task::spawn_blocking(move || {
+                let source = BitcoinBlockSource::new(rpc_task);
+                    source.get_best_chain(Some(anchor.height), net_task)
+            }).await.expect("join");
 
             match best_chain {
                 Ok(Some(tip)) => {
