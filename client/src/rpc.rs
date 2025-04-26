@@ -207,6 +207,9 @@ pub trait Rpc {
     #[method(name = "gettxmeta")]
     async fn get_tx_meta(&self, txid: Txid) -> Result<Option<TxEntry>, ErrorObjectOwned>;
 
+    #[method(name = "listwallets")]
+    async fn list_wallets(&self) -> Result<Vec<String>, ErrorObjectOwned>;
+
     #[method(name = "walletload")]
     async fn wallet_load(&self, name: &str) -> Result<(), ErrorObjectOwned>;
 
@@ -583,6 +586,21 @@ impl WalletManager {
         (network, genesis_hash)
     }
 
+    pub async fn list_wallets(&self) -> anyhow::Result<Vec<String>> {
+        let wallets = std::fs::read_dir(&self.data_dir)?
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().is_dir())
+            .filter_map(|entry| {
+                entry.path()
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(String::from)
+            })
+            .collect();
+
+        Ok(wallets)
+    }
+
     pub async fn load_wallet(&self, name: &str) -> anyhow::Result<()> {
         if self.wallets.read().await.contains_key(name) {
             return Ok(());
@@ -826,6 +844,15 @@ impl RpcServer for RpcServerImpl {
             .await
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))?;
         Ok(data)
+    }
+
+    async fn list_wallets(&self) ->  Result<Vec<String>, ErrorObjectOwned> {
+        self.wallet_manager
+            .list_wallets()
+            .await
+            .map_err(|error| {
+                ErrorObjectOwned::owned(-1, error.to_string(), None::<String>)
+            })
     }
 
     async fn wallet_load(&self, name: &str) -> Result<(), ErrorObjectOwned> {

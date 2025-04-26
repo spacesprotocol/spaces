@@ -149,6 +149,17 @@ pub fn print_list_unspent(utxos: Vec<WalletOutput>, format: Format) {
     }
 }
 
+pub fn print_list_wallets(wallets: Vec<String>, format: Format) {
+    match format {
+        Format::Text => {
+            println!("{}", wallets.join("\n"));
+        }
+        Format::Json => {
+            println!("{}", serde_json::to_string_pretty(&wallets).unwrap());
+        }
+    }
+}
+
 pub fn print_server_info(info: ServerInfo, format: Format) {
     match format {
         Format::Text => {
