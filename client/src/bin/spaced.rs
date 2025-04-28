@@ -53,7 +53,7 @@ impl Composer {
         }
     }
 
-    async fn setup_rpc_wallet(&mut self, spaced: &Spaced, rx: mpsc::Receiver<WalletLoadRequest>) {
+    async fn setup_rpc_wallet(&mut self, spaced: &Spaced, rx: mpsc::Receiver<WalletLoadRequest>, cbf: bool) {
         let wallet_service = RpcWallet::service(
             spaced.network,
             spaced.rpc.clone(),
@@ -61,6 +61,7 @@ impl Composer {
             rx,
             self.shutdown.clone(),
             spaced.num_workers,
+            cbf
         );
 
         self.services.spawn(async move {
@@ -107,7 +108,7 @@ impl Composer {
                 .map_err(|e| anyhow!("RPC Server error: {}", e))
         });
 
-        self.setup_rpc_wallet(spaced, wallet_loader_rx).await;
+        self.setup_rpc_wallet(spaced, wallet_loader_rx, spaced.cbf).await;
     }
 
     async fn setup_sync_service(&mut self, mut spaced: Spaced) {

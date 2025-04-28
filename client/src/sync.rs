@@ -45,6 +45,7 @@ pub struct Spaced {
     pub num_workers: usize,
     pub anchors_path: Option<PathBuf>,
     pub synced: bool,
+    pub cbf: bool,
 }
 
 impl Spaced {

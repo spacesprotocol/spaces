@@ -18,6 +18,7 @@ pub mod source;
 pub mod store;
 pub mod sync;
 pub mod wallets;
+mod cbf;
 
 fn std_wait<F>(mut predicate: F, wait: Duration)
 where

@@ -224,6 +224,7 @@ impl Args {
             num_workers: args.jobs as usize,
             anchors_path,
             synced: false,
+            cbf: args.bitcoin_rpc_light
         })
     }
 

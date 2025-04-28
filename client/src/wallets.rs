@@ -45,6 +45,7 @@ use crate::{
     std_wait,
     store::{ChainState, LiveSnapshot, Sha256},
 };
+use crate::cbf::{CompactFilterSync};
 
 const MEMPOOL_CHECK_INTERVAL: Duration =
     Duration::from_secs(if cfg!(debug_assertions) { 1 } else { 5 * 60 });
@@ -516,10 +517,12 @@ impl RpcWallet {
         mut commands: Receiver<WalletCommand>,
         shutdown: broadcast::Sender<()>,
         num_workers: usize,
+        cbf: bool,
     ) -> anyhow::Result<()> {
         let (fetcher, receiver) = BlockFetcher::new(network.fallback_network(),
                                                     source.clone(),
                                                     num_workers);
+
 
         let mut wallet_tip = {
             let tip = wallet.local_chain().tip();
@@ -530,7 +533,12 @@ impl RpcWallet {
         };
 
         let mut shutdown_recv = shutdown.subscribe();
-        fetcher.start(wallet_tip);
+
+        let mut cbf_sync = CompactFilterSync::new(&wallet);
+        if !cbf {
+            fetcher.start(wallet_tip);
+        }
+
         let mut synced_at_least_once = false;
         let mut last_mempool_check = Instant::now();
         loop {
@@ -538,6 +546,8 @@ impl RpcWallet {
                 info!("Shutting down wallet sync");
                 break;
             }
+
+            // Wallet Commands:
             if let Ok(command) = commands.try_recv() {
                 let synced = Self::all_synced(&source, &mut state, &wallet).is_some();
                 Self::wallet_handle_commands(
@@ -549,6 +559,27 @@ impl RpcWallet {
                     synced,
                 )?;
             }
+
+            // Compact Filter Sync:
+            if cbf && !cbf_sync.synced() {
+                cbf_sync.sync_next(&mut wallet, &source)?;
+
+                // Once compact filter sync is complete
+                // start the block fetcher
+                if cbf_sync.synced() {
+                    wallet_tip = {
+                        let tip = wallet.local_chain().tip();
+                        ChainAnchor {
+                            height: tip.height(),
+                            hash: tip.hash(),
+                        }
+                    };
+                    fetcher.start(wallet_tip);
+                }
+                continue;
+            }
+
+            // Block fetcher events:
             if let Ok(event) = receiver.try_recv() {
                 match event {
                     BlockEvent::Tip(_) => {
@@ -567,6 +598,7 @@ impl RpcWallet {
                         wallet_tip.height = id.height;
                         wallet_tip.hash = id.hash;
 
+                        info!("wallet({}): block={} height={}", wallet.name(), wallet_tip.hash, wallet_tip.height);
                         if id.height % 12 == 0 {
                             wallet.commit()?;
                         }
@@ -1182,6 +1214,7 @@ impl RpcWallet {
         mut channel: Receiver<WalletLoadRequest>,
         shutdown: broadcast::Sender<()>,
         num_workers: usize,
+        cbf: bool,
     ) -> anyhow::Result<()> {
         let mut shutdown_signal = shutdown.subscribe();
         let mut wallet_results = FuturesUnordered::new();
@@ -1212,7 +1245,8 @@ impl RpcWallet {
                                   wallet,
                                   loaded.rx,
                                   wallet_shutdown,
-                                  num_workers
+                                  num_workers,
+                                  cbf
                                 ));
                               }
                               Err(err) => {

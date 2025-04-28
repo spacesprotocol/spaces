@@ -5,7 +5,8 @@ use std::{error::Error, fmt};
 
 use anyhow::{anyhow, Result};
 use bincode::{Decode, Encode};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::de::Error as SerdeError;
 use spaces_protocol::{
     bitcoin::{Amount, Block, BlockHash, OutPoint, Txid},
     constants::{ChainAnchor, ROLLOUT_BATCH_SIZE, ROLLOUT_BLOCK_INTERVAL},
@@ -20,15 +21,52 @@ use crate::{
     source::BitcoinRpcError,
     store::{ChainState, ChainStore, LiveSnapshot, LiveStore, Sha256},
 };
+use crate::source::BlockQueueResult;
 
 pub trait BlockSource {
     fn get_block_hash(&self, height: u32) -> Result<BlockHash, BitcoinRpcError>;
-    fn get_block(&self, hash: &BlockHash) -> Result<Block, BitcoinRpcError>;
+    fn get_block(&self, hash: &BlockHash) -> Result<Option<Block>, BitcoinRpcError>;
     fn get_median_time(&self) -> Result<u64, BitcoinRpcError>;
     fn in_mempool(&self, txid: &Txid, height: u32) -> Result<bool, BitcoinRpcError>;
     fn get_block_count(&self) -> Result<u64, BitcoinRpcError>;
     fn get_best_chain(&self, tip: Option<u32>, expected_chain: Network) -> Result<Option<ChainAnchor>, BitcoinRpcError>;
+    fn get_blockchain_info(&self) -> Result<BlockchainInfo, BitcoinRpcError>;
+    fn get_block_filter_by_height(&self, height: u32) -> Result<Option<BlockFilterRpc>, BitcoinRpcError>;
+    fn queue_blocks(&self, heights: Vec<u32>) -> Result<(), BitcoinRpcError>;
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlockFilterRpc {
+    pub hash:   BlockHash,
+    pub height: u32,
+    #[serde(
+        serialize_with   = "serialize_hex",
+        deserialize_with = "deserialize_hex"
+    )]
+    pub content: Vec<u8>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct BlockchainInfo {
+    pub chain: String,
+    pub blocks: u32,
+    pub headers: u32,
+    #[serde(rename = "bestblockhash")]
+    pub best_block_hash: BlockHash,
+    #[serde(rename = "pruneheight", skip_serializing_if = "Option::is_none")]
+    pub prune_height: Option<u32>,
+    pub pruned: bool,
+    // Light sync specific info
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filters: Option<u32>,
+    #[serde(rename = "filterheaders", skip_serializing_if = "Option::is_none")]
+    pub filter_headers: Option<u32>,
+    #[serde(rename = "blockqueue", skip_serializing_if = "Option::is_none")]
+    pub block_queue: Option<BlockQueueResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checkpoint: Option<ChainAnchor>,
+}
+
 
 #[derive(Debug, Clone)]
 pub struct Client {
@@ -353,4 +391,20 @@ fn unwrap_bid_value(spaceout: &SpaceOut) -> (Amount, Amount) {
         return (total_burned, total_burned - value);
     }
     panic!("expected a bid covenant")
+}
+
+
+fn serialize_hex<S>(bytes: &Vec<u8>, s: S) -> std::result::Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    s.serialize_str(hex::encode(bytes).as_str())
+}
+
+fn deserialize_hex<'de, D>(d: D) -> std::result::Result<Vec<u8>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let s = String::deserialize(d)?;
+    hex::decode(s).map_err(D::Error::custom)
 }
