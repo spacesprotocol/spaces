@@ -356,7 +356,7 @@ impl BitcoinRpc {
     }
 
     fn parse_error_bytes(status: StatusCode, res_bytes: &[u8]) -> BitcoinRpcError {
-        let parsed_response: Result<JsonRpcResponse<String>, serde_json::Error> =
+        let parsed_response: Result<JsonRpcResponse<Option<String>>, serde_json::Error> =
             serde_json::from_slice(&res_bytes);
 
         match parsed_response {

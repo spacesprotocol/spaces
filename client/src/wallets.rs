@@ -563,7 +563,6 @@ impl RpcWallet {
                                                     source.clone(),
                                                     num_workers);
 
-
         let mut wallet_tip = {
             let tip = wallet.local_chain().tip();
             ChainAnchor {
@@ -574,10 +573,12 @@ impl RpcWallet {
 
         let mut shutdown_recv = shutdown.subscribe();
 
-        let mut cbf_sync = CompactFilterSync::new(&wallet);
-        if !cbf {
+        let mut cbf_sync = if cbf {
+            Some(CompactFilterSync::new(&wallet))
+        } else {
             fetcher.start(wallet_tip);
-        }
+            None
+        };
 
         let mut synced_at_least_once = false;
         let mut last_mempool_check = Instant::now();
@@ -607,7 +608,7 @@ impl RpcWallet {
             }
 
             // Compact Filter Sync:
-            if cbf && !cbf_sync.synced() {
+            if let Some(cbf_sync) = cbf_sync.as_mut()  {
                 cbf_sync.sync_next(&mut wallet, &source, &mut wallet_progress)?;
 
                 // Once compact filter sync is complete
