@@ -170,7 +170,7 @@ impl TestRig {
                 .expect("handle")? as u32;
 
             let info = self.spaced.client.wallet_get_info(wallet_name).await?;
-            if count == info.tip {
+            if count == info.info.tip {
                 return Ok(());
             }
             tokio::time::sleep(Duration::from_millis(100)).await;

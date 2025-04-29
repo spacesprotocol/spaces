@@ -8,7 +8,7 @@ use spaces_client::{
     rpc::{AsyncChainState, RpcServerImpl, WalletLoadRequest, WalletManager},
     source::{BitcoinBlockSource, BitcoinRpc},
     store,
-    sync::Spaced,
+    spaces::Spaced,
     wallets::RpcWallet,
 };
 use store::LiveSnapshot;
