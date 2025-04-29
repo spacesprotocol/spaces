@@ -22,7 +22,7 @@ use toml::Value;
 use crate::{
     source::{BitcoinRpc, BitcoinRpcAuth},
     store::{LiveStore, Store},
-    sync::Spaced,
+    spaces::Spaced,
 };
 
 const RPC_OPTIONS: &str = "RPC Server Options";
@@ -224,6 +224,7 @@ impl Args {
             num_workers: args.jobs as usize,
             anchors_path,
             synced: false,
+            cbf: args.bitcoin_rpc_light
         })
     }
 

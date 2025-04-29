@@ -14,6 +14,7 @@ use spaces_protocol::{
     slabel::SLabel,
     FullSpaceOut, SpaceOut,
 };
+
 use spaces_wallet::{
     address::SpaceAddress,
     bdk_wallet::{
@@ -27,6 +28,7 @@ use spaces_wallet::{
     tx_event::{TxEvent, TxEventKind, TxRecord},
     Balance, DoubleUtxo, Listing, SpacesWallet, WalletInfo, WalletOutput,
 };
+
 use tabled::Tabled;
 use tokio::{
     select,
@@ -34,17 +36,10 @@ use tokio::{
     time::Instant,
 };
 
-use crate::{
-    checker::TxChecker,
-    client::BlockSource,
-    config::ExtendedNetwork,
-    rpc::{RpcWalletRequest, RpcWalletTxBuilder, WalletLoadRequest},
-    source::{
-        BitcoinBlockSource, BitcoinRpc, BitcoinRpcError, BlockEvent, BlockFetchError, BlockFetcher,
-    },
-    std_wait,
-    store::{ChainState, LiveSnapshot, Sha256},
-};
+use crate::{calc_progress, checker::TxChecker, client::BlockSource, config::ExtendedNetwork, rpc::{RpcWalletRequest, RpcWalletTxBuilder, WalletLoadRequest}, source::{
+    BitcoinBlockSource, BitcoinRpc, BitcoinRpcError, BlockEvent, BlockFetchError, BlockFetcher,
+}, std_wait, store::{ChainState, LiveSnapshot, Sha256}};
+use crate::cbf::{CompactFilterSync};
 
 const MEMPOOL_CHECK_INTERVAL: Duration =
     Duration::from_secs(if cfg!(debug_assertions) { 1 } else { 5 * 60 });
@@ -57,6 +52,49 @@ pub struct TxResponse {
     pub events: Vec<TxEvent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub raw: Option<String>,
+}
+
+#[derive(Copy, Clone, Serialize, Deserialize, Debug)]
+#[serde(tag = "status")]
+pub enum WalletProgressUpdate {
+    #[serde(rename = "source_sync")]
+    SourceSync {
+        total: u32,
+        completed: u32,
+    },
+    #[serde(rename = "cbf_filter_sync")]
+    CbfFilterSync {
+        total: u32,
+        completed: u32,
+    },
+    #[serde(rename = "cbf_process_filters")]
+    CbfProcessFilters {
+        total: u32,
+        completed: u32,
+    },
+    #[serde(rename = "cbf_download_matching_blocks")]
+    CbfDownloadMatchingBlocks {
+        total: u32,
+        completed: u32,
+    },
+    #[serde(rename = "cbf_process_matching_blocks")]
+    CbfProcessMatchingBlocks {
+        total: u32,
+        completed: u32,
+    },
+    #[serde(rename = "cbf_apply_update")]
+    CbfApplyUpdate,
+    #[serde(rename = "syncing")]
+    Syncing,
+    #[serde(rename = "complete")]
+    Complete,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WalletInfoWithProgress {
+    #[serde(flatten)]
+    pub info: WalletInfo,
+    pub status: WalletProgressUpdate
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -118,7 +156,7 @@ pub struct WalletResponse {
 
 pub enum WalletCommand {
     GetInfo {
-        resp: crate::rpc::Responder<anyhow::Result<WalletInfo>>,
+        resp: crate::rpc::Responder<anyhow::Result<WalletInfoWithProgress>>,
     },
     BatchTx {
         request: RpcWalletTxBuilder,
@@ -362,19 +400,22 @@ impl RpcWallet {
         mut state: &mut LiveSnapshot,
         wallet: &mut SpacesWallet,
         command: WalletCommand,
-        synced: bool,
+        progress_update: WalletProgressUpdate,
     ) -> anyhow::Result<()> {
+        let synced = matches!(progress_update, WalletProgressUpdate::Complete);
         match command {
             WalletCommand::GetInfo { resp } =>{
-                let mut wallet_info = wallet.get_info();
+                let mut wallet_info = WalletInfoWithProgress {
+                    info: wallet.get_info(),
+                    status: progress_update,
+                };
+
                 let best_chain = source
-                    .get_best_chain(Some(wallet_info.tip), wallet.config.network);
+                    .get_best_chain(Some(wallet_info.info.tip), wallet.config.network);
                 if let Ok(Some(best_chain)) = best_chain {
-                    wallet_info.progress = if best_chain.height >= wallet_info.tip {
-                        wallet_info.tip as f32 / best_chain.height as f32
-                    } else {
-                        0.0
-                    }
+                    wallet_info.info.progress = calc_progress(
+                        wallet.config.start_block,
+                        wallet_info.info.tip, best_chain.height);
                 }
 
                 _ = resp.send(Ok(wallet_info))
@@ -516,6 +557,7 @@ impl RpcWallet {
         mut commands: Receiver<WalletCommand>,
         shutdown: broadcast::Sender<()>,
         num_workers: usize,
+        cbf: bool,
     ) -> anyhow::Result<()> {
         let (fetcher, receiver) = BlockFetcher::new(network.fallback_network(),
                                                     source.clone(),
@@ -530,25 +572,61 @@ impl RpcWallet {
         };
 
         let mut shutdown_recv = shutdown.subscribe();
-        fetcher.start(wallet_tip);
+
+        let mut cbf_sync = if cbf {
+            Some(CompactFilterSync::new(&wallet))
+        } else {
+            fetcher.start(wallet_tip);
+            None
+        };
+
         let mut synced_at_least_once = false;
         let mut last_mempool_check = Instant::now();
+        let mut wallet_progress = WalletProgressUpdate::Syncing;
+
         loop {
             if shutdown_recv.try_recv().is_ok() {
                 info!("Shutting down wallet sync");
                 break;
             }
+
+            // Wallet Commands:
             if let Ok(command) = commands.try_recv() {
                 let synced = Self::all_synced(&source, &mut state, &wallet).is_some();
+                if synced {
+                    wallet_progress = WalletProgressUpdate::Complete;
+                }
+
                 Self::wallet_handle_commands(
                     network,
                     &source,
                     &mut state,
                     &mut wallet,
                     command,
-                    synced,
+                    wallet_progress,
                 )?;
             }
+
+            // Compact Filter Sync:
+            if let Some(cbf_sync) = cbf_sync.as_mut()  {
+                cbf_sync.sync_next(&mut wallet, &source, &mut wallet_progress)?;
+
+                // Once compact filter sync is complete
+                // start the block fetcher
+                if cbf_sync.synced() {
+                    wallet_tip = {
+                        let tip = wallet.local_chain().tip();
+                        ChainAnchor {
+                            height: tip.height(),
+                            hash: tip.hash(),
+                        }
+                    };
+                    fetcher.start(wallet_tip);
+                }
+                continue;
+            }
+
+            // Block fetcher events:
             if let Ok(event) = receiver.try_recv() {
                 match event {
                     BlockEvent::Tip(_) => {
@@ -567,6 +645,7 @@ impl RpcWallet {
                         wallet_tip.height = id.height;
                         wallet_tip.hash = id.hash;
 
+                        info!("wallet({}): block={} height={}", wallet.name(), wallet_tip.hash, wallet_tip.height);
                         if id.height % 12 == 0 {
                             wallet.commit()?;
                         }
@@ -1182,6 +1261,7 @@ impl RpcWallet {
         mut channel: Receiver<WalletLoadRequest>,
         shutdown: broadcast::Sender<()>,
         num_workers: usize,
+        cbf: bool,
     ) -> anyhow::Result<()> {
         let mut shutdown_signal = shutdown.subscribe();
         let mut wallet_results = FuturesUnordered::new();
@@ -1212,7 +1292,8 @@ impl RpcWallet {
                                   wallet,
                                   loaded.rx,
                                   wallet_shutdown,
-                                  num_workers
+                                  num_workers,
+                                  cbf
                                 ));
                               }
                               Err(err) => {
@@ -1239,7 +1320,7 @@ impl RpcWallet {
         Ok(())
     }
 
-    pub async fn send_get_info(&self) -> anyhow::Result<WalletInfo> {
+    pub async fn send_get_info(&self) -> anyhow::Result<WalletInfoWithProgress> {
         let (resp, resp_rx) = oneshot::channel();
         self.sender.send(WalletCommand::GetInfo { resp }).await?;
         resp_rx.await?
@@ -1412,3 +1493,5 @@ async fn named_future<T>(
 ) -> (String, Result<T, oneshot::error::RecvError>) {
     (name, rx.await)
 }
+
+

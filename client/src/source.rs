@@ -22,6 +22,7 @@ use threadpool::ThreadPool;
 use tokio::time::Instant;
 use spaces_protocol::bitcoin::Network;
 use crate::{client::BlockSource, std_wait};
+use crate::client::BlockFilterRpc;
 
 const BITCOIN_RPC_IN_WARMUP: i32 = -28; // Client still warming up
 const BITCOIN_RPC_CLIENT_NOT_CONNECTED: i32 = -9; // Bitcoin is not connected
@@ -98,7 +99,7 @@ impl From<BitcoinRpcError> for BlockFetchError {
 
 #[derive(Serialize, Deserialize)]
 pub struct JsonRpcResponse<T> {
-    pub result: Option<T>,
+    pub result: T,
     pub error: Option<JsonRpcError>,
     pub id: String,
 }
@@ -179,6 +180,16 @@ impl BitcoinRpc {
         let params = serde_json::json!([]);
         self.make_request("getblockchaininfo", params)
     }
+    pub fn get_block_filter_by_height(&self, height: u32) -> BitcoinRpcRequest {
+        let params = serde_json::json!([height]);
+        self.make_request("getblockfilterbyheight", params)
+    }
+
+    pub fn queue_blocks(&self, heights: Vec<u32>) -> BitcoinRpcRequest {
+        let params = serde_json::json!([heights]);
+        self.make_request("queueblocks", params)
+    }
+
     pub fn get_mempool_entry(&self, txid: &Txid) -> BitcoinRpcRequest {
         let params = serde_json::json!([txid]);
 
@@ -345,7 +356,7 @@ impl BitcoinRpc {
     }
 
     fn parse_error_bytes(status: StatusCode, res_bytes: &[u8]) -> BitcoinRpcError {
-        let parsed_response: Result<JsonRpcResponse<String>, serde_json::Error> =
+        let parsed_response: Result<JsonRpcResponse<Option<String>>, serde_json::Error> =
             serde_json::from_slice(&res_bytes);
 
         match parsed_response {
@@ -562,12 +573,14 @@ impl BlockFetcher {
                 raw
             } else {
                 // fallback to decoding json
-                let hex_block: JsonRpcResponse<String> = serde_json::from_slice(raw.as_slice())
-                    .map_err(|e| BitcoinRpcError::Other(e.to_string()))?;
+                let hex_block: JsonRpcResponse<Option<String>> = serde_json::from_slice(raw.as_slice())
+                    .map_err(|e| BitcoinRpcError::Other(format!("fetch block {}: {}",hash, e.to_string())))?;
                 if let Some(e) = hex_block.error {
                     return Err(BitcoinRpcError::Rpc(e));
                 }
-                hex_block.result.unwrap().into_bytes()
+                let block = hex_block.result
+                    .ok_or(BitcoinRpcError::Other(format!("could not find block with hash {}", hash)))?;
+                block.into_bytes()
             };
 
         if hex_block.len() % 2 != 0 {
@@ -803,7 +816,7 @@ impl ErrorForRpc for reqwest::Response {
             return Err(BitcoinRpcError::Rpc(e));
         }
 
-        Ok(rpc_res.result.unwrap())
+        Ok(rpc_res.result)
     }
 }
 
@@ -814,9 +827,16 @@ impl ErrorForRpcBlocking for reqwest::blocking::Response {
             return Err(BitcoinRpcError::Rpc(e));
         }
 
-        Ok(rpc_res.result.unwrap())
+        Ok(rpc_res.result)
     }
 }
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BlockQueueResult {
+    pub pending: u32,
+    pub completed: u32,
+}
+
 
 #[derive(Clone)]
 pub struct BitcoinBlockSource {
@@ -838,10 +858,8 @@ impl BlockSource for BitcoinBlockSource {
             .send_json_blocking(&self.client, &self.rpc.get_block_hash(height))?)
     }
 
-    fn get_block(&self, hash: &BlockHash) -> Result<Block, BitcoinRpcError> {
-        Ok(self
-            .rpc
-            .send_json_blocking(&self.client, &self.rpc.get_block(hash))?)
+    fn get_block(&self, hash: &BlockHash) -> Result<Option<Block>, BitcoinRpcError> {
+        BlockFetcher::fetch_block(self, hash).map(|b| Some(b))
     }
 
     fn get_median_time(&self) -> Result<u64, BitcoinRpcError> {
@@ -886,6 +904,7 @@ impl BlockSource for BitcoinBlockSource {
             .rpc
             .send_json_blocking(&self.client, &self.rpc.get_block_count())?)
     }
+
 
     fn get_best_chain(&self, tip: Option<u32>, expected_chain: Network) -> Result<Option<ChainAnchor>, BitcoinRpcError> {
         #[derive(Deserialize)]
@@ -937,5 +956,29 @@ impl BlockSource for BitcoinBlockSource {
         }
 
         Ok(Some(best_chain))
+    }
+
+    fn get_blockchain_info(&self) -> anyhow::Result<crate::client::BlockchainInfo, BitcoinRpcError> {
+        let mut info: crate::client::BlockchainInfo = self
+            .rpc
+            .send_json_blocking(&self.client, &self.rpc.get_blockchain_info())?;
+        if info.chain.starts_with("test") {
+            info.chain = "test".to_string()
+        }
+        Ok(info)
+    }
+
+    fn get_block_filter_by_height(&self, height: u32) -> anyhow::Result<Option<BlockFilterRpc>, BitcoinRpcError> {
+        let filter: Option<BlockFilterRpc> = self
+            .rpc
+            .send_json_blocking(&self.client, &self.rpc.get_block_filter_by_height(height))?;
+        Ok(filter)
+    }
+
+    fn queue_blocks(&self, heights: Vec<u32>) -> anyhow::Result<(), BitcoinRpcError> {
+         self
+            .rpc
+            .send_json_blocking::<()>(&self.client, &self.rpc.queue_blocks(heights))?;
+        Ok(())
     }
 }

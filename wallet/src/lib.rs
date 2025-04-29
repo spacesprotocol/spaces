@@ -1,5 +1,4 @@
 use std::{collections::BTreeMap, fmt::Debug, fs, ops::Mul, path::PathBuf, str::FromStr};
-
 use anyhow::{anyhow, Context};
 use bdk_wallet::{
     chain,
@@ -15,6 +14,7 @@ use bdk_wallet::{
     AddressInfo, KeychainKind, LocalOutput, PersistedWallet, SignOptions, TxBuilder, Update,
     Wallet, WalletTx, WeightedUtxo,
 };
+use bdk_wallet::chain::keychain_txout::KeychainTxOutIndex;
 use bincode::config;
 use bitcoin::{
     absolute::{Height, LockTime},
@@ -210,11 +210,11 @@ impl SpacesWallet {
                 config.space_descriptors.external.clone(),
                 config.space_descriptors.internal.clone(),
             )
-            .lookahead(50)
-            .network(config.network)
-            .genesis_hash(genesis_hash)
-            .create_wallet(&mut conn)
-            .context("could not create wallet")?
+                .lookahead(50)
+                .network(config.network)
+                .genesis_hash(genesis_hash)
+                .create_wallet(&mut conn)
+                .context("could not create wallet")?
         };
 
         let tx = conn
@@ -230,6 +230,10 @@ impl SpacesWallet {
             connection: conn,
         };
         Ok(wallet)
+    }
+
+    pub fn spk_index(&self) -> &KeychainTxOutIndex<KeychainKind> {
+        self.internal.spk_index()
     }
 
     pub fn balance(&mut self) -> anyhow::Result<Balance> {
@@ -277,7 +281,7 @@ impl SpacesWallet {
         })
     }
 
-    pub fn transactions(&self) -> impl Iterator<Item = WalletTx> + '_ {
+    pub fn transactions(&self) -> impl Iterator<Item=WalletTx> + '_ {
         self.internal
             .transactions()
             .filter(|tx| !is_revert_tx(tx) && self.internal.spk_index().is_tx_relevant(&tx.tx_node))
@@ -375,11 +379,11 @@ impl SpacesWallet {
         self.internal.is_mine(script)
     }
 
-    pub fn list_unspent(&self) -> impl Iterator<Item = LocalOutput> + '_ {
+    pub fn list_unspent(&self) -> impl Iterator<Item=LocalOutput> + '_ {
         self.internal.list_unspent()
     }
 
-    pub fn list_output(&self) -> impl Iterator<Item = LocalOutput> + '_ {
+    pub fn list_output(&self) -> impl Iterator<Item=LocalOutput> + '_ {
         self.internal.list_output()
     }
 
@@ -610,6 +614,14 @@ impl SpacesWallet {
         Ok(())
     }
 
+    pub fn apply_update(
+        &mut self,
+        update: impl Into<Update>,
+    ) -> Result<(), CannotConnectError> {
+        self.internal
+            .apply_update(update)
+    }
+
     pub fn apply_unconfirmed_tx(&mut self, tx: Transaction, seen: u64) {
         self.internal.apply_unconfirmed_txs(vec![(tx, seen)]);
     }
@@ -640,7 +652,7 @@ impl SpacesWallet {
                 event.previous_spaceout,
                 event.details,
             )
-            .context("could not insert tx event into wallet db")?;
+                .context("could not insert tx event into wallet db")?;
         }
         db_tx
             .commit()
@@ -742,7 +754,7 @@ impl SpacesWallet {
                 signature: listing.signature,
                 sighash_type: TapSighashType::SinglePlusAnyoneCanPay,
             }
-            .to_vec(),
+                .to_vec(),
         );
 
         let funded_psbt = {
@@ -1192,7 +1204,7 @@ impl SpacesWallet {
                     signature,
                     sighash_type,
                 }
-                .to_vec(),
+                    .to_vec(),
             );
             witness.push(&signing_info.script);
             witness.push(&signing_info.control_block.serialize());
@@ -1212,6 +1224,10 @@ impl SpacesWallet {
             .context("couldn't create db transaction")?;
         let info = TxEvent::get_signing_info(&db_tx, previous_output.txid, script)?;
         Ok(info)
+    }
+
+    pub fn peek_address(&self, keychain_kind: KeychainKind, index: u32) -> AddressInfo {
+        self.internal.peek_address(keychain_kind, index)
     }
 }
 

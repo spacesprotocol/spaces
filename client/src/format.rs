@@ -14,7 +14,7 @@ use spaces_wallet::{
         BidEventDetails, BidoutEventDetails, OpenEventDetails, SendEventDetails,
         TransferEventDetails, TxEventKind,
     },
-    Balance, DoubleUtxo, WalletInfo, WalletOutput,
+    Balance, DoubleUtxo, WalletOutput,
 };
 use tabled::{Table, Tabled};
 
@@ -22,6 +22,7 @@ use crate::{
     rpc::ServerInfo,
     wallets::{ListSpacesResponse, TxInfo, TxResponse, WalletResponse},
 };
+use crate::wallets::{WalletInfoWithProgress, WalletProgressUpdate};
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug, ValueEnum, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -163,27 +164,62 @@ pub fn print_server_info(info: ServerInfo, format: Format) {
     }
 }
 
-pub fn print_wallet_info(info: WalletInfo, format: Format) {
+pub fn print_wallet_info(prog: WalletInfoWithProgress, format: Format) {
     match format {
         Format::Text => {
-            println!("WALLET: {}", info.label);
-            println!("  Tip {}\n  Birthday {}", info.tip, info.start_block);
+            println!("WALLET: {}", prog.info.label);
+            println!("  Tip {}\n  Birthday {}", prog.info.tip, prog.info.start_block);
 
             println!("  Public descriptors");
-            for desc in info.descriptors {
+            for desc in prog.info.descriptors {
                 println!("    {}", desc.descriptor);
             }
+
+            // Print sync status
+            println!("  Sync Status:");
+            match prog.status {
+                WalletProgressUpdate::SourceSync { total, completed } => {
+                    println!("    Source Syncing: {}/{} ({:.1}%)", completed, total,
+                             (completed as f64 / total as f64) * 100.0);
+                }
+                WalletProgressUpdate::CbfFilterSync { total, completed } => {
+                    println!("    Filters Syncing: {}/{} ({:.1}%)", completed, total,
+                             (completed as f64 / total as f64) * 100.0);
+                }
+                WalletProgressUpdate::CbfProcessFilters { total, completed } => {
+                    println!("    Processing Filters: {}/{} ({:.1}%)", completed, total,
+                             (completed as f64 / total as f64) * 100.0);
+                }
+                WalletProgressUpdate::CbfDownloadMatchingBlocks { total, completed } => {
+                    println!("    Downloading Matching Blocks: {}/{} ({:.1}%)", completed, total,
+                             (completed as f64 / total as f64) * 100.0);
+                }
+                WalletProgressUpdate::CbfProcessMatchingBlocks { total, completed } => {
+                    println!("    Processing Matching Blocks: {}/{} ({:.1}%)", completed, total,
+                             (completed as f64 / total as f64) * 100.0);
+                }
+                WalletProgressUpdate::Syncing => {
+                    println!("    Syncing: In progress ({:.1}%):", prog.info.progress * 100.0);
+                }
+                WalletProgressUpdate::CbfApplyUpdate => {
+                    println!("    Applying compact filters update");
+                }
+                WalletProgressUpdate::Complete => {
+                    println!("    Complete");
+                }
+            }
+
             println!();
         }
         Format::Json => {
-            println!("{}", serde_json::to_string_pretty(&info).unwrap());
+            println!("{}", serde_json::to_string_pretty(&prog.info).unwrap());
         }
     }
 }
 
 fn ascii_table<I, T>(iter: I) -> String
 where
-    I: IntoIterator<Item = T>,
+    I: IntoIterator<Item=T>,
     T: Tabled,
 {
     Table::new(iter)

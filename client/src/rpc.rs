@@ -40,7 +40,7 @@ use spaces_protocol::{
 use spaces_wallet::{
     bdk_wallet as bdk, bdk_wallet::template::Bip86, bitcoin::hashes::Hash as BitcoinHash,
     export::WalletExport, nostr::NostrEvent, Balance, DoubleUtxo, Listing, SpacesWallet,
-    WalletConfig, WalletDescriptors, WalletInfo, WalletOutput,
+    WalletConfig, WalletDescriptors, WalletOutput,
 };
 use tokio::{
     select,
@@ -48,19 +48,11 @@ use tokio::{
     task::JoinSet,
 };
 
-use crate::{
-    checker::TxChecker,
-    client::{BlockMeta, TxEntry},
-    config::ExtendedNetwork,
-    deserialize_base64, serialize_base64,
-    source::BitcoinRpc,
-    store::{ChainState, LiveSnapshot, RolloutEntry, Sha256},
-    sync::{COMMIT_BLOCK_INTERVAL, ROOT_ANCHORS_COUNT},
-    wallets::{
-        AddressKind, ListSpacesResponse, RpcWallet, TxInfo, TxResponse, WalletCommand,
-        WalletResponse,
-    },
-};
+use crate::{calc_progress, checker::TxChecker, client::{BlockMeta, TxEntry}, config::ExtendedNetwork, deserialize_base64, serialize_base64, source::BitcoinRpc, store::{ChainState, LiveSnapshot, RolloutEntry, Sha256}, spaces::{COMMIT_BLOCK_INTERVAL, ROOT_ANCHORS_COUNT}, wallets::{
+    AddressKind, ListSpacesResponse, RpcWallet, TxInfo, TxResponse, WalletCommand,
+    WalletResponse,
+}};
+use crate::wallets::WalletInfoWithProgress;
 
 pub(crate) type Responder<T> = oneshot::Sender<T>;
 
@@ -229,7 +221,7 @@ pub trait Rpc {
     ) -> Result<NostrEvent, ErrorObjectOwned>;
 
     #[method(name = "walletgetinfo")]
-    async fn wallet_get_info(&self, name: &str) -> Result<WalletInfo, ErrorObjectOwned>;
+    async fn wallet_get_info(&self, name: &str) -> Result<WalletInfoWithProgress, ErrorObjectOwned>;
 
     #[method(name = "walletexport")]
     async fn wallet_export(&self, name: &str) -> Result<WalletExport, ErrorObjectOwned>;
@@ -870,7 +862,7 @@ impl RpcServer for RpcServerImpl {
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
     }
 
-    async fn wallet_get_info(&self, wallet: &str) -> Result<WalletInfo, ErrorObjectOwned> {
+    async fn wallet_get_info(&self, wallet: &str) -> Result<WalletInfoWithProgress, ErrorObjectOwned> {
         self.wallet(&wallet)
             .await?
             .send_get_info()
@@ -1584,6 +1576,14 @@ async fn get_server_info(client: &reqwest::Client, rpc: &BitcoinRpc, tip: ChainA
         .await
         .map_err(|e| anyhow!("Could not retrieve blockchain info ({})", e))?;
 
+    let start_block = if info.chain == "main" {
+        871_222
+    } else if info.chain.starts_with("test") {
+        50_000
+    } else {
+        0
+    };
+
     Ok(ServerInfo {
         network: info.chain,
         tip,
@@ -1591,10 +1591,6 @@ async fn get_server_info(client: &reqwest::Client, rpc: &BitcoinRpc, tip: ChainA
             blocks: info.blocks,
             headers: info.headers,
         },
-        progress: if info.headers != 0 && info.headers >= tip.height {
-            tip.height as f32 / info.headers as f32
-        } else {
-            0.0
-        },
+        progress: calc_progress(start_block, tip.height, info.headers),
     })
 }

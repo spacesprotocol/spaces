@@ -16,8 +16,9 @@ pub mod format;
 pub mod rpc;
 pub mod source;
 pub mod store;
-pub mod sync;
+pub mod spaces;
 pub mod wallets;
+mod cbf;
 
 fn std_wait<F>(mut predicate: F, wait: Duration)
 where
@@ -57,5 +58,17 @@ where
             .map_err(serde::de::Error::custom)
     } else {
         Vec::<u8>::deserialize(deserializer)
+    }
+}
+
+pub fn calc_progress(start_block: u32, tip: u32, chain_tip: u32) -> f32 {
+    if chain_tip <= start_block || tip < start_block {
+        0.0
+    } else if tip >= chain_tip {
+        1.0
+    } else {
+        let blocks_synced = tip - start_block;
+        let blocks_to_sync = chain_tip - start_block;
+        blocks_synced as f32 / blocks_to_sync as f32
     }
 }
