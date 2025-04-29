@@ -25,7 +25,8 @@ use spaces_client::{
     format::{
         print_error_rpc_response, print_list_bidouts, print_list_spaces_response,
         print_list_transactions, print_list_unspent, print_server_info,
-        print_wallet_balance_response, print_wallet_info, print_wallet_response, Format,
+        print_list_wallets, print_wallet_balance_response, print_wallet_info, print_wallet_response,
+        Format,
     },
     rpc::{
         BidParams, ExecuteParams, OpenParams, RegisterParams, RpcClient, RpcWalletRequest,
@@ -71,6 +72,9 @@ pub struct Args {
 
 #[derive(Subcommand, Debug, Clone)]
 enum Commands {
+    /// List existing wallets
+    #[command(name = "listwallets")]
+    ListWallets,
     /// Generate a new wallet
     #[command(name = "createwallet")]
     CreateWallet,
@@ -572,6 +576,10 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
         Commands::GetSpaceOut { outpoint } => {
             let response = cli.client.get_spaceout(outpoint).await?;
             println!("{}", serde_json::to_string_pretty(&response)?);
+        }
+        Commands::ListWallets => {
+            let result = cli.client.list_wallets().await?;
+            print_list_wallets(result, cli.format);
         }
         Commands::CreateWallet => {
             cli.client.wallet_create(&cli.wallet).await?;
