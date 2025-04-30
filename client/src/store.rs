@@ -285,7 +285,7 @@ impl LiveSnapshot {
         self.insert_raw(key.into(), value);
     }
 
-    pub fn get<K: KeyHash + Into<Hash>, T: Decode>(
+    pub fn get<K: KeyHash + Into<Hash>, T: Decode<()>>(
         &mut self,
         key: K,
     ) -> spacedb::Result<Option<T>> {

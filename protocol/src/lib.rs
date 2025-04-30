@@ -231,8 +231,8 @@ pub mod bincode_bytes_impl {
         }
     }
 
-    impl Decode for Bytes {
-        fn decode<D: Decoder>(decoder: &mut D) -> Result<Self, DecodeError> {
+    impl<Context> Decode<Context> for Bytes {
+        fn decode<D: Decoder<Context = Context>>(decoder: &mut D) -> Result<Self, DecodeError> {
             let raw: Vec<u8> = Decode::decode(decoder)?;
             Ok(Bytes::new(raw))
         }

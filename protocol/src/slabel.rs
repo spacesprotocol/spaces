@@ -36,8 +36,8 @@ pub mod bincode_impl {
         }
     }
 
-    impl Decode for SLabel {
-        fn decode<D: Decoder>(decoder: &mut D) -> Result<Self, DecodeError> {
+    impl<Context> Decode<Context> for SLabel {
+        fn decode<D: Decoder<Context = Context>>(decoder: &mut D) -> Result<Self, DecodeError> {
             let reader = decoder.reader();
             let mut buf = [0u8; MAX_LABEL_LEN + 1];
 
