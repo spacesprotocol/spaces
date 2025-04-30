@@ -117,8 +117,8 @@ pub mod bincode_impl {
         }
     }
 
-    impl Decode for ChainAnchor {
-        fn decode<D: Decoder>(decoder: &mut D) -> Result<Self, DecodeError> {
+    impl<Context> Decode<Context> for ChainAnchor {
+        fn decode<D: Decoder<Context = Context>>(decoder: &mut D) -> Result<Self, DecodeError> {
             Ok(Self {
                 hash: BlockHash::from_byte_array(Decode::decode(decoder)?),
                 height: Decode::decode(decoder)?,
