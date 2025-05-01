@@ -579,6 +579,9 @@ impl WalletManager {
     }
 
     pub async fn list_wallets(&self) -> anyhow::Result<Vec<String>> {
+        if !self.data_dir.exists() {
+            return Ok(vec![]);
+        }
         let wallets = std::fs::read_dir(&self.data_dir)?
             .filter_map(Result::ok)
             .filter(|entry| entry.path().is_dir())
