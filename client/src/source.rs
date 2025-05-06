@@ -8,7 +8,7 @@ use std::{
     },
     time::Duration,
 };
-
+use std::error::Error;
 use base64::Engine;
 use bitcoin::{Block, BlockHash, Txid};
 use hex::FromHexError;
@@ -190,6 +190,11 @@ impl BitcoinRpc {
         self.make_request("queueblocks", params)
     }
 
+    pub fn queue_filters(&self) -> BitcoinRpcRequest {
+        let params = serde_json::json!([]);
+        self.make_request("queuefilters", params)
+    }
+
     pub fn get_mempool_entry(&self, txid: &Txid) -> BitcoinRpcRequest {
         let params = serde_json::json!([txid]);
 
@@ -276,7 +281,7 @@ impl BitcoinRpc {
             {
                 Ok(res) => return Self::clean_rpc_response(res).await,
                 Err(e) if e.is_temporary() && attempt < max_retries - 1 => {
-                    error!("Rpc: {} - retrying in {:?}...", e, delay);
+                    log_rpc_error(&request.body, &e, delay);
                     last_error = Some(e.into());
                     tokio::time::sleep(delay).await;
                     delay *= 2;
@@ -302,7 +307,6 @@ impl BitcoinRpc {
             if let Some(auth) = self.auth_token.as_ref() {
                 builder = builder.header("Authorization", format!("Basic {}", auth));
             }
-
             match builder
                 .json(&request.body)
                 .send()
@@ -310,7 +314,7 @@ impl BitcoinRpc {
             {
                 Ok(res) => return Self::clean_rpc_response_blocking(res),
                 Err(e) if e.is_temporary() && attempt < max_retries - 1 => {
-                    error!("Rpc: {} - retrying in {:?}...", e, delay);
+                    log_rpc_error(&request.body, &e, delay);
                     last_error = Some(e.into());
                     std::thread::sleep(delay);
                     delay *= 2;
@@ -811,7 +815,28 @@ impl std::error::Error for BitcoinRpcError {
 
 impl ErrorForRpc for reqwest::Response {
     async fn error_for_rpc<T: DeserializeOwned>(self) -> Result<T, BitcoinRpcError> {
-        let rpc_res: JsonRpcResponse<T> = self.json().await?;
+        let text = self
+            .text()
+            .await
+            .map_err(|e| BitcoinRpcError::Other(format!("Could not read response body: {}", e)))?;
+
+        // Try to deserialize as JsonRpcResponse<T>
+        let rpc_res: JsonRpcResponse<T> = match serde_json::from_str(&text) {
+            Ok(rpc_res) => rpc_res,
+            Err(e) => {
+                // Try to decode without result
+                let error_res: Option<JsonRpcResponse<Option<String>>> = serde_json::from_str(&text).ok();
+                if let Some(error_res) = error_res {
+                    if let Some(error) = error_res.error {
+                        return Err(BitcoinRpcError::Rpc(error));
+                    }
+                }
+                return Err(BitcoinRpcError::Other(
+                    format!("Expected a JSON response, got '{}': {}", text, e),
+                ));
+            }
+        };
+
         if let Some(e) = rpc_res.error {
             return Err(BitcoinRpcError::Rpc(e));
         }
@@ -822,7 +847,28 @@ impl ErrorForRpc for reqwest::Response {
 
 impl ErrorForRpcBlocking for reqwest::blocking::Response {
     fn error_for_rpc<T: DeserializeOwned>(self) -> Result<T, BitcoinRpcError> {
-        let rpc_res: JsonRpcResponse<T> = self.json()?;
+        let text = self.text().map_err(|e| BitcoinRpcError::Other(
+            format!("Could not read response body: {}", e),
+        ))?;
+
+        // Attempt to deserialize the text as JSON
+        let rpc_res: JsonRpcResponse<T> = match serde_json::from_str(&text)
+             {
+            Ok(rpc_res) => rpc_res,
+            Err(e) => {
+                // try to decode without result
+                let error_res : Option<JsonRpcResponse<Option<String>>> = serde_json::from_str(&text).ok();
+                if let Some(error_res) = error_res {
+                    if let Some(error) = error_res.error {
+                        return Err(BitcoinRpcError::Rpc(error));
+                    }
+                }
+                return Err(BitcoinRpcError::Other(
+                    format!("Expected a JSON response, got '{}': {}", text, e),
+                ))
+            }
+        };
+
         if let Some(e) = rpc_res.error {
             return Err(BitcoinRpcError::Rpc(e));
         }
@@ -905,7 +951,6 @@ impl BlockSource for BitcoinBlockSource {
             .send_json_blocking(&self.client, &self.rpc.get_block_count())?)
     }
 
-
     fn get_best_chain(&self, tip: Option<u32>, expected_chain: Network) -> Result<Option<ChainAnchor>, BitcoinRpcError> {
         #[derive(Deserialize)]
         struct Info {
@@ -981,4 +1026,25 @@ impl BlockSource for BitcoinBlockSource {
             .send_json_blocking::<()>(&self.client, &self.rpc.queue_blocks(heights))?;
         Ok(())
     }
+
+    fn queue_filters(&self) -> anyhow::Result<(), BitcoinRpcError> {
+        self
+            .rpc
+            .send_json_blocking::<()>(&self.client, &self.rpc.queue_filters())?;
+        Ok(())
+    }
+}
+
+fn log_rpc_error(request: &Value, e: &BitcoinRpcError, delay: Duration) {
+    let rpc_method = serde_json::to_string(&request.get("method"))
+        .unwrap_or("".to_string());
+    let rpc_params = serde_json::to_string(&request.get("params"))
+        .unwrap_or("".to_string());
+    let src = match e {
+        BitcoinRpcError::Transport(e) =>
+            e.source().map(|s| format!("({:?})", s)),
+        _ => None
+    }.unwrap_or("".to_string());
+
+    error!("Rpc {}{}: {}{} - retrying in {:?}...", rpc_method, rpc_params, e, src, delay);
 }

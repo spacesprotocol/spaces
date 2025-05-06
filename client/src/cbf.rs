@@ -29,6 +29,7 @@ pub struct CompactFilterSync {
     total_filters: u32,
     wait: Option<Instant>,
     state: SyncState,
+    filters_queued: bool
 }
 
 enum SyncState {
@@ -63,6 +64,7 @@ impl CompactFilterSync {
             total_filters: 0,
             wait: None,
             state: SyncState::SyncChecks,
+            filters_queued: false,
         };
         cbf.load_scripts(wallet);
         cbf
@@ -123,6 +125,11 @@ impl CompactFilterSync {
                     return Ok(());
                 }
                 if info.filters != info.filter_headers {
+                    if !self.filters_queued {
+                        source.queue_filters()?;
+                        self.filters_queued = true;
+                    }
+
                     info!("Filters syncing, retrying...");
                     *progress = WalletProgressUpdate::CbfFilterSync {
                         total: info.filter_headers.unwrap_or(0),
