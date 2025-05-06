@@ -3,7 +3,7 @@ use std::{net::SocketAddr, path::PathBuf, time::Duration};
 use anyhow::{anyhow, Context};
 use log::{info, warn};
 use spaces_protocol::{
-    bitcoin::{hashes::Hash, Block, BlockHash},
+    bitcoin::{Block, BlockHash},
     constants::ChainAnchor,
     hasher::BaseHash,
 };
@@ -255,86 +255,15 @@ impl Spaced {
         Ok(())
     }
 
-    pub async fn genesis(
-        rpc: &BitcoinRpc,
+    pub fn genesis(
         network: ExtendedNetwork,
-        mut shutdown: tokio::sync::broadcast::Receiver<()>
-    ) -> anyhow::Result<ChainAnchor> {
-        let mut anchor = match network {
+    ) -> ChainAnchor {
+        match network {
             ExtendedNetwork::Testnet => ChainAnchor::TESTNET(),
             ExtendedNetwork::Testnet4 => ChainAnchor::TESTNET4(),
             ExtendedNetwork::Regtest => ChainAnchor::REGTEST(),
             ExtendedNetwork::Mainnet => ChainAnchor::MAINNET(),
             _ => panic!("unsupported network"),
-        };
-
-
-
-        // Wait for the RPC node to be ready
-        let mut attempts = 0;
-        let mut last_error = BitcoinRpcError::Other("Unknown error".to_string());
-        loop {
-            if shutdown.try_recv().is_ok() {
-                return Err(anyhow!("Fetching activation height terminated: shutdown requested"))
-            }
-            if attempts > 5 {
-                return Err(anyhow!(
-                        "Could not retrieve activation height: {}",
-                        last_error
-                    ));
-            }
-
-            let rpc_task = rpc.clone();
-            let net_task = network.fallback_network();
-            let best_chain = tokio::task::spawn_blocking(move || {
-                let source = BitcoinBlockSource::new(rpc_task);
-                    source.get_best_chain(Some(anchor.height), net_task)
-            }).await.expect("join");
-
-            match best_chain {
-                Ok(Some(tip)) => {
-                    info!("Connect to RPC node (tip: {})", tip.height);
-                    if anchor.hash != BlockHash::all_zeros() {
-                        break;
-                    }
-
-                    // Pull the activation block hash
-                    let client = reqwest::Client::new();
-                    anchor.hash = match rpc
-                        .send_json(&client, &rpc.get_block_hash(anchor.height))
-                        .await
-                    {
-                        Ok(hash) => hash,
-                        Err(e) => {
-                            warn!("Fetching height {}:{}, retrying in 1s ...", anchor.height, e);
-                            last_error = e;
-                            match &last_error {
-                                BitcoinRpcError::Rpc(_) => {}
-                                _ => attempts += 1,
-                            }
-                            continue;
-                        }
-                    };
-
-                    break;
-                }
-                Ok(None) => {
-                    warn!("Connected RPC node is still syncing, waiting 5s ...");
-                    tokio::time::sleep(Duration::from_secs(5)).await;
-                }
-                Err(e) => {
-                    warn!("Error fetching blockchain info: {}, retrying in 1s ...", e);
-                    last_error = e;
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                    match &last_error {
-                        BitcoinRpcError::Rpc(_) => {}
-                        _ => attempts += 1,
-                    }
-                }
-            }
         }
-
-
-        Ok(anchor)
     }
 }

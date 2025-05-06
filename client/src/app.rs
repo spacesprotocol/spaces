@@ -100,8 +100,7 @@ impl App {
     }
 
     pub async fn run(&mut self, args: Vec<String>) -> anyhow::Result<()> {
-        let shutdown_receiver = self.shutdown.subscribe();
-        let spaced = Args::configure(args, shutdown_receiver).await?;
+        let spaced = Args::configure(args).await?;
         self.setup_rpc_services(&spaced).await;
         self.setup_sync_service(spaced).await;
 

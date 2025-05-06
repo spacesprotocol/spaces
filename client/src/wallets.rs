@@ -94,7 +94,7 @@ pub enum WalletProgressUpdate {
 pub struct WalletInfoWithProgress {
     #[serde(flatten)]
     pub info: WalletInfo,
-    pub status: WalletProgressUpdate
+    pub status: WalletProgressUpdate,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -404,7 +404,7 @@ impl RpcWallet {
     ) -> anyhow::Result<()> {
         let synced = matches!(progress_update, WalletProgressUpdate::Complete);
         match command {
-            WalletCommand::GetInfo { resp } =>{
+            WalletCommand::GetInfo { resp } => {
                 let mut wallet_info = WalletInfoWithProgress {
                     info: wallet.get_info(),
                     status: progress_update,
@@ -419,7 +419,7 @@ impl RpcWallet {
                 }
 
                 _ = resp.send(Ok(wallet_info))
-            },
+            }
             WalletCommand::BatchTx { request, resp } => {
                 if !synced && !request.force {
                     _ = resp.send(Err(anyhow::anyhow!("Wallet is syncing")));
@@ -608,21 +608,27 @@ impl RpcWallet {
             }
 
             // Compact Filter Sync:
-            if let Some(cbf_sync) = cbf_sync.as_mut()  {
-                cbf_sync.sync_next(&mut wallet, &source, &mut wallet_progress)?;
+            if let Some(mut cbf) = cbf_sync.take() {
+                if let Err(e) = cbf.sync_next(&mut wallet, &source, &mut wallet_progress) {
+                    info!("Error syncing cbf: {} - retrying ...", e);
+                    let mut wait_recv = shutdown.subscribe();
+                    std_wait(|| wait_recv.try_recv().is_ok(), Duration::from_secs(1));
+                }
+                if !cbf.synced() {
+                    cbf_sync = Some(cbf);
+                    continue;
+                }
 
                 // Once compact filter sync is complete
                 // start the block fetcher
-                if cbf_sync.synced() {
-                    wallet_tip = {
-                        let tip = wallet.local_chain().tip();
-                        ChainAnchor {
-                            height: tip.height(),
-                            hash: tip.hash(),
-                        }
-                    };
-                    fetcher.start(wallet_tip);
-                }
+                wallet_tip = {
+                    let tip = wallet.local_chain().tip();
+                    ChainAnchor {
+                        height: tip.height(),
+                        hash: tip.hash(),
+                    }
+                };
+                fetcher.start(wallet_tip);
                 continue;
             }
 
@@ -991,12 +997,12 @@ impl RpcWallet {
                         match store.get_space_info(&spacehash)? {
                             None => return Err(anyhow!("transfer: you don't own `{}`", space)),
                             Some(full)
-                                if full.spaceout.space.is_none()
-                                    || !full.spaceout.space.as_ref().unwrap().is_owned()
-                                    || !wallet.is_mine(full.spaceout.script_pubkey.clone()) =>
-                            {
-                                return Err(anyhow!("transfer: you don't own `{}`", space));
-                            }
+                            if full.spaceout.space.is_none()
+                                || !full.spaceout.space.as_ref().unwrap().is_owned()
+                                || !wallet.is_mine(full.spaceout.script_pubkey.clone()) =>
+                                {
+                                    return Err(anyhow!("transfer: you don't own `{}`", space));
+                                }
 
                             Some(full) if wallet.get_utxo(full.outpoint()).is_none() => {
                                 return Err(anyhow!(
@@ -1012,7 +1018,7 @@ impl RpcWallet {
                                             full.spaceout.script_pubkey.as_script(),
                                             wallet.config.network,
                                         )
-                                        .expect("valid script"),
+                                            .expect("valid script"),
                                     ),
                                     Some(addr) => SpaceAddress(addr),
                                 };

@@ -642,7 +642,7 @@ impl WalletManager {
             .rpc
             .send_json(&client, &self.rpc.get_block_count())
             .await?;
-        let height = std::cmp::max(count - 20, 0) as u32;
+        let height = std::cmp::max(count - 1, 0) as u32;
 
         let hash = self
             .rpc

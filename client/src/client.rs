@@ -33,6 +33,7 @@ pub trait BlockSource {
     fn get_blockchain_info(&self) -> Result<BlockchainInfo, BitcoinRpcError>;
     fn get_block_filter_by_height(&self, height: u32) -> Result<Option<BlockFilterRpc>, BitcoinRpcError>;
     fn queue_blocks(&self, heights: Vec<u32>) -> Result<(), BitcoinRpcError>;
+    fn queue_filters(&self) -> Result<(), BitcoinRpcError>;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

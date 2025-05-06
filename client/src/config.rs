@@ -101,7 +101,7 @@ impl ExtendedNetwork {
 impl Args {
     /// Configures spaced node by processing command line arguments
     /// and configuration files
-    pub async fn configure(args: Vec<String>, shutdown: tokio::sync::broadcast::Receiver<()>) -> anyhow::Result<Spaced> {
+    pub async fn configure(args: Vec<String>) -> anyhow::Result<Spaced> {
         let mut args =  Args::try_parse_from(args)?;
         let default_dirs = get_default_node_dirs();
 
@@ -147,7 +147,7 @@ impl Args {
             !args.bitcoin_rpc_light
         );
 
-        let genesis = Spaced::genesis(&rpc, args.chain, shutdown).await?;
+        let genesis = Spaced::genesis(args.chain);
 
         fs::create_dir_all(data_dir.clone())?;
 
