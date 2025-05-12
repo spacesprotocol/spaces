@@ -11,9 +11,10 @@ use spaces_wallet::bdk_wallet::{KeychainKind, Update};
 use spaces_wallet::bitcoin::bip158::BlockFilter;
 use spaces_wallet::bitcoin::ScriptBuf;
 use spaces_wallet::SpacesWallet;
+use crate::calc_progress;
 use crate::client::{BlockSource, BlockchainInfo};
 use crate::source::BitcoinBlockSource;
-use crate::wallets::WalletProgressUpdate;
+use crate::wallets::{WalletStatus, WalletProgressUpdate};
 
 pub struct CompactFilterSync {
     graph: IndexedTxGraph<ConfirmationBlockTime, KeychainTxOutIndex<KeychainKind>>,
@@ -29,7 +30,7 @@ pub struct CompactFilterSync {
     total_filters: u32,
     wait: Option<Instant>,
     state: SyncState,
-    filters_queued: bool
+    filters_queued: bool,
 }
 
 enum SyncState {
@@ -136,7 +137,7 @@ impl CompactFilterSync {
                 }
                 if info.headers != info.blocks {
                     info!("Source still syncing, retrying...");
-                    *progress = WalletProgressUpdate::Syncing;
+                    *progress = WalletProgressUpdate::new(WalletStatus::Syncing, None);
                     self.wait = Some(Instant::now());
                     return Ok(());
                 }
@@ -147,10 +148,16 @@ impl CompactFilterSync {
                     }
 
                     info!("Filters syncing, retrying...");
-                    *progress = WalletProgressUpdate::CbfFilterSync {
-                        total: info.filter_headers.unwrap_or(0),
-                        completed: info.filters.unwrap_or(0),
-                    };
+                    *progress = WalletProgressUpdate::new(WalletStatus::CbfFilterSync, Some(
+                        calc_progress(
+                            info.checkpoint.map(|c| c.height).unwrap_or(0),
+                            info.filters.unwrap_or(0),
+                            std::cmp::max(
+                                info.prune_height.unwrap_or(0),
+                                info.filter_headers.unwrap_or(0)
+                            ),
+                        )
+                    ));
                     self.wait = Some(Instant::now());
                     return Ok(());
                 }
@@ -205,10 +212,12 @@ impl CompactFilterSync {
                 } else {
                     info!("wallet({}) processed block filter {} - no match", wallet.name(), height);
                 }
-                *progress = WalletProgressUpdate::CbfProcessFilters {
-                    total: self.total_filters,
-                    completed: self.total_filters - self.queued_filters.len() as u32,
-                };
+
+                let completed = self.total_filters as f32 - self.queued_filters.len() as f32;
+                *progress = WalletProgressUpdate::new(
+                    WalletStatus::CbfProcessFilters,
+                    Some(completed / self.total_filters as f32)
+                );
             }
             SyncState::QueueBlocks => {
                 if !self.queued_blocks.is_empty() {
@@ -231,12 +240,12 @@ impl CompactFilterSync {
                     // The client has a global state for pending blocks in the queue
                     // so we cap it just in case other things are queuing blocks
                     // at the same time
-                    let pending = std::cmp::min(status.pending, self.block_matches);
-                    *progress = WalletProgressUpdate::CbfDownloadMatchingBlocks {
-                        total: self.block_matches,
-                        completed: self.block_matches - pending,
-                    };
-
+                    let pending = std::cmp::min(status.pending, self.block_matches) as f32;
+                    let completed = self.block_matches as f32 - pending;
+                    *progress = WalletProgressUpdate::new(
+                        WalletStatus::CbfDownloadMatchingBlocks,
+                        Some(completed / self.block_matches as f32)
+                    );
                     self.wait = Some(Instant::now());
                     return Ok(());
                 }
@@ -251,7 +260,7 @@ impl CompactFilterSync {
             SyncState::ProcessBlocks => {
                 let (height, hash) = match self.queued_blocks.pop_first() {
                     None => {
-                        *progress = WalletProgressUpdate::CbfApplyUpdate;
+                        *progress = WalletProgressUpdate::new(WalletStatus::CbfApplyUpdate, None);
                         self.state = SyncState::ApplyUpdate;
                         return Ok(());
                     }
@@ -262,10 +271,11 @@ impl CompactFilterSync {
                     .ok_or(anyhow!("block {} {} not found", height, hash))?;
                 self.chain_changeset.insert(height, Some(hash));
                 let _ = self.graph.apply_block_relevant(&block, height);
-                *progress = WalletProgressUpdate::CbfProcessMatchingBlocks {
-                    total: self.block_matches,
-                    completed: self.block_matches - self.queued_blocks.len() as u32 ,
-                };
+                let completed = self.block_matches - self.queued_blocks.len() as u32;
+                *progress = WalletProgressUpdate::new(
+                    WalletStatus::CbfProcessMatchingBlocks,
+                    Some(completed as f32 / self.block_matches as f32)
+                );
             }
             SyncState::ApplyUpdate => {
                 info!("wallet({}): updating wallet tip to {}", wallet.name(), self.filters_tip);
@@ -280,9 +290,9 @@ impl CompactFilterSync {
                 info!("wallet({}): compact filter sync portion complete at {}", wallet.name(), self.filters_tip);
                 self.state = SyncState::Synced;
                 // Only CBF portion is done
-                *progress = WalletProgressUpdate::Syncing
+                *progress = WalletProgressUpdate::new(WalletStatus::Syncing, None);
             }
-            SyncState::Synced => {},
+            SyncState::Synced => {}
         }
         Ok(())
     }
