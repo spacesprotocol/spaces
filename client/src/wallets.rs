@@ -35,11 +35,12 @@ use tokio::{
     sync::{broadcast, mpsc, mpsc::Receiver, oneshot},
     time::Instant,
 };
-
+use spaces_protocol::bitcoin::Network;
 use crate::{calc_progress, checker::TxChecker, client::BlockSource, config::ExtendedNetwork, rpc::{RpcWalletRequest, RpcWalletTxBuilder, WalletLoadRequest}, source::{
     BitcoinBlockSource, BitcoinRpc, BitcoinRpcError, BlockEvent, BlockFetchError, BlockFetcher,
 }, std_wait, store::{ChainState, LiveSnapshot, Sha256}};
 use crate::cbf::{CompactFilterSync};
+use crate::spaces::Spaced;
 
 const MEMPOOL_CHECK_INTERVAL: Duration =
     Duration::from_secs(if cfg!(debug_assertions) { 1 } else { 5 * 60 });
@@ -55,33 +56,21 @@ pub struct TxResponse {
 }
 
 #[derive(Copy, Clone, Serialize, Deserialize, Debug)]
-#[serde(tag = "status")]
-pub enum WalletProgressUpdate {
-    #[serde(rename = "source_sync")]
-    SourceSync {
-        total: u32,
-        completed: u32,
-    },
+pub enum WalletStatus {
+    #[serde(rename = "header_sync")]
+    HeadersSync,
+    #[serde(rename = "chain_sync")]
+    ChainSync,
+    #[serde(rename = "spaces_sync")]
+    SpacesSync,
     #[serde(rename = "cbf_filter_sync")]
-    CbfFilterSync {
-        total: u32,
-        completed: u32,
-    },
+    CbfFilterSync,
     #[serde(rename = "cbf_process_filters")]
-    CbfProcessFilters {
-        total: u32,
-        completed: u32,
-    },
+    CbfProcessFilters,
     #[serde(rename = "cbf_download_matching_blocks")]
-    CbfDownloadMatchingBlocks {
-        total: u32,
-        completed: u32,
-    },
+    CbfDownloadMatchingBlocks,
     #[serde(rename = "cbf_process_matching_blocks")]
-    CbfProcessMatchingBlocks {
-        total: u32,
-        completed: u32,
-    },
+    CbfProcessMatchingBlocks,
     #[serde(rename = "cbf_apply_update")]
     CbfApplyUpdate,
     #[serde(rename = "syncing")]
@@ -90,11 +79,24 @@ pub enum WalletProgressUpdate {
     Complete,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct WalletProgressUpdate {
+    pub status: WalletStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress: Option<f32>
+}
+
+impl WalletProgressUpdate {
+    pub fn new(status: WalletStatus, progress: Option<f32>) -> Self {
+        Self { status,  progress }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WalletInfoWithProgress {
     #[serde(flatten)]
     pub info: WalletInfo,
-    pub status: WalletProgressUpdate,
+    pub sync: WalletProgressUpdate,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -402,12 +404,12 @@ impl RpcWallet {
         command: WalletCommand,
         progress_update: WalletProgressUpdate,
     ) -> anyhow::Result<()> {
-        let synced = matches!(progress_update, WalletProgressUpdate::Complete);
+        let synced = matches!(progress_update.status, WalletStatus::Complete);
         match command {
             WalletCommand::GetInfo { resp } => {
                 let mut wallet_info = WalletInfoWithProgress {
                     info: wallet.get_info(),
-                    status: progress_update,
+                    sync: progress_update,
                 };
 
                 let best_chain = source
@@ -523,18 +525,17 @@ impl RpcWallet {
         bitcoin: &BitcoinBlockSource,
         protocol: &mut LiveSnapshot,
         wallet: &SpacesWallet,
+        progress: Option<&mut WalletProgressUpdate>
     ) -> Option<ChainAnchor> {
         let wallet_tip = wallet.local_chain().tip();
 
-        let bitcoin_tip = match bitcoin.get_best_chain(Some(wallet_tip.height()), wallet.config.network) {
-            Ok(Some(tip)) => tip,
-            Ok(None) => return None,
+        let info = match bitcoin.get_blockchain_info() {
+            Ok(info) => info,
             Err(e) => {
                 warn!("Sync check failed: {}", e);
                 return None;
             }
         };
-
         let protocol_tip = match protocol.tip.read() {
             Ok(tip) => tip.clone(),
             Err(e) => {
@@ -542,8 +543,51 @@ impl RpcWallet {
                 return None;
             }
         };
-        if protocol_tip.hash == wallet_tip.hash() && protocol_tip.hash == bitcoin_tip.hash {
-            Some(bitcoin_tip)
+
+        if info.headers == 0 ||
+            info.prune_height.is_some_and(|p| p > info.headers) ||
+            protocol_tip.height > info.headers {
+            if let Some(p) = progress {
+                *p = WalletProgressUpdate::new(WalletStatus::HeadersSync, None);
+            }
+            return None;
+        }
+
+        // Bitcoin syncing
+        if info.headers != info.blocks {
+            if let Some(p) = progress {
+
+                *p = WalletProgressUpdate::new(WalletStatus::ChainSync, Some(calc_progress(
+                    info.checkpoint.map(|c| c.height).unwrap_or(0),
+                    info.blocks,
+                    info.headers
+                )));
+            }
+            return None;
+        }
+
+        if protocol_tip.height != info.headers {
+            if let Some(p) = progress {
+                let network = match wallet.config.network {
+                    Network::Bitcoin =>ExtendedNetwork::Mainnet,
+                    Network::Testnet =>ExtendedNetwork::Testnet4,
+                    Network::Signet => ExtendedNetwork::Signet,
+                    _ => ExtendedNetwork::Regtest,
+                };
+                let start = Spaced::genesis(network);
+                *p = WalletProgressUpdate::new(
+                    WalletStatus::SpacesSync,
+                    Some(calc_progress(start.height, protocol_tip.height, info.headers))
+                );
+            }
+            return None
+        }
+
+        if protocol_tip.hash == wallet_tip.hash() && protocol_tip.hash == info.best_block_hash {
+            if let Some(p) = progress {
+                *p = WalletProgressUpdate::new(WalletStatus::Complete, None);
+            }
+            Some(protocol_tip)
         } else {
             None
         }
@@ -582,7 +626,10 @@ impl RpcWallet {
 
         let mut synced_at_least_once = false;
         let mut last_mempool_check = Instant::now();
-        let mut wallet_progress = WalletProgressUpdate::Syncing;
+        let mut wallet_progress = WalletProgressUpdate::new(
+            WalletStatus::Syncing,
+            None
+        );
 
         loop {
             if shutdown_recv.try_recv().is_ok() {
@@ -592,10 +639,11 @@ impl RpcWallet {
 
             // Wallet Commands:
             if let Ok(command) = commands.try_recv() {
-                let synced = Self::all_synced(&source, &mut state, &wallet).is_some();
-                if synced {
-                    wallet_progress = WalletProgressUpdate::Complete;
-                }
+                let _ = Self::all_synced(
+                    &source,
+                    &mut state, &wallet,
+                    Some(&mut wallet_progress)
+                ).is_some();
 
                 Self::wallet_handle_commands(
                     network,
@@ -737,7 +785,7 @@ impl RpcWallet {
             }
 
             if synced_at_least_once && last_mempool_check.elapsed() > MEMPOOL_CHECK_INTERVAL {
-                if let Some(common_tip) = Self::all_synced(&source, &mut state, &wallet) {
+                if let Some(common_tip) = Self::all_synced(&source, &mut state, &wallet, None) {
                     let mem = MempoolChecker(&source);
                     match wallet.update_unconfirmed_bids(mem, common_tip.height, &mut state) {
                         Ok(txids) => {

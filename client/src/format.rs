@@ -22,7 +22,7 @@ use crate::{
     rpc::ServerInfo,
     wallets::{ListSpacesResponse, TxInfo, TxResponse, WalletResponse},
 };
-use crate::wallets::{WalletInfoWithProgress, WalletProgressUpdate};
+use crate::wallets::{WalletInfoWithProgress, WalletStatus};
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug, ValueEnum, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -188,36 +188,39 @@ pub fn print_wallet_info(prog: WalletInfoWithProgress, format: Format) {
 
             // Print sync status
             println!("  Sync Status:");
-            match prog.status {
-                WalletProgressUpdate::SourceSync { total, completed } => {
-                    println!("    Source Syncing: {}/{} ({:.1}%)", completed, total,
-                             (completed as f64 / total as f64) * 100.0);
+            let p = prog.sync.progress.unwrap_or(0.0);
+            match prog.sync.status {
+                WalletStatus::HeadersSync  => {
+                    println!("    Syncing block headers");
                 }
-                WalletProgressUpdate::CbfFilterSync { total, completed } => {
-                    println!("    Filters Syncing: {}/{} ({:.1}%)", completed, total,
-                             (completed as f64 / total as f64) * 100.0);
+                WalletStatus::ChainSync => {
+                    println!("    Chain Syncing: {:.1}%", p * 100.0);
                 }
-                WalletProgressUpdate::CbfProcessFilters { total, completed } => {
-                    println!("    Processing Filters: {}/{} ({:.1}%)", completed, total,
-                             (completed as f64 / total as f64) * 100.0);
+                WalletStatus::SpacesSync => {
+                    println!("    Spaces Syncing: {:.1}%", p * 100.0);
                 }
-                WalletProgressUpdate::CbfDownloadMatchingBlocks { total, completed } => {
-                    println!("    Downloading Matching Blocks: {}/{} ({:.1}%)", completed, total,
-                             (completed as f64 / total as f64) * 100.0);
+                WalletStatus::CbfFilterSync  => {
+                    println!("    Filters Syncing: {:.1}%", p * 100.0);
                 }
-                WalletProgressUpdate::CbfProcessMatchingBlocks { total, completed } => {
-                    println!("    Processing Matching Blocks: {}/{} ({:.1}%)", completed, total,
-                             (completed as f64 / total as f64) * 100.0);
+                WalletStatus::CbfProcessFilters => {
+                    println!("    Processing Filters: {:.1}%", p* 100.0);
                 }
-                WalletProgressUpdate::Syncing => {
+                WalletStatus::CbfDownloadMatchingBlocks => {
+                    println!("    Downloading Matching Blocks: {:.1}%", p * 100.0);
+                }
+                WalletStatus::CbfProcessMatchingBlocks => {
+                    println!("    Processing Matching Blocks: {:.1}%",p * 100.0);
+                }
+                WalletStatus::Syncing => {
                     println!("    Syncing: In progress ({:.1}%):", prog.info.progress * 100.0);
                 }
-                WalletProgressUpdate::CbfApplyUpdate => {
+                WalletStatus::CbfApplyUpdate => {
                     println!("    Applying compact filters update");
                 }
-                WalletProgressUpdate::Complete => {
+                WalletStatus::Complete => {
                     println!("    Complete");
                 }
+
             }
 
             println!();
