@@ -118,6 +118,22 @@ impl CompactFilterSync {
         match &self.state {
             SyncState::SyncChecks => {
                 let info = source.get_blockchain_info()?;
+                // if wallet already past prune height, we don't need filters
+                if let Some(prune_height) = info.prune_height {
+                    if self.initial_tip.height >= prune_height {
+                        info!("wallet({}): tip {} >= prune height {}, cbf done", wallet.name(), self.initial_tip.height, prune_height);
+                        self.state = SyncState::Synced;
+                        return Ok(());
+                    }
+                }
+                // if wallet already past filter headers, we're done
+                if let Some(filter_headers) = info.filter_headers {
+                    if self.initial_tip.height >= filter_headers {
+                        info!("wallet({}): tip {} >= filters {}, cbf done", wallet.name(), self.initial_tip.height, filter_headers);
+                        self.state = SyncState::Synced;
+                        return Ok(());
+                    }
+                }
                 if info.headers != info.blocks {
                     info!("Source still syncing, retrying...");
                     *progress = WalletProgressUpdate::Syncing;
@@ -137,14 +153,6 @@ impl CompactFilterSync {
                     };
                     self.wait = Some(Instant::now());
                     return Ok(());
-                }
-                // if wallet already past filter headers, we're done
-                if let Some(filter_headers) = info.filter_headers {
-                    if self.initial_tip.height >= filter_headers {
-                        info!("wallet({}): tip {} >= filters {}, cbf done", wallet.name(), self.initial_tip.height, filter_headers);
-                        self.state = SyncState::Synced;
-                        return Ok(());
-                    }
                 }
                 self.state = SyncState::LoadFilterRange(info);
             }
