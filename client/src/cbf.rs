@@ -127,37 +127,23 @@ impl CompactFilterSync {
                         return Ok(());
                     }
                 }
-                // if wallet already past filter headers, we're done
-                if let Some(filter_headers) = info.filter_headers {
-                    if self.initial_tip.height >= filter_headers {
-                        info!("wallet({}): tip {} >= filters {}, cbf done", wallet.name(), self.initial_tip.height, filter_headers);
-                        self.state = SyncState::Synced;
-                        return Ok(());
-                    }
-                }
                 if info.headers != info.blocks {
                     info!("Source still syncing, retrying...");
                     *progress = WalletProgressUpdate::new(WalletStatus::Syncing, None);
                     self.wait = Some(Instant::now());
                     return Ok(());
                 }
-                if info.filters != info.filter_headers {
+                let filters_synced = info.filters_progress.unwrap_or(0.0) == 1.0;
+                if !filters_synced {
                     if !self.filters_queued {
                         source.queue_filters()?;
                         self.filters_queued = true;
                     }
 
                     info!("Filters syncing, retrying...");
-                    *progress = WalletProgressUpdate::new(WalletStatus::CbfFilterSync, Some(
-                        calc_progress(
-                            info.checkpoint.map(|c| c.height).unwrap_or(0),
-                            info.filters.unwrap_or(0),
-                            std::cmp::max(
-                                info.prune_height.unwrap_or(0),
-                                info.filter_headers.unwrap_or(0)
-                            ),
-                        )
-                    ));
+                    *progress = WalletProgressUpdate::new(WalletStatus::CbfFilterSync,
+                                                          Some(info.filters_progress.unwrap_or(0.0))
+                    );
                     self.wait = Some(Instant::now());
                     return Ok(());
                 }

@@ -66,6 +66,8 @@ pub struct BlockchainInfo {
     pub block_queue: Option<BlockQueueResult>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub checkpoint: Option<ChainAnchor>,
+    #[serde(rename = "filtersprogress", skip_serializing_if = "Option::is_none")]
+    pub filters_progress: Option<f32>,
 }
 
 
