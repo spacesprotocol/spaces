@@ -11,7 +11,6 @@ use spaces_wallet::bdk_wallet::{KeychainKind, Update};
 use spaces_wallet::bitcoin::bip158::BlockFilter;
 use spaces_wallet::bitcoin::ScriptBuf;
 use spaces_wallet::SpacesWallet;
-use crate::calc_progress;
 use crate::client::{BlockSource, BlockchainInfo};
 use crate::source::BitcoinBlockSource;
 use crate::wallets::{WalletStatus, WalletProgressUpdate};

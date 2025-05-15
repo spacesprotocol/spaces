@@ -255,7 +255,10 @@ impl BitcoinRpc {
             retry_count += 1;
         }
 
-        Err(last_error.expect("an error"))
+        Err(last_error.unwrap_or(BitcoinRpcError::Rpc(JsonRpcError {
+            code: -1,
+            message: "Tx broadcast timed out".to_string(),
+        })))
     }
 
     async fn send_request(
@@ -323,7 +326,7 @@ impl BitcoinRpc {
             }
         }
 
-        Err(last_error.expect("an error"))
+        Err(last_error.unwrap())
     }
 
     pub async fn clean_rpc_response(

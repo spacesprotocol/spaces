@@ -68,6 +68,8 @@ pub struct BlockchainInfo {
     pub checkpoint: Option<ChainAnchor>,
     #[serde(rename = "filtersprogress", skip_serializing_if = "Option::is_none")]
     pub filters_progress: Option<f32>,
+    #[serde(rename = "headerssynced", skip_serializing_if = "Option::is_none")]
+    pub headers_synced: Option<bool>,
 }
 
 

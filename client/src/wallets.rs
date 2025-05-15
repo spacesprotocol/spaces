@@ -544,7 +544,8 @@ impl RpcWallet {
             }
         };
 
-        if info.headers == 0 ||
+        if info.headers_synced.is_some_and(|synced| !synced) ||
+            info.headers == 0 ||
             info.prune_height.is_some_and(|p| p > info.headers) ||
             protocol_tip.height > info.headers {
             if let Some(p) = progress {
