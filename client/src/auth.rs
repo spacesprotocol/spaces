@@ -1,3 +1,5 @@
+use base64::Engine;
+use hyper::{Body, HeaderMap, Request, Response, StatusCode};
 use std::{
     error::Error,
     future::Future,
@@ -5,17 +7,15 @@ use std::{
     sync::Arc,
     task::{Context, Poll},
 };
-use base64::Engine;
-use hyper::{Body, Request, Response, StatusCode, HeaderMap};
 use tower::{Layer, Service};
 
 #[derive(Debug, Clone)]
 pub(crate) struct BasicAuthLayer {
-    token: Option<String>,
+    token: String,
 }
 
 impl BasicAuthLayer {
-    pub fn new(token: Option<String>) -> Self {
+    pub fn new(token: String) -> Self {
         Self { token }
     }
 }
@@ -31,37 +31,23 @@ impl<S> Layer<S> for BasicAuthLayer {
 #[derive(Debug, Clone)]
 pub(crate) struct BasicAuth<S> {
     inner: S,
-    token: Option<Arc<str>>,
+    token: Arc<str>,
 }
 
 impl<S> BasicAuth<S> {
-    pub fn new(inner: S, token: Option<String>) -> Self {
+    pub fn new(inner: S, token: String) -> Self {
         Self {
             inner,
-            token: token.map(|t| Arc::from(t.as_str())),
+            token: Arc::from(token.as_str()),
         }
     }
 
     fn check_auth(&self, headers: &HeaderMap) -> bool {
-        let Some(expected_token) = &self.token else {
-            return true;
-        };
-
-        let auth_header = match headers.get("authorization") {
-            Some(header) => header,
-            None => return false,
-        };
-
-        let auth_str = match auth_header.to_str() {
-            Ok(s) => s,
-            Err(_) => return false,
-        };
-
-        if let Some(token_part) = auth_str.strip_prefix("Basic ") {
-            token_part == expected_token.as_ref()
-        } else {
-            false
-        }
+        headers
+            .get("authorization")
+            .and_then(|h| h.to_str().ok())
+            .and_then(|s| s.strip_prefix("Basic "))
+            .map_or(false, |token| token == self.token.as_ref())
     }
 
     fn unauthorized_response() -> Response<Body> {
@@ -82,7 +68,8 @@ where
 {
     type Response = S::Response;
     type Error = Box<dyn Error + Send + Sync + 'static>;
-    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send + 'static>>;
+    type Future =
+        Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send + 'static>>;
 
     #[inline]
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
@@ -96,13 +83,19 @@ where
         }
 
         let fut = self.inner.call(req);
-        let res_fut = async move {
-            fut.await.map_err(|err| err.into())
-        };
+        let res_fut = async move { fut.await.map_err(|err| err.into()) };
         Box::pin(res_fut)
     }
 }
 
-pub fn basic_auth_token(user: &str, password: &str) -> String {
-    base64::prelude::BASE64_STANDARD.encode(format!("{user}:{password}"))
+pub fn auth_cookie(user: &str, password: &str) -> String {
+    format!("{user}:{password}")
+}
+
+pub fn auth_token_from_cookie(cookie: &str) -> String {
+    base64::prelude::BASE64_STANDARD.encode(cookie)
+}
+
+pub fn auth_token_from_creds(user: &str, password: &str) -> String {
+    base64::prelude::BASE64_STANDARD.encode(auth_cookie(user, password))
 }

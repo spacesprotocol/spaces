@@ -42,7 +42,7 @@ pub struct Spaced {
     pub rpc: BitcoinRpc,
     pub data_dir: PathBuf,
     pub bind: Vec<SocketAddr>,
-    pub auth_token: Option<String>,
+    pub auth_token: String,
     pub num_workers: usize,
     pub anchors_path: Option<PathBuf>,
     pub synced: bool,
@@ -256,9 +256,7 @@ impl Spaced {
         Ok(())
     }
 
-    pub fn genesis(
-        network: ExtendedNetwork,
-    ) -> ChainAnchor {
+    pub fn genesis(network: ExtendedNetwork) -> ChainAnchor {
         match network {
             ExtendedNetwork::Testnet => ChainAnchor::TESTNET(),
             ExtendedNetwork::Testnet4 => ChainAnchor::TESTNET4(),

@@ -5,9 +5,12 @@ use std::{
     path::PathBuf,
 };
 
-use clap::{
-    ArgGroup, Parser, ValueEnum,
+use rand::{
+    distributions::Alphanumeric,
+    {thread_rng, Rng},
 };
+
+use clap::{ArgGroup, Parser, ValueEnum};
 use directories::ProjectDirs;
 use jsonrpsee::core::Serialize;
 use log::error;
@@ -15,10 +18,10 @@ use serde::Deserialize;
 use spaces_protocol::bitcoin::Network;
 
 use crate::{
-    auth::basic_auth_token,
+    auth::{auth_token_from_cookie, auth_token_from_creds},
     source::{BitcoinRpc, BitcoinRpcAuth},
-    store::{LiveStore, Store},
     spaces::Spaced,
+    store::{LiveStore, Store},
 };
 
 const RPC_OPTIONS: &str = "RPC Server Options";
@@ -140,9 +143,21 @@ impl Args {
             .collect();
 
         let auth_token = if args.rpc_user.is_some() {
-            Some(basic_auth_token(args.rpc_user.as_ref().unwrap(), args.rpc_password.as_ref().unwrap()))
+            auth_token_from_creds(
+                args.rpc_user.as_ref().unwrap(),
+                args.rpc_password.as_ref().unwrap(),
+            )
         } else {
-            None
+            let cookie = format!(
+                "__cookie__:{}",
+                thread_rng()
+                    .sample_iter(&Alphanumeric)
+                    .take(64)
+                    .map(char::from)
+                    .collect::<String>()
+            );
+            fs::write(data_dir.join(".cookie"), &cookie)?;
+            auth_token_from_cookie(&cookie)
         };
 
         let bitcoin_rpc_auth = if let Some(cookie) = args.bitcoin_rpc_cookie {
@@ -226,6 +241,13 @@ fn get_default_node_dirs() -> ProjectDirs {
         error!("error: could not retrieve default project directories from os");
         safe_exit(1);
     })
+}
+
+pub fn default_cookie_path(network: &ExtendedNetwork) -> PathBuf {
+    get_default_node_dirs()
+        .data_dir()
+        .join(network.to_string())
+        .join(".cookie")
 }
 
 // from clap utilities

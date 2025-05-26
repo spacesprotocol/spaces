@@ -48,12 +48,22 @@ use tokio::{
     task::JoinSet,
 };
 
-use crate::{calc_progress, checker::TxChecker, client::{BlockMeta, TxEntry}, config::ExtendedNetwork, deserialize_base64, serialize_base64, source::BitcoinRpc, store::{ChainState, LiveSnapshot, RolloutEntry, Sha256}, spaces::{COMMIT_BLOCK_INTERVAL, ROOT_ANCHORS_COUNT}, wallets::{
-    AddressKind, ListSpacesResponse, RpcWallet, TxInfo, TxResponse, WalletCommand,
-    WalletResponse,
-}};
-use crate::wallets::WalletInfoWithProgress;
 use crate::auth::BasicAuthLayer;
+use crate::wallets::WalletInfoWithProgress;
+use crate::{
+    calc_progress,
+    checker::TxChecker,
+    client::{BlockMeta, TxEntry},
+    config::ExtendedNetwork,
+    deserialize_base64, serialize_base64,
+    source::BitcoinRpc,
+    spaces::{COMMIT_BLOCK_INTERVAL, ROOT_ANCHORS_COUNT},
+    store::{ChainState, LiveSnapshot, RolloutEntry, Sha256},
+    wallets::{
+        AddressKind, ListSpacesResponse, RpcWallet, TxInfo, TxResponse, WalletCommand,
+        WalletResponse,
+    },
+};
 
 pub(crate) type Responder<T> = oneshot::Sender<T>;
 
@@ -225,7 +235,8 @@ pub trait Rpc {
     ) -> Result<NostrEvent, ErrorObjectOwned>;
 
     #[method(name = "walletgetinfo")]
-    async fn wallet_get_info(&self, name: &str) -> Result<WalletInfoWithProgress, ErrorObjectOwned>;
+    async fn wallet_get_info(&self, name: &str)
+        -> Result<WalletInfoWithProgress, ErrorObjectOwned>;
 
     #[method(name = "walletexport")]
     async fn wallet_export(&self, name: &str) -> Result<WalletExport, ErrorObjectOwned>;
@@ -587,7 +598,8 @@ impl WalletManager {
             .filter_map(Result::ok)
             .filter(|entry| entry.path().is_dir())
             .filter_map(|entry| {
-                entry.path()
+                entry
+                    .path()
                     .file_name()
                     .and_then(|name| name.to_str())
                     .map(String::from)
@@ -690,7 +702,7 @@ impl RpcServerImpl {
     pub async fn listen(
         self,
         addrs: Vec<SocketAddr>,
-        auth_token: Option<String>,
+        auth_token: String,
         signal: broadcast::Sender<()>,
     ) -> anyhow::Result<()> {
         let mut listeners: Vec<_> = Vec::with_capacity(addrs.len());
@@ -844,13 +856,11 @@ impl RpcServer for RpcServerImpl {
         Ok(data)
     }
 
-    async fn list_wallets(&self) ->  Result<Vec<String>, ErrorObjectOwned> {
+    async fn list_wallets(&self) -> Result<Vec<String>, ErrorObjectOwned> {
         self.wallet_manager
             .list_wallets()
             .await
-            .map_err(|error| {
-                ErrorObjectOwned::owned(-1, error.to_string(), None::<String>)
-            })
+            .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
     }
 
     async fn wallet_load(&self, name: &str) -> Result<(), ErrorObjectOwned> {
@@ -895,7 +905,10 @@ impl RpcServer for RpcServerImpl {
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
     }
 
-    async fn wallet_get_info(&self, wallet: &str) -> Result<WalletInfoWithProgress, ErrorObjectOwned> {
+    async fn wallet_get_info(
+        &self,
+        wallet: &str,
+    ) -> Result<WalletInfoWithProgress, ErrorObjectOwned> {
         self.wallet(&wallet)
             .await?
             .send_get_info()
@@ -1115,7 +1128,7 @@ impl AsyncChainState {
             rpc,
             chain_state,
         )
-            .await?;
+        .await?;
 
         Ok(block
             .block_meta
@@ -1123,7 +1136,6 @@ impl AsyncChainState {
             .into_iter()
             .find(|tx| &tx.changeset.txid == txid))
     }
-
 
     async fn get_indexed_block(
         index: &mut Option<LiveSnapshot>,
@@ -1147,10 +1159,7 @@ impl AsyncChainState {
             .get(BaseHash::from_slice(hash.as_ref()))
             .context("Could not fetch block from index")?
         {
-            return Ok(BlockMetaWithHash {
-                hash,
-                block_meta,
-            });
+            return Ok(BlockMetaWithHash { hash, block_meta });
         }
 
         let info: serde_json::Value = rpc
@@ -1230,14 +1239,9 @@ impl AsyncChainState {
                 height_or_hash,
                 resp,
             } => {
-                let res = Self::get_indexed_block(
-                    block_index,
-                    height_or_hash,
-                    client,
-                    rpc,
-                    chain_state,
-                )
-                    .await;
+                let res =
+                    Self::get_indexed_block(block_index, height_or_hash, client, rpc, chain_state)
+                        .await;
                 let _ = resp.send(res);
             }
             ChainStateCommand::GetTxMeta { txid, resp } => {
@@ -1299,7 +1303,7 @@ impl AsyncChainState {
                 File::open(anchors_path)
                     .or_else(|e| Err(anyhow!("Could not open anchors file: {}", e)))?,
             )
-                .or_else(|e| Err(anyhow!("Could not read anchors file: {}", e)))?;
+            .or_else(|e| Err(anyhow!("Could not read anchors file: {}", e)))?;
             return Ok(anchors);
         }
 
@@ -1374,13 +1378,14 @@ impl AsyncChainState {
         let key = OutpointKey::from_outpoint::<Sha256>(outpoint);
 
         let proof = if !prefer_recent {
-            let spaceout =
-                match state.get_spaceout(&outpoint)? {
-                    Some(spaceot) => spaceot,
-                    None => return Err(anyhow!(
+            let spaceout = match state.get_spaceout(&outpoint)? {
+                Some(spaceot) => spaceot,
+                None => {
+                    return Err(anyhow!(
                         "Cannot find older proofs for a non-existent utxo (try with oldest: false)"
-                    )),
-                };
+                    ))
+                }
+            };
             let target_snapshot = match spaceout.space.as_ref() {
                 None => return Ok(ProofResult { proof: vec![], root: Bytes::new(vec![]) }),
                 Some(space) => match space.covenant {
@@ -1533,7 +1538,9 @@ impl AsyncChainState {
 
     pub async fn get_server_info(&self) -> anyhow::Result<ServerInfo> {
         let (resp, resp_rx) = oneshot::channel();
-        self.sender.send(ChainStateCommand::GetServerInfo { resp }).await?;
+        self.sender
+            .send(ChainStateCommand::GetServerInfo { resp })
+            .await?;
         resp_rx.await?
     }
 
@@ -1595,8 +1602,11 @@ fn get_space_key(space_or_hash: &str) -> Result<SpaceKey, ErrorObjectOwned> {
     Ok(SpaceKey::from(hash))
 }
 
-
-async fn get_server_info(client: &reqwest::Client, rpc: &BitcoinRpc, tip: ChainAnchor) -> anyhow::Result<ServerInfo> {
+async fn get_server_info(
+    client: &reqwest::Client,
+    rpc: &BitcoinRpc,
+    tip: ChainAnchor,
+) -> anyhow::Result<ServerInfo> {
     #[derive(Deserialize)]
     struct Info {
         pub chain: String,
