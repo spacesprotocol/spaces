@@ -2346,6 +2346,7 @@ dependencies = [
  "env_logger",
  "futures",
  "hex",
+ "hyper 0.14.28",
  "jsonrpsee",
  "log",
  "predicates",

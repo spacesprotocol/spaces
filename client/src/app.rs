@@ -69,11 +69,12 @@ impl App {
         let rpc_server = RpcServerImpl::new(async_chain_state.clone(), wallet_manager);
 
         let bind = spaced.bind.clone();
+        let auth_token = spaced.auth_token.clone();
         let shutdown = self.shutdown.clone();
 
         self.services.spawn(async move {
             rpc_server
-                .listen(bind, shutdown)
+                .listen(bind, auth_token, shutdown)
                 .await
                 .map_err(|e| anyhow!("RPC Server error: {}", e))
         });

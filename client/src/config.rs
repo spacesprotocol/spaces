@@ -15,6 +15,7 @@ use serde::Deserialize;
 use spaces_protocol::bitcoin::Network;
 
 use crate::{
+    auth::basic_auth_token,
     source::{BitcoinRpc, BitcoinRpcAuth},
     store::{LiveStore, Store},
     spaces::Spaced,
@@ -58,6 +59,12 @@ pub struct Args {
     /// Bitcoin RPC password
     #[arg(long, env = "SPACED_BITCOIN_RPC_PASSWORD")]
     bitcoin_rpc_password: Option<String>,
+    /// Spaced RPC user
+    #[arg(long, requires = "rpc_password", env = "SPACED_RPC_USER")]
+    rpc_user: Option<String>,
+    /// Spaced RPC password
+    #[arg(long, env = "SPACED_RPC_PASSWORD")]
+    rpc_password: Option<String>,
     /// Bind to given address to listen for JSON-RPC connections.
     /// This option can be specified multiple times (default: 127.0.0.1 and ::1 i.e., localhost)
     #[arg(long, help_heading = Some(RPC_OPTIONS), default_values = ["127.0.0.1", "::1"], env = "SPACED_RPC_BIND")]
@@ -102,7 +109,7 @@ impl Args {
     /// Configures spaced node by processing command line arguments
     /// and configuration files
     pub async fn configure(args: Vec<String>) -> anyhow::Result<Spaced> {
-        let mut args =  Args::try_parse_from(args)?;
+        let mut args = Args::try_parse_from(args)?;
         let default_dirs = get_default_node_dirs();
 
         if args.bitcoin_rpc_url.is_none() {
@@ -132,6 +139,12 @@ impl Args {
             })
             .collect();
 
+        let auth_token = if args.rpc_user.is_some() {
+            Some(basic_auth_token(args.rpc_user.as_ref().unwrap(), args.rpc_password.as_ref().unwrap()))
+        } else {
+            None
+        };
+
         let bitcoin_rpc_auth = if let Some(cookie) = args.bitcoin_rpc_cookie {
             let cookie = std::fs::read_to_string(cookie)?;
             BitcoinRpcAuth::Cookie(cookie)
@@ -144,7 +157,7 @@ impl Args {
         let rpc = BitcoinRpc::new(
             &args.bitcoin_rpc_url.expect("bitcoin rpc url"),
             bitcoin_rpc_auth,
-            !args.bitcoin_rpc_light
+            !args.bitcoin_rpc_light,
         );
 
         let genesis = Spaced::genesis(args.chain);
@@ -196,13 +209,14 @@ impl Args {
             rpc,
             data_dir,
             bind: rpc_bind_addresses,
+            auth_token,
             chain,
             block_index,
             block_index_full: args.block_index_full,
             num_workers: args.jobs as usize,
             anchors_path,
             synced: false,
-            cbf: args.bitcoin_rpc_light
+            cbf: args.bitcoin_rpc_light,
         })
     }
 }

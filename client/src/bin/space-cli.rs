@@ -20,6 +20,7 @@ use jsonrpsee::{
 };
 use serde::{Deserialize, Serialize};
 use spaces_client::{
+    auth::basic_auth_token,
     config::{default_spaces_rpc_port, ExtendedNetwork},
     deserialize_base64,
     format::{
@@ -54,6 +55,12 @@ pub struct Args {
     /// Spaced RPC URL [default: based on specified chain]
     #[arg(long)]
     spaced_rpc_url: Option<String>,
+    /// Spaced RPC user
+    #[arg(long, requires = "rpc_password", env = "SPACED_RPC_USER")]
+    rpc_user: Option<String>,
+    /// Spaced RPC password
+    #[arg(long, env = "SPACED_RPC_PASSWORD")]
+    rpc_password: Option<String>,
     /// Specify wallet to use
     #[arg(long, short, global = true, default_value = "default")]
     wallet: String,
@@ -387,7 +394,17 @@ impl SpaceCli {
             args.spaced_rpc_url = Some(default_spaced_rpc_url(&args.chain));
         }
 
-        let client = HttpClientBuilder::default().build(args.spaced_rpc_url.clone().unwrap())?;
+        let client = HttpClientBuilder::default();
+        let client = if args.rpc_user.is_some() {
+            let token = basic_auth_token(args.rpc_user.as_ref().unwrap(), args.rpc_password.as_ref().unwrap());
+            let mut headers = hyper::http::HeaderMap::new();
+            headers.insert("Authorization", hyper::http::HeaderValue::from_str(&format!("Basic {token}")).unwrap());
+            client.set_headers(headers)
+        } else {
+            client
+        };
+        let client = client.build(args.spaced_rpc_url.clone().unwrap())?;
+
         Ok((
             Self {
                 wallet: args.wallet.clone(),

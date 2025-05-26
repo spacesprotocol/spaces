@@ -53,6 +53,7 @@ use crate::{calc_progress, checker::TxChecker, client::{BlockMeta, TxEntry}, con
     WalletResponse,
 }};
 use crate::wallets::WalletInfoWithProgress;
+use crate::auth::BasicAuthLayer;
 
 pub(crate) type Responder<T> = oneshot::Sender<T>;
 
@@ -689,12 +690,14 @@ impl RpcServerImpl {
     pub async fn listen(
         self,
         addrs: Vec<SocketAddr>,
+        auth_token: Option<String>,
         signal: broadcast::Sender<()>,
     ) -> anyhow::Result<()> {
         let mut listeners: Vec<_> = Vec::with_capacity(addrs.len());
 
         for addr in addrs.iter() {
             let service_builder = tower::ServiceBuilder::new()
+                .layer(BasicAuthLayer::new(auth_token.clone()))
                 .layer(ProxyGetRequestLayer::new(
                     "/root-anchors.json",
                     "getrootanchors",

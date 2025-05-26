@@ -40,6 +40,7 @@ tabled = "0.17.0"
 colored = "3.0.0"
 domain = {version = "0.10.3", default-features = false, features = ["zonefile"]}
 tower = "0.4.13"
+hyper = "0.14.28"
 
 [dev-dependencies]
 assert_cmd = "2.0.16"

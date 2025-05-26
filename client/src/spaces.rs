@@ -42,6 +42,7 @@ pub struct Spaced {
     pub rpc: BitcoinRpc,
     pub data_dir: PathBuf,
     pub bind: Vec<SocketAddr>,
+    pub auth_token: Option<String>,
     pub num_workers: usize,
     pub anchors_path: Option<PathBuf>,
     pub synced: bool,
