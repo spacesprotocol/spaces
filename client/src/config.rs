@@ -5,15 +5,15 @@ use std::{
     path::PathBuf,
 };
 
-use rand::{
-    distributions::Alphanumeric,
-    {thread_rng, Rng},
-};
-
+use anyhow::anyhow;
 use clap::{ArgGroup, Parser, ValueEnum};
 use directories::ProjectDirs;
 use jsonrpsee::core::Serialize;
 use log::error;
+use rand::{
+    distributions::Alphanumeric,
+    {thread_rng, Rng},
+};
 use serde::Deserialize;
 use spaces_protocol::bitcoin::Network;
 
@@ -127,6 +127,7 @@ impl Args {
             Some(data_dir) => data_dir,
         }
         .join(args.chain.to_string());
+        fs::create_dir_all(data_dir.clone())?;
 
         let default_port = args.rpc_port.unwrap();
         let rpc_bind_addresses: Vec<SocketAddr> = args
@@ -156,7 +157,14 @@ impl Args {
                     .map(char::from)
                     .collect::<String>()
             );
-            fs::write(data_dir.join(".cookie"), &cookie)?;
+            let cookie_path = data_dir.join(".cookie");
+            fs::write(&cookie_path, &cookie).map_err(|e| {
+                anyhow!(
+                    "Failed to write cookie file '{}': {}",
+                    cookie_path.display(),
+                    e
+                )
+            })?;
             auth_token_from_cookie(&cookie)
         };
 
@@ -176,8 +184,6 @@ impl Args {
         );
 
         let genesis = Spaced::genesis(args.chain);
-
-        fs::create_dir_all(data_dir.clone())?;
 
         let proto_db_path = data_dir.join("protocol.sdb");
         let initial_sync = !proto_db_path.exists();
