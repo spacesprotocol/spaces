@@ -2383,6 +2383,7 @@ dependencies = [
  "anyhow",
  "assert_cmd",
  "bitcoind",
+ "hyper 0.14.28",
  "spaces_client",
  "zip",
 ]
