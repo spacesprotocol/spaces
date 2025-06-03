@@ -2,7 +2,7 @@ extern crate core;
 
 use std::{
     fs, io,
-    io::{Cursor, IsTerminal},
+    io::{Cursor, IsTerminal, Write},
     path::PathBuf,
 };
 
@@ -78,6 +78,9 @@ enum Commands {
     /// Generate a new wallet
     #[command(name = "createwallet")]
     CreateWallet,
+    /// Restore wallet from mnemonic phrase
+    #[command(name = "restorewallet")]
+    RestoreWallet,
     /// Load a wallet
     #[command(name = "loadwallet")]
     LoadWallet,
@@ -582,7 +585,17 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
             print_list_wallets(result, cli.format);
         }
         Commands::CreateWallet => {
-            cli.client.wallet_create(&cli.wallet).await?;
+            let response = cli.client.wallet_create(&cli.wallet).await?;
+            println!("⚠️ Write down your recovery phrase NOW!");
+            println!("This is the ONLY time it will be shown:");
+            println!("{}", &response);
+        }
+        Commands::RestoreWallet => {
+            print!("Enter mnemonic phrase: ");
+            io::stdout().flush().unwrap();
+            let mut mnemonic = String::new();
+            io::stdin().read_line(&mut mnemonic).unwrap();
+            cli.client.wallet_restore(&cli.wallet, mnemonic).await?;
         }
         Commands::LoadWallet => {
             cli.client.wallet_load(&cli.wallet).await?;

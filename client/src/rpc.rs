@@ -230,7 +230,10 @@ pub trait Rpc {
     async fn wallet_export(&self, name: &str) -> Result<WalletExport, ErrorObjectOwned>;
 
     #[method(name = "walletcreate")]
-    async fn wallet_create(&self, name: &str) -> Result<(), ErrorObjectOwned>;
+    async fn wallet_create(&self, name: &str) -> Result<String, ErrorObjectOwned>;
+
+    #[method(name = "walletrestore")]
+    async fn wallet_restore(&self, name: &str, mnemonic: String) -> Result<(), ErrorObjectOwned>;
 
     #[method(name = "walletsendrequest")]
     async fn wallet_send_request(
@@ -491,11 +494,18 @@ impl WalletManager {
         Ok(export)
     }
 
-    pub async fn create_wallet(&self, client: &reqwest::Client, name: &str) -> anyhow::Result<()> {
+    pub async fn create_wallet(&self, client: &reqwest::Client, name: &str) -> anyhow::Result<String> {
         let mnemonic: GeneratedKey<_, Tap> =
             Mnemonic::generate((WordCount::Words12, Language::English))
                 .map_err(|_| anyhow!("Mnemonic generation error"))?;
 
+        let start_block = self.get_wallet_start_block(client).await?;
+        self.setup_new_wallet(name.to_string(), mnemonic.to_string(), start_block)?;
+        self.load_wallet(name).await?;
+        Ok(mnemonic.to_string())
+    }
+
+    pub async fn restore_wallet(&self, client: &reqwest::Client, name: &str, mnemonic: &str) -> anyhow::Result<()> {
         let start_block = self.get_wallet_start_block(client).await?;
         self.setup_new_wallet(name.to_string(), mnemonic.to_string(), start_block)?;
         self.load_wallet(name).await?;
@@ -513,7 +523,7 @@ impl WalletManager {
             return Err(anyhow!(format!("Wallet `{}` already exists", name)));
         }
 
-        let export = self.wallet_from_mnemonic(name.clone(), mnemonic.to_string(), start_block)?;
+        let export = self.wallet_from_mnemonic(name.clone(), mnemonic, start_block)?;
         fs::create_dir_all(&wallet_path)?;
         let wallet_export_path = wallet_path.join("wallet.json");
         let mut file = fs::File::create(wallet_export_path)?;
@@ -528,7 +538,7 @@ impl WalletManager {
         start_block: BlockId,
     ) -> anyhow::Result<WalletExport> {
         let (network, _) = self.fallback_network();
-        let xpriv = Self::descriptor_from_mnemonic(network, &mnemonic.to_string())?;
+        let xpriv = Self::descriptor_from_mnemonic(network, &mnemonic)?;
 
         let (external, internal) = Self::default_descriptors(xpriv);
         let tmp = bdk::Wallet::create(external, internal)
@@ -653,7 +663,7 @@ impl WalletManager {
     }
 
     fn descriptor_from_mnemonic(network: Network, m: &str) -> anyhow::Result<Xpriv> {
-        let mnemonic = Mnemonic::parse(m).unwrap();
+        let mnemonic = Mnemonic::parse(m)?;
         let xkey: ExtendedKey = mnemonic.clone().into_extended_key()?;
         Ok(xkey.into_xprv(network).expect("xpriv"))
     }
@@ -908,9 +918,18 @@ impl RpcServer for RpcServerImpl {
             })
     }
 
-    async fn wallet_create(&self, name: &str) -> Result<(), ErrorObjectOwned> {
+    async fn wallet_create(&self, name: &str) -> Result<String, ErrorObjectOwned> {
         self.wallet_manager
             .create_wallet(&self.client, name)
+            .await
+            .map_err(|error| {
+                ErrorObjectOwned::owned(RPC_WALLET_NOT_LOADED, error.to_string(), None::<String>)
+            })
+    }
+
+    async fn wallet_restore(&self, name: &str, mnemonic: String) -> Result<(), ErrorObjectOwned> {
+        self.wallet_manager
+            .restore_wallet(&self.client, name, &mnemonic)
             .await
             .map_err(|error| {
                 ErrorObjectOwned::owned(RPC_WALLET_NOT_LOADED, error.to_string(), None::<String>)
