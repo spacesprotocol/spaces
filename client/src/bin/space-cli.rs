@@ -16,17 +16,17 @@ use domain::{
 };
 use jsonrpsee::{
     core::{client::Error, ClientError},
-    http_client::{HttpClient, HttpClientBuilder},
+    http_client::HttpClient,
 };
 use serde::{Deserialize, Serialize};
 use spaces_client::{
-    config::{default_spaces_rpc_port, ExtendedNetwork},
+    auth::{auth_token_from_cookie, auth_token_from_creds, http_client_with_auth},
+    config::{default_cookie_path, default_spaces_rpc_port, ExtendedNetwork},
     deserialize_base64,
     format::{
         print_error_rpc_response, print_list_bidouts, print_list_spaces_response,
-        print_list_transactions, print_list_unspent, print_server_info,
-        print_list_wallets, print_wallet_balance_response, print_wallet_info, print_wallet_response,
-        Format,
+        print_list_transactions, print_list_unspent, print_list_wallets, print_server_info,
+        print_wallet_balance_response, print_wallet_info, print_wallet_response, Format,
     },
     rpc::{
         BidParams, ExecuteParams, OpenParams, RegisterParams, RpcClient, RpcWalletRequest,
@@ -54,6 +54,15 @@ pub struct Args {
     /// Spaced RPC URL [default: based on specified chain]
     #[arg(long)]
     spaced_rpc_url: Option<String>,
+    /// Spaced RPC cookie file path
+    #[arg(long, env = "SPACED_RPC_COOKIE")]
+    rpc_cookie: Option<PathBuf>,
+    /// Spaced RPC user
+    #[arg(long, requires = "rpc_password", env = "SPACED_RPC_USER")]
+    rpc_user: Option<String>,
+    /// Spaced RPC password
+    #[arg(long, env = "SPACED_RPC_PASSWORD")]
+    rpc_password: Option<String>,
     /// Specify wallet to use
     #[arg(long, short, global = true, default_value = "default")]
     wallet: String,
@@ -387,7 +396,27 @@ impl SpaceCli {
             args.spaced_rpc_url = Some(default_spaced_rpc_url(&args.chain));
         }
 
-        let client = HttpClientBuilder::default().build(args.spaced_rpc_url.clone().unwrap())?;
+        let auth_token = if args.rpc_user.is_some() {
+            auth_token_from_creds(
+                args.rpc_user.as_ref().unwrap(),
+                args.rpc_password.as_ref().unwrap(),
+            )
+        } else {
+            let cookie_path = match &args.rpc_cookie {
+                Some(path) => path,
+                None => &default_cookie_path(&args.chain),
+            };
+            let cookie = fs::read_to_string(cookie_path).map_err(|e| {
+                anyhow!(
+                    "Failed to read cookie file '{}': {}",
+                    cookie_path.display(),
+                    e
+                )
+            })?;
+            auth_token_from_cookie(&cookie)
+        };
+        let client = http_client_with_auth(args.spaced_rpc_url.as_ref().unwrap(), &auth_token)?;
+
         Ok((
             Self {
                 wallet: args.wallet.clone(),

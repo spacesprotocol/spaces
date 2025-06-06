@@ -8,10 +8,8 @@ use anyhow::Result;
 use assert_cmd::cargo::CommandCargoExt;
 use bitcoind::{anyhow, anyhow::anyhow, get_available_port, tempfile::tempdir};
 use spaces_client::{
-    jsonrpsee::{
-        http_client::{HttpClient, HttpClientBuilder},
-        tokio,
-    },
+    auth::{auth_token_from_creds, http_client_with_auth},
+    jsonrpsee::{http_client::HttpClient, tokio},
     log::{debug, error},
     rpc::RpcClient,
 };
@@ -53,13 +51,18 @@ impl SpaceD {
                 .arg(rpc_port.to_string())
                 .arg("--data-dir")
                 .arg(tempdir()?.path())
+                .arg("--rpc-user")
+                .arg("user")
+                .arg("--rpc-password")
+                .arg("pass")
                 .stdout(stdout)
                 .spawn()?)
         })
         .await
         .expect("spawn blocking task")?;
 
-        let client = HttpClientBuilder::default().build(rpc_url(rpc_port))?;
+        let client =
+            http_client_with_auth(&rpc_url(rpc_port), &auth_token_from_creds("user", "pass"))?;
 
         let mut spaced = Self {
             process,
