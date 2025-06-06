@@ -8,11 +8,8 @@ use anyhow::Result;
 use assert_cmd::cargo::CommandCargoExt;
 use bitcoind::{anyhow, anyhow::anyhow, get_available_port, tempfile::tempdir};
 use spaces_client::{
-    auth::auth_token_from_creds,
-    jsonrpsee::{
-        http_client::{HttpClient, HttpClientBuilder},
-        tokio,
-    },
+    auth::{auth_token_from_creds, http_client_with_auth},
+    jsonrpsee::{http_client::HttpClient, tokio},
     log::{debug, error},
     rpc::RpcClient,
 };
@@ -64,17 +61,8 @@ impl SpaceD {
         .await
         .expect("spawn blocking task")?;
 
-        let client = {
-            let auth_token = auth_token_from_creds("user", "pass");
-            let mut headers = hyper::http::HeaderMap::new();
-            headers.insert(
-                "Authorization",
-                hyper::http::HeaderValue::from_str(&format!("Basic {auth_token}")).unwrap(),
-            );
-            HttpClientBuilder::default()
-                .set_headers(headers)
-                .build(rpc_url(rpc_port))?
-        };
+        let client =
+            http_client_with_auth(&rpc_url(rpc_port), &auth_token_from_creds("user", "pass"))?;
 
         let mut spaced = Self {
             process,

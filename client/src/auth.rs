@@ -1,5 +1,9 @@
 use base64::Engine;
-use hyper::{Body, HeaderMap, Request, Response, StatusCode};
+use hyper::{http::HeaderValue, Body, HeaderMap, Request, Response, StatusCode};
+use jsonrpsee::{
+    core::ClientError,
+    http_client::{HttpClient, HttpClientBuilder},
+};
 use std::{
     error::Error,
     future::Future,
@@ -98,4 +102,13 @@ pub fn auth_token_from_cookie(cookie: &str) -> String {
 
 pub fn auth_token_from_creds(user: &str, password: &str) -> String {
     base64::prelude::BASE64_STANDARD.encode(auth_cookie(user, password))
+}
+
+pub fn http_client_with_auth(url: &str, auth_token: &str) -> Result<HttpClient, ClientError> {
+    let mut headers = hyper::http::HeaderMap::new();
+    headers.insert(
+        "Authorization",
+        HeaderValue::from_str(&format!("Basic {auth_token}")).unwrap(),
+    );
+    HttpClientBuilder::default().set_headers(headers).build(url)
 }

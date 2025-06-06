@@ -16,11 +16,11 @@ use domain::{
 };
 use jsonrpsee::{
     core::{client::Error, ClientError},
-    http_client::{HttpClient, HttpClientBuilder},
+    http_client::HttpClient,
 };
 use serde::{Deserialize, Serialize};
 use spaces_client::{
-    auth::{auth_token_from_cookie, auth_token_from_creds},
+    auth::{auth_token_from_cookie, auth_token_from_creds, http_client_with_auth},
     config::{default_cookie_path, default_spaces_rpc_port, ExtendedNetwork},
     deserialize_base64,
     format::{
@@ -415,16 +415,7 @@ impl SpaceCli {
             })?;
             auth_token_from_cookie(&cookie)
         };
-        let client = {
-            let mut headers = hyper::http::HeaderMap::new();
-            headers.insert(
-                "Authorization",
-                hyper::http::HeaderValue::from_str(&format!("Basic {auth_token}")).unwrap(),
-            );
-            HttpClientBuilder::default()
-                .set_headers(headers)
-                .build(args.spaced_rpc_url.clone().unwrap())?
-        };
+        let client = http_client_with_auth(args.spaced_rpc_url.as_ref().unwrap(), &auth_token)?;
 
         Ok((
             Self {
