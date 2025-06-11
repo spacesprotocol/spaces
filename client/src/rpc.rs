@@ -61,6 +61,7 @@ pub struct ServerInfo {
     pub network: String,
     pub tip: ChainAnchor,
     pub chain: ChainInfo,
+    pub ready: bool,
     pub progress: f32,
 }
 
@@ -1593,12 +1594,17 @@ fn get_space_key(space_or_hash: &str) -> Result<SpaceKey, ErrorObjectOwned> {
 }
 
 
-async fn get_server_info(client: &reqwest::Client, rpc: &BitcoinRpc, tip: ChainAnchor) -> anyhow::Result<ServerInfo> {
+async fn get_server_info(
+    client: &reqwest::Client,
+    rpc: &BitcoinRpc,
+    tip: ChainAnchor,
+) -> anyhow::Result<ServerInfo> {
     #[derive(Deserialize)]
     struct Info {
         pub chain: String,
         pub headers: u32,
         pub blocks: u32,
+        pub headerssynced: Option<bool>,
     }
 
     let info: Info = rpc
@@ -1621,6 +1627,7 @@ async fn get_server_info(client: &reqwest::Client, rpc: &BitcoinRpc, tip: ChainA
             blocks: info.blocks,
             headers: info.headers,
         },
+        ready: info.headerssynced.unwrap_or(true),
         progress: calc_progress(start_block, tip.height, info.headers),
     })
 }
