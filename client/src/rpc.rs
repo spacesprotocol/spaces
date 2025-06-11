@@ -53,7 +53,7 @@ use crate::wallets::WalletInfoWithProgress;
 use crate::{
     calc_progress,
     checker::TxChecker,
-    client::{BlockMeta, TxEntry},
+    client::{BlockMeta, TxEntry, BlockchainInfo},
     config::ExtendedNetwork,
     deserialize_base64, serialize_base64,
     source::BitcoinRpc,
@@ -72,6 +72,7 @@ pub struct ServerInfo {
     pub network: String,
     pub tip: ChainAnchor,
     pub chain: ChainInfo,
+    pub ready: bool,
     pub progress: f32,
 }
 
@@ -1626,14 +1627,7 @@ async fn get_server_info(
     rpc: &BitcoinRpc,
     tip: ChainAnchor,
 ) -> anyhow::Result<ServerInfo> {
-    #[derive(Deserialize)]
-    struct Info {
-        pub chain: String,
-        pub headers: u32,
-        pub blocks: u32,
-    }
-
-    let info: Info = rpc
+    let info: BlockchainInfo = rpc
         .send_json(client, &rpc.get_blockchain_info())
         .await
         .map_err(|e| anyhow!("Could not retrieve blockchain info ({})", e))?;
@@ -1653,6 +1647,7 @@ async fn get_server_info(
             blocks: info.blocks,
             headers: info.headers,
         },
+        ready: info.headers_synced.unwrap_or(true),
         progress: calc_progress(start_block, tip.height, info.headers),
     })
 }
