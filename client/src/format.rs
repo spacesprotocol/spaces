@@ -3,8 +3,7 @@ use colored::{Color, Colorize};
 use jsonrpsee::core::Serialize;
 use serde::Deserialize;
 use spaces_protocol::{
-    bitcoin::{Amount, Network, OutPoint},
-    Covenant,
+    bitcoin::{Amount, Network, OutPoint}, Covenant
 };
 use spaces_wallet::{
     address::SpaceAddress,
@@ -35,6 +34,12 @@ pub enum Format {
 struct FormatRpcError {
     code: i32,
     message: String,
+}
+
+#[derive(Tabled)]
+#[tabled(rename_all = "UPPERCASE")]
+struct PendingSpaces {
+    space: String,
 }
 
 #[derive(Tabled)]
@@ -272,9 +277,13 @@ pub fn print_list_spaces_response(
 ) {
     match format {
         Format::Text => {
+            let mut pendings = Vec::new();
             let mut outbids = Vec::new();
             let mut winnings = Vec::new();
             let mut owned = Vec::new();
+            for slabel in response.pending {
+                pendings.push(PendingSpaces { space: slabel.to_string() });
+            }
             for res in response.outbid {
                 let space = res.spaceout.space.as_ref().expect("space");
                 let mut outbid = OutbidSpaces {
@@ -340,6 +349,12 @@ pub fn print_list_spaces_response(
                     _ => {}
                 }
                 owned.push(registered);
+            }
+
+            if !pendings.is_empty() {
+                println!("⏳ PENDING ({} spaces): ", pendings.len().to_string().bold());
+                let table = ascii_table(pendings);
+                println!("{}", table);
             }
 
             if !outbids.is_empty() {

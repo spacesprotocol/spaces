@@ -101,6 +101,7 @@ pub struct WalletInfoWithProgress {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ListSpacesResponse {
+    pub pending: Vec<SLabel>,
     pub winning: Vec<FullSpaceOut>,
     pub outbid: Vec<FullSpaceOut>,
     pub owned: Vec<FullSpaceOut>,
@@ -816,12 +817,15 @@ impl RpcWallet {
         let unspent = wallet.list_unspent_with_details(state)?;
         let recent_events = wallet.list_recent_events()?;
 
-        let mut res = ListSpacesResponse {
-            winning: vec![],
-            outbid: vec![],
-            owned: vec![],
-        };
+        let mut pending = vec![];
+        let mut outbid = vec![];
         for (txid, event) in recent_events {
+            let tx = wallet.get_tx(txid);
+            if tx.as_ref().is_some_and(|tx| !tx.chain_position.is_confirmed()) {
+                pending.push(SLabel::from_str(event.space.as_ref().unwrap()).expect("valid space name"));
+                continue;
+            }
+
             if unspent.iter().any(|out| {
                 out.space
                     .as_ref()
@@ -833,9 +837,12 @@ impl RpcWallet {
             let spacehash = SpaceKey::from(Sha256::hash(name.as_ref()));
             let space = state.get_space_info(&spacehash)?;
             if let Some(space) = space {
-                let tx = wallet.get_tx(txid);
+                if space.spaceout.space.as_ref().unwrap().is_owned() {
+                    continue;
+                }
+
                 if tx.is_none() {
-                    res.outbid.push(space);
+                    outbid.push(space);
                     continue;
                 }
 
@@ -845,10 +852,13 @@ impl RpcWallet {
                 {
                     continue;
                 }
-                res.outbid.push(space);
+
+                outbid.push(space);
             }
         }
 
+        let mut owned = vec![];
+        let mut winning = vec![];
         for wallet_output in unspent.into_iter().filter(|output| output.space.is_some()) {
             let entry = FullSpaceOut {
                 txid: wallet_output.output.outpoint.txid,
@@ -860,15 +870,19 @@ impl RpcWallet {
                 },
             };
 
-            let space = entry.spaceout.space.as_ref().expect("space");
-            if matches!(space.covenant, spaces_protocol::Covenant::Bid { .. }) {
-                res.winning.push(entry);
-            } else if matches!(space.covenant, spaces_protocol::Covenant::Transfer { .. }) {
-                res.owned.push(entry);
+            if entry.spaceout.space.as_ref().expect("space").is_owned() {
+                owned.push(entry);
+            } else {
+                winning.push(entry);
             }
         }
 
-        Ok(res)
+        Ok(ListSpacesResponse {
+            pending,
+            winning,
+            outbid,
+            owned,
+        })
     }
 
     fn list_transactions(
