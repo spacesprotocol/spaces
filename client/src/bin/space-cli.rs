@@ -53,7 +53,7 @@ pub struct Args {
     output_format: Format,
     /// Spaced RPC URL [default: based on specified chain]
     #[arg(long)]
-    spaced_rpc_url: Option<String>,
+    rpc_url: Option<String>,
     /// Spaced RPC cookie file path
     #[arg(long, env = "SPACED_RPC_COOKIE")]
     rpc_cookie: Option<PathBuf>,
@@ -392,8 +392,8 @@ struct Base64Bytes(
 impl SpaceCli {
     async fn configure() -> anyhow::Result<(Self, Args)> {
         let mut args = Args::parse();
-        if args.spaced_rpc_url.is_none() {
-            args.spaced_rpc_url = Some(default_spaced_rpc_url(&args.chain));
+        if args.rpc_url.is_none() {
+            args.rpc_url = Some(default_rpc_url(&args.chain));
         }
 
         let auth_token = if args.rpc_user.is_some() {
@@ -415,7 +415,7 @@ impl SpaceCli {
             })?;
             auth_token_from_cookie(&cookie)
         };
-        let client = http_client_with_auth(args.spaced_rpc_url.as_ref().unwrap(), &auth_token)?;
+        let client = http_client_with_auth(args.rpc_url.as_ref().unwrap(), &auth_token)?;
 
         Ok((
             Self {
@@ -425,7 +425,7 @@ impl SpaceCli {
                 force: args.force,
                 skip_tx_check: args.skip_tx_check,
                 network: args.chain,
-                rpc_url: args.spaced_rpc_url.clone().unwrap(),
+                rpc_url: args.rpc_url.clone().unwrap(),
                 client,
             },
             args,
@@ -959,7 +959,7 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
     Ok(())
 }
 
-fn default_spaced_rpc_url(chain: &ExtendedNetwork) -> String {
+fn default_rpc_url(chain: &ExtendedNetwork) -> String {
     format!("http://127.0.0.1:{}", default_spaces_rpc_port(chain))
 }
 
