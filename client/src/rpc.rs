@@ -232,8 +232,8 @@ pub trait Rpc {
     #[method(name = "walletcreate")]
     async fn wallet_create(&self, name: &str) -> Result<String, ErrorObjectOwned>;
 
-    #[method(name = "walletrestore")]
-    async fn wallet_restore(&self, name: &str, mnemonic: String) -> Result<(), ErrorObjectOwned>;
+    #[method(name = "walletrecover")]
+    async fn wallet_recover(&self, name: &str, mnemonic: String) -> Result<(), ErrorObjectOwned>;
 
     #[method(name = "walletsendrequest")]
     async fn wallet_send_request(
@@ -505,7 +505,7 @@ impl WalletManager {
         Ok(mnemonic.to_string())
     }
 
-    pub async fn restore_wallet(&self, client: &reqwest::Client, name: &str, mnemonic: &str) -> anyhow::Result<()> {
+    pub async fn recover_wallet(&self, client: &reqwest::Client, name: &str, mnemonic: &str) -> anyhow::Result<()> {
         let start_block = self.get_wallet_start_block(client).await?;
         self.setup_new_wallet(name.to_string(), mnemonic.to_string(), start_block)?;
         self.load_wallet(name).await?;
@@ -927,9 +927,9 @@ impl RpcServer for RpcServerImpl {
             })
     }
 
-    async fn wallet_restore(&self, name: &str, mnemonic: String) -> Result<(), ErrorObjectOwned> {
+    async fn wallet_recover(&self, name: &str, mnemonic: String) -> Result<(), ErrorObjectOwned> {
         self.wallet_manager
-            .restore_wallet(&self.client, name, &mnemonic)
+            .recover_wallet(&self.client, name, &mnemonic)
             .await
             .map_err(|error| {
                 ErrorObjectOwned::owned(RPC_WALLET_NOT_LOADED, error.to_string(), None::<String>)
