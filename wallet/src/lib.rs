@@ -461,8 +461,9 @@ impl SpacesWallet {
             }
         }
 
-        let ctx = secp256k1::Secp256k1::new();
-        event.verify(ctx);
+        if !event.verify(secp256k1::Secp256k1::new()) {
+            return Err(anyhow::anyhow!("Could not verify signature"));
+        }
         Ok(event)
     }
 
