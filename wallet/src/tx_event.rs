@@ -206,7 +206,7 @@ impl TxEvent {
         Ok(None)
     }
 
-    /// Retrieve all spaces the wallet has bid on in the last 2 weeks
+    /// Retrieve all spaces the wallet has done any operation with
     pub fn get_latest_events(
         db_tx: &rusqlite::Transaction,
     ) -> rusqlite::Result<Vec<(Txid, TxEvent)>> {
@@ -216,8 +216,7 @@ impl TxEvent {
          WHERE id IN (
              SELECT MAX(id)
              FROM {table}
-             WHERE type IN ('bid', 'open')
-               AND created_at >= strftime('%s', 'now', '-14 days')
+             WHERE space IS NOT NULL
              GROUP BY space
          )
          ORDER BY id DESC",
