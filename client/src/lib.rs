@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use base64::Engine;
 use serde::{Deserialize, Deserializer, Serializer};
 
+pub mod auth;
 mod checker;
 pub mod client;
 pub mod config;

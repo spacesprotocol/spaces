@@ -5,19 +5,23 @@ use std::{
     path::PathBuf,
 };
 
-use clap::{
-    ArgGroup, Parser, ValueEnum,
-};
+use anyhow::anyhow;
+use clap::{ArgGroup, Parser, ValueEnum};
 use directories::ProjectDirs;
 use jsonrpsee::core::Serialize;
 use log::error;
+use rand::{
+    distributions::Alphanumeric,
+    {thread_rng, Rng},
+};
 use serde::Deserialize;
 use spaces_protocol::bitcoin::Network;
 
 use crate::{
+    auth::{auth_token_from_cookie, auth_token_from_creds},
     source::{BitcoinRpc, BitcoinRpcAuth},
-    store::{LiveStore, Store},
     spaces::Spaced,
+    store::{LiveStore, Store},
 };
 
 const RPC_OPTIONS: &str = "RPC Server Options";
@@ -58,6 +62,12 @@ pub struct Args {
     /// Bitcoin RPC password
     #[arg(long, env = "SPACED_BITCOIN_RPC_PASSWORD")]
     bitcoin_rpc_password: Option<String>,
+    /// Spaced RPC user
+    #[arg(long, requires = "rpc_password", env = "SPACED_RPC_USER")]
+    rpc_user: Option<String>,
+    /// Spaced RPC password
+    #[arg(long, env = "SPACED_RPC_PASSWORD")]
+    rpc_password: Option<String>,
     /// Bind to given address to listen for JSON-RPC connections.
     /// This option can be specified multiple times (default: 127.0.0.1 and ::1 i.e., localhost)
     #[arg(long, help_heading = Some(RPC_OPTIONS), default_values = ["127.0.0.1", "::1"], env = "SPACED_RPC_BIND")]
@@ -102,7 +112,7 @@ impl Args {
     /// Configures spaced node by processing command line arguments
     /// and configuration files
     pub async fn configure(args: Vec<String>) -> anyhow::Result<Spaced> {
-        let mut args =  Args::try_parse_from(args)?;
+        let mut args = Args::try_parse_from(args)?;
         let default_dirs = get_default_node_dirs();
 
         if args.bitcoin_rpc_url.is_none() {
@@ -117,6 +127,7 @@ impl Args {
             Some(data_dir) => data_dir,
         }
         .join(args.chain.to_string());
+        fs::create_dir_all(data_dir.clone())?;
 
         let default_port = args.rpc_port.unwrap();
         let rpc_bind_addresses: Vec<SocketAddr> = args
@@ -132,6 +143,31 @@ impl Args {
             })
             .collect();
 
+        let auth_token = if args.rpc_user.is_some() {
+            auth_token_from_creds(
+                args.rpc_user.as_ref().unwrap(),
+                args.rpc_password.as_ref().unwrap(),
+            )
+        } else {
+            let cookie = format!(
+                "__cookie__:{}",
+                thread_rng()
+                    .sample_iter(&Alphanumeric)
+                    .take(64)
+                    .map(char::from)
+                    .collect::<String>()
+            );
+            let cookie_path = data_dir.join(".cookie");
+            fs::write(&cookie_path, &cookie).map_err(|e| {
+                anyhow!(
+                    "Failed to write cookie file '{}': {}",
+                    cookie_path.display(),
+                    e
+                )
+            })?;
+            auth_token_from_cookie(&cookie)
+        };
+
         let bitcoin_rpc_auth = if let Some(cookie) = args.bitcoin_rpc_cookie {
             let cookie = std::fs::read_to_string(cookie)?;
             BitcoinRpcAuth::Cookie(cookie)
@@ -144,12 +180,10 @@ impl Args {
         let rpc = BitcoinRpc::new(
             &args.bitcoin_rpc_url.expect("bitcoin rpc url"),
             bitcoin_rpc_auth,
-            !args.bitcoin_rpc_light
+            !args.bitcoin_rpc_light,
         );
 
         let genesis = Spaced::genesis(args.chain);
-
-        fs::create_dir_all(data_dir.clone())?;
 
         let proto_db_path = data_dir.join("protocol.sdb");
         let initial_sync = !proto_db_path.exists();
@@ -196,13 +230,14 @@ impl Args {
             rpc,
             data_dir,
             bind: rpc_bind_addresses,
+            auth_token,
             chain,
             block_index,
             block_index_full: args.block_index_full,
             num_workers: args.jobs as usize,
             anchors_path,
             synced: false,
-            cbf: args.bitcoin_rpc_light
+            cbf: args.bitcoin_rpc_light,
         })
     }
 }
@@ -212,6 +247,13 @@ fn get_default_node_dirs() -> ProjectDirs {
         error!("error: could not retrieve default project directories from os");
         safe_exit(1);
     })
+}
+
+pub fn default_cookie_path(network: &ExtendedNetwork) -> PathBuf {
+    get_default_node_dirs()
+        .data_dir()
+        .join(network.to_string())
+        .join(".cookie")
 }
 
 // from clap utilities
