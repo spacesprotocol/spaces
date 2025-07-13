@@ -37,10 +37,7 @@ use spaces_client::{
 };
 use spaces_protocol::bitcoin::{Amount, FeeRate, OutPoint, Txid};
 use spaces_wallet::{
-    bitcoin::secp256k1::schnorr::Signature,
-    export::WalletExport,
-    nostr::{NostrEvent, NostrTag},
-    Listing,
+    bitcoin::secp256k1::schnorr::Signature, export::WalletExport, nostr::NostrEvent, Listing,
 };
 
 #[derive(Parser, Debug)]
@@ -268,10 +265,6 @@ enum Commands {
         /// Path to a Nostr event json file (omit for stdin)
         #[arg(short, long)]
         input: Option<PathBuf>,
-
-        /// Include a space-tag and trust path data
-        #[arg(short, long)]
-        anchor: bool,
     },
     /// Verify a signed Nostr event against the space's public key
     #[command(name = "verifyevent")]
@@ -290,9 +283,6 @@ enum Commands {
         space: String,
         /// The DNS zone file path (omit for stdin)
         input: Option<PathBuf>,
-        /// Skip including bundled Merkle proof in the event.
-        #[arg(long)]
-        skip_anchor: bool,
     },
     /// Updates the Merkle trust path for space-anchored Nostr events
     #[command(name = "refreshanchor")]
@@ -439,61 +429,14 @@ impl SpaceCli {
         &self,
         space: String,
         event: NostrEvent,
-        anchor: bool,
         most_recent: bool,
     ) -> Result<NostrEvent, ClientError> {
-        let mut result = self
+        let result = self
             .client
-            .wallet_sign_event(&self.wallet, &space, event)
+            .wallet_sign_event(&self.wallet, &space, event, Some(most_recent))
             .await?;
 
-        if anchor {
-            result = self.add_anchor(result, most_recent).await?
-        }
-
         Ok(result)
-    }
-    async fn add_anchor(
-        &self,
-        mut event: NostrEvent,
-        most_recent: bool,
-    ) -> Result<NostrEvent, ClientError> {
-        let space = match event.space() {
-            None => {
-                return Err(ClientError::Custom(
-                    "A space tag is required to add an anchor".to_string(),
-                ))
-            }
-            Some(space) => space,
-        };
-
-        let spaceout = self
-            .client
-            .get_space(&space)
-            .await
-            .map_err(|e| ClientError::Custom(e.to_string()))?
-            .ok_or(ClientError::Custom(format!(
-                "Space not found \"{}\"",
-                space
-            )))?;
-
-        event.proof = Some(
-            base64::prelude::BASE64_STANDARD.encode(
-                self.client
-                    .prove_spaceout(
-                        OutPoint {
-                            txid: spaceout.txid,
-                            vout: spaceout.spaceout.n as _,
-                        },
-                        Some(most_recent),
-                    )
-                    .await
-                    .map_err(|e| ClientError::Custom(e.to_string()))?
-                    .proof,
-            ),
-        );
-
-        Ok(event)
     }
     async fn send_request(
         &self,
@@ -893,42 +836,20 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
             cli.client.verify_listing(listing).await?;
             println!("{} Listing verified", "✓".color(Color::Green));
         }
-        Commands::SignEvent {
-            mut space,
-            input,
-            anchor,
-        } => {
-            let mut event = read_event(input)
+        Commands::SignEvent { space, input } => {
+            let space = normalize_space(&space);
+            let event = read_event(input)
                 .map_err(|e| ClientError::Custom(format!("input error: {}", e.to_string())))?;
 
-            space = normalize_space(&space);
-            match event.space() {
-                None if anchor => event
-                    .tags
-                    .insert(0, NostrTag(vec!["space".to_string(), space.clone()])),
-                Some(tag) => {
-                    if tag != space {
-                        return Err(ClientError::Custom(format!(
-                            "Expected a space tag with value '{}', got '{}'",
-                            space, tag
-                        )));
-                    }
-                }
-                _ => {}
-            };
-
-            let result = cli.sign_event(space, event, anchor, false).await?;
+            let result = cli.sign_event(space, event, false).await?;
             println!("{}", serde_json::to_string(&result).expect("result"));
         }
-        Commands::SignZone {
-            space,
-            input,
-            skip_anchor,
-        } => {
-            let update = encode_dns_update(&space, input)
+        Commands::SignZone { space, input } => {
+            let space = normalize_space(&space);
+            let event = encode_dns_update(input)
                 .map_err(|e| ClientError::Custom(format!("Parse error: {}", e)))?;
-            let result = cli.sign_event(space, update, !skip_anchor, false).await?;
 
+            let result = cli.sign_event(space, event, false).await?;
             println!("{}", serde_json::to_string(&result).expect("result"));
         }
         Commands::RefreshAnchor {
@@ -937,34 +858,31 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
         } => {
             let event = read_event(input)
                 .map_err(|e| ClientError::Custom(format!("input error: {}", e.to_string())))?;
-            let space = match event.space() {
-                None => {
-                    return Err(ClientError::Custom(
-                        "Not a space-anchored event (no space tag)".to_string(),
-                    ))
-                }
-                Some(space) => space,
-            };
-
-            let mut event = cli
-                .client
-                .verify_event(&space, event)
+            cli.client
+                .verify_event(event.clone())
                 .await
                 .map_err(|e| ClientError::Custom(e.to_string()))?;
-            event.proof = None;
-            event = cli.add_anchor(event, prefer_recent).await?;
 
-            println!("{}", serde_json::to_string(&event).expect("result"));
+            let e = event.clone();
+            let space = e.get_space_tag().expect("space tag").0;
+            let result = cli
+                .client
+                .wallet_sign_event(&cli.wallet, space, event, Some(prefer_recent))
+                .await?;
+            println!("{}", serde_json::to_string(&result).expect("result"));
         }
         Commands::VerifyEvent { space, input } => {
             let event = read_event(input)
                 .map_err(|e| ClientError::Custom(format!("input error: {}", e.to_string())))?;
-            let event = cli
-                .client
-                .verify_event(&space, event)
+            cli.client
+                .verify_event(event.clone())
                 .await
                 .map_err(|e| ClientError::Custom(e.to_string()))?;
-
+            if event.get_space_tag().expect("space tag").0 != &space {
+                return Err(ClientError::Custom(
+                    "Space tag does not match specified space".to_string(),
+                ));
+            }
             println!("{}", serde_json::to_string(&event).expect("result"));
         }
     }
@@ -976,7 +894,7 @@ fn default_rpc_url(chain: &ExtendedNetwork) -> String {
     format!("http://127.0.0.1:{}", default_spaces_rpc_port(chain))
 }
 
-fn encode_dns_update(space: &str, zone_file: Option<PathBuf>) -> anyhow::Result<NostrEvent> {
+fn encode_dns_update(zone_file: Option<PathBuf>) -> anyhow::Result<NostrEvent> {
     // domain crate panics if zone doesn't end in a new line
     let zone = get_input(zone_file)? + "\n";
 
@@ -1000,7 +918,7 @@ fn encode_dns_update(space: &str, zone_file: Option<PathBuf>) -> anyhow::Result<
     Ok(NostrEvent::new(
         871_222,
         &base64::prelude::BASE64_STANDARD.encode(msg.as_slice()),
-        vec![NostrTag(vec!["space".to_string(), space.to_string()])],
+        vec![],
     ))
 }
 
