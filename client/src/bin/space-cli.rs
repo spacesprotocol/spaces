@@ -261,17 +261,18 @@ enum Commands {
     SignEvent {
         /// Space name (e.g., @example)
         space: String,
-
         /// Path to a Nostr event json file (omit for stdin)
         #[arg(short, long)]
         input: Option<PathBuf>,
+        /// Prefer the most recent trust path (not recommended)
+        #[arg(long)]
+        prefer_recent: bool,
     },
     /// Verify a signed Nostr event against the space's public key
     #[command(name = "verifyevent")]
     VerifyEvent {
         /// Space name (e.g., @example)
         space: String,
-
         /// Path to a signed Nostr event json file (omit for stdin)
         #[arg(short, long)]
         input: Option<PathBuf>,
@@ -283,6 +284,9 @@ enum Commands {
         space: String,
         /// The DNS zone file path (omit for stdin)
         input: Option<PathBuf>,
+        /// Prefer the most recent trust path (not recommended)
+        #[arg(long)]
+        prefer_recent: bool,
     },
     /// Updates the Merkle trust path for space-anchored Nostr events
     #[command(name = "refreshanchor")]
@@ -836,20 +840,28 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
             cli.client.verify_listing(listing).await?;
             println!("{} Listing verified", "✓".color(Color::Green));
         }
-        Commands::SignEvent { space, input } => {
+        Commands::SignEvent {
+            space,
+            input,
+            prefer_recent,
+        } => {
             let space = normalize_space(&space);
             let event = read_event(input)
                 .map_err(|e| ClientError::Custom(format!("input error: {}", e.to_string())))?;
 
-            let result = cli.sign_event(space, event, false).await?;
+            let result = cli.sign_event(space, event, prefer_recent).await?;
             println!("{}", serde_json::to_string(&result).expect("result"));
         }
-        Commands::SignZone { space, input } => {
+        Commands::SignZone {
+            space,
+            input,
+            prefer_recent,
+        } => {
             let space = normalize_space(&space);
             let event = encode_dns_update(input)
                 .map_err(|e| ClientError::Custom(format!("Parse error: {}", e)))?;
 
-            let result = cli.sign_event(space, event, false).await?;
+            let result = cli.sign_event(space, event, prefer_recent).await?;
             println!("{}", serde_json::to_string(&result).expect("result"));
         }
         Commands::RefreshAnchor {
