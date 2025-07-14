@@ -45,12 +45,21 @@ async fn it_should_open_a_space_for_auction(rig: &TestRig) -> anyhow::Result<()>
     }
     assert_eq!(response.result.len(), 2, "must be 2 transactions");
     let alices_spaces = rig.spaced.client.wallet_list_spaces(ALICE).await?;
-    assert!(alices_spaces.pending.first().is_some_and(|s| s.to_string() == TEST_SPACE), "must be a pending space");
+    assert!(
+        alices_spaces
+            .pending
+            .first()
+            .is_some_and(|s| s.to_string() == TEST_SPACE),
+        "must be a pending space"
+    );
 
     rig.mine_blocks(1, None).await?;
     rig.wait_until_synced().await?;
     let alices_spaces = rig.spaced.client.wallet_list_spaces(ALICE).await?;
-    assert!(alices_spaces.pending.is_empty(), "must have no pending spaces");
+    assert!(
+        alices_spaces.pending.is_empty(),
+        "must have no pending spaces"
+    );
 
     let fullspaceout = rig.spaced.client.get_space(TEST_SPACE).await?;
     let fullspaceout = fullspaceout.expect("a fullspace out");
@@ -102,7 +111,13 @@ async fn it_should_allow_outbidding(rig: &TestRig) -> anyhow::Result<()> {
     println!("{}", serde_json::to_string_pretty(&result).unwrap());
 
     let bob_spaces_updated = rig.spaced.client.wallet_list_spaces(BOB).await?;
-    assert!(bob_spaces_updated.pending.first().is_some_and(|s| s.to_string() == TEST_SPACE), "must be a pending space");
+    assert!(
+        bob_spaces_updated
+            .pending
+            .first()
+            .is_some_and(|s| s.to_string() == TEST_SPACE),
+        "must be a pending space"
+    );
 
     rig.mine_blocks(1, None).await?;
     rig.wait_until_synced().await?;
@@ -132,7 +147,10 @@ async fn it_should_allow_outbidding(rig: &TestRig) -> anyhow::Result<()> {
         alices_balance.balance + Amount::from_sat(TEST_INITIAL_BID + 662),
         "alice must be refunded this exact amount"
     );
-    assert!(bob_spaces_updated.pending.is_empty(), "must have no pending spaces");
+    assert!(
+        bob_spaces_updated.pending.is_empty(),
+        "must have no pending spaces"
+    );
 
     let fullspaceout = rig.spaced.client.get_space(TEST_SPACE).await?;
     let fullspaceout = fullspaceout.expect("a fullspace out");
@@ -1274,7 +1292,7 @@ async fn it_should_allow_sign_verify_messages(rig: &TestRig) -> anyhow::Result<(
     let signed = rig
         .spaced
         .client
-        .wallet_sign_event(BOB, &space_name, msg.clone())
+        .wallet_sign_event(BOB, &space_name, msg.clone(), None)
         .await
         .expect("sign");
 
@@ -1283,7 +1301,7 @@ async fn it_should_allow_sign_verify_messages(rig: &TestRig) -> anyhow::Result<(
 
     rig.spaced
         .client
-        .verify_event(&space_name, signed.clone())
+        .verify_event(signed.clone())
         .await
         .expect("verify");
 

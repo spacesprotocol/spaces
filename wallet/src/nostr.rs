@@ -9,6 +9,24 @@ use serde_json::json;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct NostrTag(pub Vec<String>);
 
+impl NostrTag {
+    pub fn is_space_tag(&self) -> bool {
+        self.0.len() >= 3 && self.0[0] == "s"
+    }
+
+    pub fn get_space_data(&self) -> Option<(&String, &String)> {
+        if self.is_space_tag() {
+            Some((&self.0[1], &self.0[2]))
+        } else {
+            None
+        }
+    }
+
+    pub fn new_space_tag(space: &str, proof: &str) -> Self {
+        NostrTag(vec!["s".to_string(), space.to_string(), proof.to_string()])
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NostrEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -43,17 +61,19 @@ impl NostrEvent {
         }
     }
 
-    pub fn space(&self) -> Option<String> {
-        self.tags
-            .iter()
-            .find(|tag| {
-                if tag.0.len() >= 1 {
-                    tag.0[0] == "space"
-                } else {
-                    false
-                }
-            })
-            .map(|tag| tag.0[1].clone())
+    pub fn get_space_tag(&self) -> Option<(&String, &String)> {
+        let space_tags: Vec<&NostrTag> =
+            self.tags.iter().filter(|tag| tag.is_space_tag()).collect();
+        if space_tags.len() == 1 {
+            space_tags[0].get_space_data()
+        } else {
+            None
+        }
+    }
+
+    pub fn set_space_tag(&mut self, space: &str, proof: &str) {
+        self.tags.retain(|tag| !tag.is_space_tag());
+        self.tags.push(NostrTag::new_space_tag(space, proof));
     }
 
     pub fn serialize_for_signing(&self) -> Option<String> {
