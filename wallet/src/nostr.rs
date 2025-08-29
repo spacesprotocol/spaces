@@ -48,7 +48,7 @@ impl NostrEvent {
             .iter()
             .find(|tag| {
                 if tag.0.len() >= 1 {
-                    tag.0[0] == "space"
+                    tag.0[0] == "s"
                 } else {
                     false
                 }
