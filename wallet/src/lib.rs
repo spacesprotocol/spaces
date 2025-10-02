@@ -1,5 +1,6 @@
 use std::{collections::BTreeMap, fmt::Debug, fs, ops::Mul, path::PathBuf, str::FromStr};
 use anyhow::{anyhow, Context};
+use bech32::{Bech32, Hrp, encode};
 use bdk_wallet::{
     chain,
     chain::{
@@ -419,6 +420,50 @@ impl SpacesWallet {
 
         event.sign(secp256k1::Secp256k1::new(), &keypair.to_inner())?;
         Ok(event)
+    }
+
+    pub fn export_space_nsec<H: KeyHasher>(
+        &mut self,
+        src: &mut impl DataSource,
+        space: &str,
+        mut event: NostrEvent,
+    ) -> anyhow::Result<NostrEvent> {
+        if event.space().is_some_and(|s| s != space) {
+            return Err(anyhow::anyhow!("Space tag does not match specified space"));
+        }
+
+        let label = SLabel::from_str(space)?;
+        let space_key = SpaceKey::from(H::hash(label.as_ref()));
+        let outpoint = match src.get_space_outpoint(&space_key)? {
+            None => return Err(anyhow::anyhow!("Space not found")),
+            Some(outpoint) => outpoint,
+        };
+        let utxo = match self.get_utxo(outpoint) {
+            None => return Err(anyhow::anyhow!("Space not owned by wallet")),
+            Some(utxo) => utxo,
+        };
+
+        // derive taproot keypair for space XXX
+        let keypair = self
+            .get_taproot_keypair(utxo.keychain, utxo.derivation_index) // derive taproot keypair for space
+            .context("Could not derive taproot keypair to sign message")?; // propagate derivation errors
+
+        // WARNING: printing private keys is insecure; do this only for debugging
+        let inner = keypair.to_inner();
+        let secret = inner.secret_key();
+        let secret_bytes = secret.secret_bytes();
+        let secret_hex = hex::encode(secret_bytes);
+        
+        // Convert to nsec format (nostr bech32 encoding)
+        let hrp = Hrp::parse("nsec").unwrap_or_else(|_| Hrp::parse("nsec").unwrap());
+        let nsec = encode::<Bech32>(hrp, &secret_bytes)
+            .unwrap_or_else(|_| "encoding_failed".to_string());
+        
+        println!("Signing with private key (hex): {}", secret_hex);
+        println!("Signing with private key (nsec): {}", nsec);
+
+        event.sign(secp256k1::Secp256k1::new(), &inner)?; // perform Schnorr signature with taproot key
+        Ok(event) // return the now-signed event
     }
 
     pub fn verify_event<H: KeyHasher>(

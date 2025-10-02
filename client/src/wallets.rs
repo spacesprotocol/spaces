@@ -214,6 +214,11 @@ pub enum WalletCommand {
         event: NostrEvent,
         resp: crate::rpc::Responder<anyhow::Result<NostrEvent>>,
     },
+    ExportSpaceNsec {
+        space: String,
+        event: NostrEvent,
+        resp: crate::rpc::Responder<anyhow::Result<NostrEvent>>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, ValueEnum)]
@@ -516,6 +521,9 @@ impl RpcWallet {
             }
             WalletCommand::SignEvent { space, event, resp } => {
                 _ = resp.send(wallet.sign_event::<Sha256>(state, &space, event));
+            }
+            WalletCommand::ExportSpaceNsec { space, event, resp } => {
+                _ = resp.send(wallet.export_space_nsec::<Sha256>(state, &space, event));
             }
         }
         Ok(())
