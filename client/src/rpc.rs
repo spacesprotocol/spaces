@@ -243,6 +243,13 @@ pub trait Rpc {
         event: NostrEvent,
     ) -> Result<NostrEvent, ErrorObjectOwned>;
 
+    #[method(name = "walletgetspacenseckeys")]
+    async fn wallet_get_space_nsec_keys(
+        &self,
+        wallet: &str,
+        space: &str,
+    ) -> Result<(String, String), ErrorObjectOwned>;
+
     #[method(name = "walletgetinfo")]
     async fn wallet_get_info(&self, name: &str)
         -> Result<WalletInfoWithProgress, ErrorObjectOwned>;
@@ -933,6 +940,18 @@ impl RpcServer for RpcServerImpl {
         self.wallet(&wallet)
             .await?
             .send_sign_event(space, event)
+            .await
+            .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
+    }
+
+    async fn wallet_get_space_nsec_keys(
+        &self,
+        wallet: &str,
+        space: &str,
+    ) -> Result<(String, String), ErrorObjectOwned> {
+        self.wallet(&wallet)
+            .await?
+            .send_get_space_nsec_keys(space)
             .await
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
     }

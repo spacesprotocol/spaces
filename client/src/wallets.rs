@@ -219,6 +219,10 @@ pub enum WalletCommand {
         event: NostrEvent,
         resp: crate::rpc::Responder<anyhow::Result<NostrEvent>>,
     },
+    GetSpaceNsecKeys {
+        space: String,
+        resp: crate::rpc::Responder<anyhow::Result<(String, String)>>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, ValueEnum)]
@@ -524,6 +528,9 @@ impl RpcWallet {
             }
             WalletCommand::ExportSpaceNsec { space, event, resp } => {
                 _ = resp.send(wallet.export_space_nsec::<Sha256>(state, &space, event));
+            }
+            WalletCommand::GetSpaceNsecKeys { space, resp } => {
+                _ = resp.send(wallet.get_space_nsec_keys::<Sha256>(state, &space));
             }
         }
         Ok(())
@@ -1476,6 +1483,20 @@ impl RpcWallet {
             .send(WalletCommand::SignEvent {
                 space: space.to_string(),
                 event,
+                resp,
+            })
+            .await?;
+        resp_rx.await?
+    }
+
+    pub async fn send_get_space_nsec_keys(
+        &self,
+        space: &str,
+    ) -> anyhow::Result<(String, String)> {
+        let (resp, resp_rx) = oneshot::channel();
+        self.sender
+            .send(WalletCommand::GetSpaceNsecKeys {
+                space: space.to_string(),
                 resp,
             })
             .await?;

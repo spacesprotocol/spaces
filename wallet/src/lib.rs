@@ -466,6 +466,40 @@ impl SpacesWallet {
         Ok(event) // return the now-signed event
     }
 
+    pub fn get_space_nsec_keys<H: KeyHasher>(
+        &mut self,
+        src: &mut impl DataSource,
+        space: &str,
+    ) -> anyhow::Result<(String, String)> {
+        let label = SLabel::from_str(space)?;
+        let space_key = SpaceKey::from(H::hash(label.as_ref()));
+        let outpoint = match src.get_space_outpoint(&space_key)? {
+            None => return Err(anyhow::anyhow!("Space not found")),
+            Some(outpoint) => outpoint,
+        };
+        let utxo = match self.get_utxo(outpoint) {
+            None => return Err(anyhow::anyhow!("Space not owned by wallet")),
+            Some(utxo) => utxo,
+        };
+
+        // derive taproot keypair for space
+        let keypair = self
+            .get_taproot_keypair(utxo.keychain, utxo.derivation_index)
+            .context("Could not derive taproot keypair")?;
+
+        let inner = keypair.to_inner();
+        let secret = inner.secret_key();
+        let secret_bytes = secret.secret_bytes();
+        let secret_hex = hex::encode(secret_bytes);
+        
+        // Convert to nsec format (nostr bech32 encoding)
+        let hrp = Hrp::parse("nsec").unwrap_or_else(|_| Hrp::parse("nsec").unwrap());
+        let nsec = encode::<Bech32>(hrp, &secret_bytes)
+            .unwrap_or_else(|_| "encoding_failed".to_string());
+        
+        Ok((secret_hex, nsec))
+    }
+
     pub fn verify_event<H: KeyHasher>(
         src: &mut impl DataSource,
         space: &str,

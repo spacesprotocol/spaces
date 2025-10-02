@@ -299,11 +299,8 @@ enum Commands {
     ExportSpaceNsec {
         /// The space to use for exporting the Nostr nsec key
         space: String,
-        /// The DNS zone file path (omit for stdin)
-        input: Option<PathBuf>,
-        /// Skip including bundled Merkle proof in the event.
-        #[arg(long)]
-        skip_anchor: bool,
+        /// Destination path to export nsec key file
+        path: PathBuf,
     },
     /// Updates the Merkle trust path for space-anchored Nostr events
     #[command(name = "refreshanchor")]
@@ -481,6 +478,15 @@ impl SpaceCli {
             result = self.add_anchor(result, most_recent).await?
         }
 
+        Ok(result)
+    }
+
+    async fn get_space_nsec_keys(&self, space: String) -> Result<(String, String), ClientError> {
+        let result = self
+            .client
+            .wallet_get_space_nsec_keys(&self.wallet, &space)
+            .await?;
+        
         Ok(result)
     }
 
@@ -964,14 +970,14 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
         }
         Commands::ExportSpaceNsec {
             space,
-            input,
-            skip_anchor,
+            path,
         } => {
-            let update = encode_dns_update(&space, input)
-                .map_err(|e| ClientError::Custom(format!("Parse error: {}", e)))?;
-            let result = cli.sign_event(space, update, !skip_anchor, false).await?;
-
-            println!("{}", serde_json::to_string(&result).expect("result"));
+            let (secret_hex, nsec) = cli.get_space_nsec_keys(space).await?;
+            
+            let content = format!("secret_hex: {}\nnsec: {}", secret_hex, nsec);
+            fs::write(path, content).map_err(|e| {
+                ClientError::Custom(format!("Could not save to path: {}", e.to_string()))
+            })?;
         }
         Commands::RefreshAnchor {
             input,
