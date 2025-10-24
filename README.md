@@ -3,6 +3,11 @@
 Checkout [releases](https://github.com/spacesprotocol/spaces/releases) for an immediately usable binary version of this software.
 
 
+## Work on Subspaces
+
+Spaces is live on mainnet. Subspaces is live on testnet4, and development work is happening on the [subspaces branch](https://github.com/spacesprotocol/spaces/tree/subspaces).
+
+
 ## What does it do?
 
 Spaces are sovereign Bitcoin identities. They leverage the existing infrastructure and security of Bitcoin without requiring a new blockchain or any modifications to Bitcoin itself [learn more](https://spacesprotocol.org).
