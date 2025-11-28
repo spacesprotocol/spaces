@@ -4,6 +4,7 @@ use std::{
 };
 
 use anyhow::{anyhow, Context};
+use base64::Engine;
 use bdk::{
     bitcoin::{Amount, BlockHash, FeeRate, Network, Txid},
     chain::BlockId,
@@ -49,11 +50,10 @@ use tokio::{
 };
 
 use crate::auth::BasicAuthLayer;
-use crate::wallets::WalletInfoWithProgress;
 use crate::{
     calc_progress,
     checker::TxChecker,
-    client::{BlockMeta, TxEntry, BlockchainInfo},
+    client::{BlockMeta, BlockchainInfo, TxEntry},
     config::ExtendedNetwork,
     deserialize_base64, serialize_base64,
     source::BitcoinRpc,
@@ -61,7 +61,7 @@ use crate::{
     store::{ChainState, LiveSnapshot, RolloutEntry, Sha256},
     wallets::{
         AddressKind, ListSpacesResponse, RpcWallet, TxInfo, TxResponse, WalletCommand,
-        WalletResponse,
+        WalletInfoWithProgress, WalletResponse,
     },
 };
 
@@ -147,9 +147,8 @@ pub enum ChainStateCommand {
         resp: Responder<anyhow::Result<()>>,
     },
     VerifyEvent {
-        space: String,
         event: NostrEvent,
-        resp: Responder<anyhow::Result<NostrEvent>>,
+        resp: Responder<anyhow::Result<()>>,
     },
     ProveSpaceout {
         outpoint: OutPoint,
@@ -221,11 +220,7 @@ pub trait Rpc {
     async fn wallet_import(&self, wallet: WalletExport) -> Result<(), ErrorObjectOwned>;
 
     #[method(name = "verifyevent")]
-    async fn verify_event(
-        &self,
-        space: &str,
-        event: NostrEvent,
-    ) -> Result<NostrEvent, ErrorObjectOwned>;
+    async fn verify_event(&self, event: NostrEvent) -> Result<(), ErrorObjectOwned>;
 
     #[method(name = "walletsignevent")]
     async fn wallet_sign_event(
@@ -233,6 +228,7 @@ pub trait Rpc {
         wallet: &str,
         space: &str,
         event: NostrEvent,
+        most_recent: Option<bool>,
     ) -> Result<NostrEvent, ErrorObjectOwned>;
 
     #[method(name = "walletgetinfo")]
@@ -507,7 +503,11 @@ impl WalletManager {
         Ok(export)
     }
 
-    pub async fn create_wallet(&self, client: &reqwest::Client, name: &str) -> anyhow::Result<String> {
+    pub async fn create_wallet(
+        &self,
+        client: &reqwest::Client,
+        name: &str,
+    ) -> anyhow::Result<String> {
         let mnemonic: GeneratedKey<_, Tap> =
             Mnemonic::generate((WordCount::Words12, Language::English))
                 .map_err(|_| anyhow!("Mnemonic generation error"))?;
@@ -518,7 +518,12 @@ impl WalletManager {
         Ok(mnemonic.to_string())
     }
 
-    pub async fn recover_wallet(&self, client: &reqwest::Client, name: &str, mnemonic: &str) -> anyhow::Result<()> {
+    pub async fn recover_wallet(
+        &self,
+        client: &reqwest::Client,
+        name: &str,
+        mnemonic: &str,
+    ) -> anyhow::Result<()> {
         let start_block = self.get_wallet_start_block(client).await?;
         self.setup_new_wallet(name.to_string(), mnemonic.to_string(), start_block)?;
         self.load_wallet(name).await?;
@@ -892,13 +897,9 @@ impl RpcServer for RpcServerImpl {
             })
     }
 
-    async fn verify_event(
-        &self,
-        space: &str,
-        event: NostrEvent,
-    ) -> Result<NostrEvent, ErrorObjectOwned> {
+    async fn verify_event(&self, event: NostrEvent) -> Result<(), ErrorObjectOwned> {
         self.store
-            .verify_event(space, event)
+            .verify_event(event)
             .await
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
     }
@@ -907,8 +908,27 @@ impl RpcServer for RpcServerImpl {
         &self,
         wallet: &str,
         space: &str,
-        event: NostrEvent,
+        mut event: NostrEvent,
+        most_recent: Option<bool>,
     ) -> Result<NostrEvent, ErrorObjectOwned> {
+        let most_recent = most_recent.unwrap_or(false);
+        let spaceout = self.get_space(space).await?.ok_or(ErrorObjectOwned::owned(
+            -1,
+            format!("Space not found \"{}\"", space),
+            None::<String>,
+        ))?;
+        let proof = base64::prelude::BASE64_STANDARD.encode(
+            self.prove_spaceout(
+                OutPoint {
+                    txid: spaceout.txid,
+                    vout: spaceout.spaceout.n as _,
+                },
+                Some(most_recent),
+            )
+            .await?
+            .proof,
+        );
+        event.set_space_tag(space, &proof);
         self.wallet(&wallet)
             .await?
             .send_sign_event(space, event)
@@ -1281,12 +1301,8 @@ impl AsyncChainState {
                     SpacesWallet::verify_listing::<Sha256>(chain_state, &listing).map(|_| ()),
                 );
             }
-            ChainStateCommand::VerifyEvent { space, event, resp } => {
-                _ = resp.send(SpacesWallet::verify_event::<Sha256>(
-                    chain_state,
-                    &space,
-                    event,
-                ));
+            ChainStateCommand::VerifyEvent { event, resp } => {
+                _ = resp.send(SpacesWallet::verify_event::<Sha256>(chain_state, event));
             }
             ChainStateCommand::ProveSpaceout {
                 prefer_recent,
@@ -1474,14 +1490,10 @@ impl AsyncChainState {
         resp_rx.await?
     }
 
-    pub async fn verify_event(&self, space: &str, event: NostrEvent) -> anyhow::Result<NostrEvent> {
+    pub async fn verify_event(&self, event: NostrEvent) -> anyhow::Result<()> {
         let (resp, resp_rx) = oneshot::channel();
         self.sender
-            .send(ChainStateCommand::VerifyEvent {
-                space: space.to_string(),
-                event,
-                resp,
-            })
+            .send(ChainStateCommand::VerifyEvent { event, resp })
             .await?;
         resp_rx.await?
     }

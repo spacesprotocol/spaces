@@ -1,5 +1,5 @@
-use std::{collections::BTreeMap, fmt::Debug, fs, ops::Mul, path::PathBuf, str::FromStr};
 use anyhow::{anyhow, Context};
+use bdk_wallet::chain::keychain_txout::KeychainTxOutIndex;
 use bdk_wallet::{
     chain,
     chain::{
@@ -14,7 +14,6 @@ use bdk_wallet::{
     AddressInfo, KeychainKind, LocalOutput, PersistedWallet, SignOptions, TxBuilder, Update,
     Wallet, WalletTx, WeightedUtxo,
 };
-use bdk_wallet::chain::keychain_txout::KeychainTxOutIndex;
 use bincode::config;
 use bitcoin::{
     absolute::{Height, LockTime},
@@ -46,6 +45,7 @@ use spaces_protocol::{
     slabel::SLabel,
     Covenant, FullSpaceOut, Space,
 };
+use std::{collections::BTreeMap, fmt::Debug, fs, ops::Mul, path::PathBuf, str::FromStr};
 
 use crate::{
     address::SpaceAddress,
@@ -210,11 +210,11 @@ impl SpacesWallet {
                 config.space_descriptors.external.clone(),
                 config.space_descriptors.internal.clone(),
             )
-                .lookahead(50)
-                .network(config.network)
-                .genesis_hash(genesis_hash)
-                .create_wallet(&mut conn)
-                .context("could not create wallet")?
+            .lookahead(50)
+            .network(config.network)
+            .genesis_hash(genesis_hash)
+            .create_wallet(&mut conn)
+            .context("could not create wallet")?
         };
 
         let tx = conn
@@ -281,7 +281,7 @@ impl SpacesWallet {
         })
     }
 
-    pub fn transactions(&self) -> impl Iterator<Item=WalletTx> + '_ {
+    pub fn transactions(&self) -> impl Iterator<Item = WalletTx> + '_ {
         self.internal
             .transactions()
             .filter(|tx| !is_revert_tx(tx) && self.internal.spk_index().is_tx_relevant(&tx.tx_node))
@@ -379,11 +379,11 @@ impl SpacesWallet {
         self.internal.is_mine(script)
     }
 
-    pub fn list_unspent(&self) -> impl Iterator<Item=LocalOutput> + '_ {
+    pub fn list_unspent(&self) -> impl Iterator<Item = LocalOutput> + '_ {
         self.internal.list_unspent()
     }
 
-    pub fn list_output(&self) -> impl Iterator<Item=LocalOutput> + '_ {
+    pub fn list_output(&self) -> impl Iterator<Item = LocalOutput> + '_ {
         self.internal.list_output()
     }
 
@@ -398,10 +398,6 @@ impl SpacesWallet {
         space: &str,
         mut event: NostrEvent,
     ) -> anyhow::Result<NostrEvent> {
-        if event.space().is_some_and(|s| s != space) {
-            return Err(anyhow::anyhow!("Space tag does not match specified space"));
-        }
-
         let label = SLabel::from_str(space)?;
         let space_key = SpaceKey::from(H::hash(label.as_ref()));
         let outpoint = match src.get_space_outpoint(&space_key)? {
@@ -423,12 +419,12 @@ impl SpacesWallet {
 
     pub fn verify_event<H: KeyHasher>(
         src: &mut impl DataSource,
-        space: &str,
-        mut event: NostrEvent,
-    ) -> anyhow::Result<NostrEvent> {
-        if event.space().is_some_and(|s| s != space) {
-            return Err(anyhow::anyhow!("Space tag does not match specified space"));
-        }
+        event: NostrEvent,
+    ) -> anyhow::Result<()> {
+        let space = event
+            .get_space_tag()
+            .ok_or(anyhow::anyhow!("Space tag not found"))?
+            .0;
 
         let label = SLabel::from_str(&space)?;
         let space_key = SpaceKey::from(H::hash(label.as_ref()));
@@ -448,23 +444,15 @@ impl SpacesWallet {
         if script_bytes.len() != secp256k1::constants::SCHNORR_PUBLIC_KEY_SIZE + 2 {
             return Err(anyhow::anyhow!("Expected a schnorr public key"));
         }
-        let pubkey = XOnlyPublicKey::from_slice(&script_bytes[2..])?;
 
-        match event.pubkey {
-            None => {
-                event.pubkey = Some(pubkey);
-            }
-            Some(actual) => {
-                if actual != pubkey {
-                    return Err(anyhow::anyhow!("Event pubkey doesn't match space pubkey"));
-                }
-            }
+        if event.pubkey != Some(XOnlyPublicKey::from_slice(&script_bytes[2..])?) {
+            return Err(anyhow::anyhow!("Event pubkey doesn't match space pubkey"));
         }
 
         if !event.verify(secp256k1::Secp256k1::new()) {
             return Err(anyhow::anyhow!("Could not verify signature"));
         }
-        Ok(event)
+        Ok(())
     }
 
     pub fn list_unspent_with_details(
@@ -615,12 +603,8 @@ impl SpacesWallet {
         Ok(())
     }
 
-    pub fn apply_update(
-        &mut self,
-        update: impl Into<Update>,
-    ) -> Result<(), CannotConnectError> {
-        self.internal
-            .apply_update(update)
+    pub fn apply_update(&mut self, update: impl Into<Update>) -> Result<(), CannotConnectError> {
+        self.internal.apply_update(update)
     }
 
     pub fn apply_unconfirmed_tx(&mut self, tx: Transaction, seen: u64) {
@@ -653,7 +637,7 @@ impl SpacesWallet {
                 event.previous_spaceout,
                 event.details,
             )
-                .context("could not insert tx event into wallet db")?;
+            .context("could not insert tx event into wallet db")?;
         }
         db_tx
             .commit()
@@ -755,7 +739,7 @@ impl SpacesWallet {
                 signature: listing.signature,
                 sighash_type: TapSighashType::SinglePlusAnyoneCanPay,
             }
-                .to_vec(),
+            .to_vec(),
         );
 
         let funded_psbt = {
@@ -1205,7 +1189,7 @@ impl SpacesWallet {
                     signature,
                     sighash_type,
                 }
-                    .to_vec(),
+                .to_vec(),
             );
             witness.push(&signing_info.script);
             witness.push(&signing_info.control_block.serialize());
