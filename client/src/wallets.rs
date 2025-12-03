@@ -1295,7 +1295,11 @@ impl RpcWallet {
 
                     builder = builder.add_ptr(PtrRequest {
                         spk,
-                    })
+                    });
+                    
+                    if let Some(data) = params.data {
+                        builder = builder.add_data(data);
+                    }
                 }
                 RpcWalletRequest::Commit(params) => {
                     let reqs = commit_params_to_req(chain, wallet, params)?;

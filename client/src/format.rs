@@ -3,7 +3,7 @@ use colored::{Color, Colorize};
 use jsonrpsee::core::Serialize;
 use serde::Deserialize;
 use spaces_protocol::{
-    bitcoin::{Amount, Network, OutPoint}, Covenant
+    bitcoin::{Amount, Network, OutPoint}, Covenant, FullSpaceOut
 };
 use spaces_wallet::{
     address::SpaceAddress,
@@ -120,6 +120,48 @@ pub fn print_list_bidouts(bidouts: Vec<DoubleUtxo>, format: Format) {
         }
         Format::Json => {
             println!("{}", serde_json::to_string_pretty(&bidouts).unwrap());
+        }
+    }
+}
+
+pub fn print_list_all_spaces(
+    _current_block: u32,
+    spaces: Vec<FullSpaceOut>,
+    format: Format,
+) {
+    match format {
+        Format::Text => {
+            #[derive(Tabled)]
+            struct AllSpaces {
+                space: String,
+                status: String,
+                value: String,
+                txid: String,
+            }
+
+            let mut table_data = Vec::new();
+            for space_out in spaces {
+                let space = space_out.spaceout.space.as_ref();
+                let space_name = space.map(|s| s.name.to_string()).unwrap_or_else(|| "unknown".to_string());
+                // All spaces returned are owned (filtered in get_all_spaces)
+                table_data.push(AllSpaces {
+                    space: space_name,
+                    status: "OWNED".to_string(),
+                    value: format!("{} sats", space_out.spaceout.value.to_sat()),
+                    txid: format!("{}", space_out.txid),
+                });
+            }
+
+            if table_data.is_empty() {
+                println!("No spaces found.");
+            } else {
+                println!("All Spaces ({} total):", table_data.len());
+                let table = Table::new(table_data);
+                println!("{}", table);
+            }
+        }
+        Format::Json => {
+            println!("{}", serde_json::to_string_pretty(&spaces).unwrap());
         }
     }
 }

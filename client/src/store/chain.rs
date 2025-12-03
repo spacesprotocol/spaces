@@ -91,8 +91,16 @@ impl Chain {
         self.db.sp.state.get_space_info(space_hash)
     }
 
+    pub fn get_all_spaces(&mut self) -> anyhow::Result<Vec<FullSpaceOut>> {
+        self.db.sp.state.get_all_spaces()
+    }
+
     pub fn get_ptr_info(&mut self, key: &Sptr) -> anyhow::Result<Option<FullPtrOut>> {
         self.db.pt.state.get_ptr_info(key)
+    }
+
+    pub fn get_all_ptrs(&mut self, with_data: bool) -> anyhow::Result<Vec<FullPtrOut>> {
+        self.db.pt.state.get_all_ptrs(with_data)
     }
 
     pub fn load(_network: Network, genesis: ChainAnchor, ptrs_genesis: ChainAnchor, dir: &Path, index_spaces: bool, index_ptrs: bool) -> anyhow::Result<Self> {

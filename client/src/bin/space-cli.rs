@@ -24,7 +24,7 @@ use spaces_client::{
     config::{default_cookie_path, default_spaces_rpc_port, ExtendedNetwork},
     deserialize_base64,
     format::{
-        print_error_rpc_response, print_list_bidouts, print_list_spaces_response,
+        print_error_rpc_response, print_list_all_spaces, print_list_bidouts, print_list_spaces_response,
         print_list_transactions, print_list_unspent, print_list_wallets, print_server_info,
         print_wallet_balance_response, print_wallet_info, print_wallet_response, Format,
     },
@@ -157,6 +157,10 @@ enum Commands {
         /// The script public key as hex string
         spk: String,
 
+        /// Hex encoded data to set on the created ptr
+        #[arg(long)]
+        data: Option<String>,
+
         #[arg(long, short)]
         fee_rate: Option<u64>,
     },
@@ -165,6 +169,13 @@ enum Commands {
     GetPtr {
         /// The sha256 hash of the spk or the spk itself prefixed with hex:
         spk: String,
+    },
+    /// Get all ptrs info (same output format as getptr)
+    #[command(name = "getallptrs")]
+    GetAllPtrs {
+        /// Only return PTRs with non-null data
+        #[arg(long)]
+        with_data: bool,
     },
     /// Transfer ownership of spaces and/or PTRs to the given name or address
     #[command(
@@ -425,6 +436,9 @@ enum Commands {
     /// still in auction with a winning bid
     #[command(name = "listspaces")]
     ListSpaces,
+    /// List all spaces in the chain state (not just wallet-related)
+    #[command(name = "listallspaces")]
+    ListAllSpaces,
     /// List unspent auction outputs i.e. outputs that can be
     /// auctioned off in the bidding process
     #[command(name = "listbidouts")]
@@ -672,6 +686,40 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn parse_ptr_for_json(ptr: &spaces_ptr::FullPtrOut) -> serde_json::Value {
+    use spaces_ptr::vtlv;
+    
+    let mut ptr_json = serde_json::to_value(ptr).expect("ptr should be serializable");
+    
+    // Since ptrout and sptr are flattened via serde(flatten), the data field
+    // appears directly in the JSON object, not nested. Look for "data" at the top level.
+    if let Some(obj) = ptr_json.as_object_mut() {
+        if let Some(data) = obj.remove("data") {
+            // Bytes serializes as hex string in JSON
+            if let Some(hex_str) = data.as_str() {
+                if let Ok(data_bytes) = hex::decode(hex_str) {
+                    match vtlv::parse_vtlv(&data_bytes) {
+                        Ok(parsed) => {
+                            obj.insert("parsed".to_string(), serde_json::to_value(parsed).expect("parsed should be serializable"));
+                        }
+                        Err(_) => {
+                            // If parsing fails, keep the original data
+                            obj.insert("data".to_string(), data);
+                        }
+                    }
+                } else {
+                    obj.insert("data".to_string(), data);
+                }
+            } else {
+                // Not a string, keep as-is
+                obj.insert("data".to_string(), data);
+            }
+        }
+    }
+    
+    ptr_json
+}
+
 async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), ClientError> {
     match command {
         Commands::GetRollout {
@@ -894,6 +942,9 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
                 .await?;
             } else {
                 // TODO: support set data for spaces
+                return Err(ClientError::Custom(format!(
+                    "setrawfallback: setting data for spaces is not yet supported. Use an SPTR (sptr1...) instead of a space name."
+                )));
                 // // Space fallback: use existing space script
                 // let space = normalize_space(&space_or_sptr);
                 // let space_script =
@@ -930,6 +981,11 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
             let tip = cli.client.get_server_info().await?;
             let spaces = cli.client.wallet_list_spaces(&cli.wallet).await?;
             print_list_spaces_response(tip.tip.height, spaces, cli.format);
+        }
+        Commands::ListAllSpaces => {
+            let tip = cli.client.get_server_info().await?;
+            let spaces = cli.client.get_all_spaces().await?;
+            print_list_all_spaces(tip.tip.height, spaces, cli.format);
         }
         Commands::Balance => {
             let balance = cli.client.wallet_get_balance(&cli.wallet).await?;
@@ -1100,15 +1156,25 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
 
             println!("{}", serde_json::to_string(&event).expect("result"));
         }
-        Commands::CreatePtr { spk, fee_rate } => {
+        Commands::CreatePtr { spk, data, fee_rate } => {
             let spk = ScriptBuf::from(hex::decode(spk)
                 .map_err(|_| ClientError::Custom("Invalid spk hex".to_string()))?);
+
+            let data = match data {
+                Some(data_hex) => {
+                    Some(hex::decode(data_hex).map_err(|e| {
+                        ClientError::Custom(format!("Could not hex decode data: {}", e))
+                    })?)
+                }
+                None => None,
+            };
 
             let sptr = Sptr::from_spk::<Sha256>(spk.clone());
             println!("Creating sptr: {}", sptr);
             cli.send_request(
                 Some(RpcWalletRequest::CreatePtr(CreatePtrParams {
                     spk: hex::encode(spk.as_bytes()),
+                    data,
                 })),
                 None,
                 fee_rate,
@@ -1126,6 +1192,17 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
                 .await
                 .map_err(|e| ClientError::Custom(e.to_string()))?;
             println!("{}", serde_json::to_string(&ptr).expect("result"));
+        }
+        Commands::GetAllPtrs { with_data } => {
+            let ptrs = cli
+                .client
+                .get_all_ptrs(with_data)
+                .await
+                .map_err(|e| ClientError::Custom(e.to_string()))?;
+            let parsed_ptrs: Vec<serde_json::Value> = ptrs.iter()
+                .map(|ptr| parse_ptr_for_json(ptr))
+                .collect();
+            println!("{}", serde_json::to_string(&parsed_ptrs).expect("result"));
         }
 
         Commands::GetPtrOut { outpoint } => {
