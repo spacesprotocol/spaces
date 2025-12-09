@@ -1,6 +1,8 @@
 #[cfg(feature = "std")]
 pub mod sptr;
 pub mod constants;
+#[cfg(feature = "serde")]
+pub mod vtlv;
 
 #[cfg(feature = "bincode")]
 use bincode::{Decode, Encode};

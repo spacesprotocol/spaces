@@ -169,6 +169,13 @@ pub enum ChainStateCommand {
         outpoint: OutPoint,
         resp: Responder<anyhow::Result<Option<PtrOut>>>,
     },
+    GetAllSpaces {
+        resp: Responder<anyhow::Result<Vec<FullSpaceOut>>>,
+    },
+    GetAllPtrs {
+        with_data: bool,
+        resp: Responder<anyhow::Result<Vec<FullPtrOut>>>,
+    },
     GetTxMeta {
         txid: Txid,
         resp: Responder<anyhow::Result<Option<TxEntry>>>,
@@ -276,6 +283,12 @@ pub trait Rpc {
 
     #[method(name = "getdelegator")]
     async fn get_delegator(&self, sptr: Sptr) -> Result<Option<SLabel>, ErrorObjectOwned>;
+
+    #[method(name = "getallspaces")]
+    async fn get_all_spaces(&self) -> Result<Vec<FullSpaceOut>, ErrorObjectOwned>;
+
+    #[method(name = "getallptrs")]
+    async fn get_all_ptrs(&self, with_data: bool) -> Result<Vec<FullPtrOut>, ErrorObjectOwned>;
 
     #[method(name = "checkpackage")]
     async fn check_package(
@@ -427,6 +440,7 @@ pub trait Rpc {
         wallet: &str,
         count: usize,
         skip: usize,
+        with_memos: bool,
     ) -> Result<Vec<TxInfo>, ErrorObjectOwned>;
 
     #[method(name = "walletforcespend")]
@@ -546,6 +560,8 @@ pub struct TransferSpacesParams {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct CreatePtrParams {
     pub spk: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -569,6 +585,7 @@ pub struct SetPtrDataParams {
 pub struct SendCoinsParams {
     pub amount: Amount,
     pub to: String,
+    pub memo: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -1075,6 +1092,19 @@ impl RpcServer for RpcServerImpl {
         Ok(delegator)
     }
 
+    async fn get_all_spaces(&self) -> Result<Vec<FullSpaceOut>, ErrorObjectOwned> {
+        let spaces = self.store.get_all_spaces()
+            .await
+            .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))?;
+        Ok(spaces)
+    }
+
+    async fn get_all_ptrs(&self, with_data: bool) -> Result<Vec<FullPtrOut>, ErrorObjectOwned> {
+        let ptrs = self.store.get_all_ptrs(with_data)
+            .await
+            .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))?;
+        Ok(ptrs)
+    }
 
     async fn check_package(
         &self,
@@ -1367,10 +1397,11 @@ impl RpcServer for RpcServerImpl {
         wallet: &str,
         count: usize,
         skip: usize,
+        with_memos: bool,
     ) -> Result<Vec<TxInfo>, ErrorObjectOwned> {
         self.wallet(&wallet)
             .await?
-            .send_list_transactions(count, skip)
+            .send_list_transactions(count, skip, with_memos)
             .await
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
     }
@@ -1628,6 +1659,14 @@ impl AsyncChainState {
                 let result = state
                     .get_ptrout(&outpoint)
                     .context("could not fetch ptrouts");
+                let _ = resp.send(result);
+            }
+            ChainStateCommand::GetAllSpaces { resp } => {
+                let result = get_all_spaces(state);
+                let _ = resp.send(result);
+            }
+            ChainStateCommand::GetAllPtrs { with_data, resp } => {
+                let result = get_all_ptrs(state, with_data);
                 let _ = resp.send(result);
             }
             ChainStateCommand::GetBlockMeta {
@@ -2198,6 +2237,22 @@ impl AsyncChainState {
         resp_rx.await?
     }
 
+    pub async fn get_all_spaces(&self) -> anyhow::Result<Vec<FullSpaceOut>> {
+        let (resp, resp_rx) = oneshot::channel();
+        self.sender
+            .send(ChainStateCommand::GetAllSpaces { resp })
+            .await?;
+        resp_rx.await?
+    }
+
+    pub async fn get_all_ptrs(&self, with_data: bool) -> anyhow::Result<Vec<FullPtrOut>> {
+        let (resp, resp_rx) = oneshot::channel();
+        self.sender
+            .send(ChainStateCommand::GetAllPtrs { with_data, resp })
+            .await?;
+        resp_rx.await?
+    }
+
     pub async fn get_block_meta(
         &self,
         height_or_hash: HeightOrHash,
@@ -2308,6 +2363,14 @@ fn get_delegation(state: &mut Chain, space: SLabel) -> anyhow::Result<Option<Spt
         Some(delegator) if delegator == space => Ok(Some(sptr)),
         _ => Ok(None),
     }
+}
+
+fn get_all_spaces(state: &mut Chain) -> anyhow::Result<Vec<FullSpaceOut>> {
+    state.get_all_spaces()
+}
+
+fn get_all_ptrs(state: &mut Chain, with_data: bool) -> anyhow::Result<Vec<FullPtrOut>> {
+    state.get_all_ptrs(with_data)
 }
 
 fn get_commitment(state: &mut Chain, space: SLabel, root: Option<Hash>) -> anyhow::Result<Option<Commitment>> {

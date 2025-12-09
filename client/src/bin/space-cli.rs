@@ -24,7 +24,7 @@ use spaces_client::{
     config::{default_cookie_path, default_spaces_rpc_port, ExtendedNetwork},
     deserialize_base64,
     format::{
-        print_error_rpc_response, print_list_bidouts, print_list_spaces_response,
+        print_error_rpc_response, print_list_all_spaces, print_list_bidouts, print_list_spaces_response,
         print_list_transactions, print_list_unspent, print_list_wallets, print_server_info,
         print_wallet_balance_response, print_wallet_info, print_wallet_response, Format,
     },
@@ -157,6 +157,10 @@ enum Commands {
         /// The script public key as hex string
         spk: String,
 
+        /// Hex encoded data to set on the created ptr
+        #[arg(long)]
+        data: Option<String>,
+
         #[arg(long, short)]
         fee_rate: Option<u64>,
     },
@@ -165,6 +169,13 @@ enum Commands {
     GetPtr {
         /// The sha256 hash of the spk or the spk itself prefixed with hex:
         spk: String,
+    },
+    /// Get all ptrs info (same output format as getptr)
+    #[command(name = "getallptrs")]
+    GetAllPtrs {
+        /// Only return PTRs with non-null data
+        #[arg(long)]
+        with_data: bool,
     },
     /// Transfer ownership of spaces and/or PTRs to the given name or address
     #[command(
@@ -264,7 +275,7 @@ enum Commands {
     /// Send the specified amount of BTC to the given name or address
     #[command(
         name = "send",
-        override_usage = "space-cli send <AMOUNT> --to <SPACE-OR-ADDRESS>"
+        override_usage = "space-cli send <AMOUNT> --to <SPACE-OR-ADDRESS> [--memo <MEMO>]"
     )]
     SendCoins {
         /// Amount to send in satoshi
@@ -273,6 +284,9 @@ enum Commands {
         /// Recipient space name or address
         #[arg(long, display_order = 1)]
         to: String,
+        /// Optional memo text (max 80 characters) to include as OP_RETURN output
+        #[arg(long, display_order = 2)]
+        memo: Option<String>,
         /// Fee rate to use in sat/vB
         #[arg(long, short)]
         fee_rate: Option<u64>,
@@ -420,11 +434,17 @@ enum Commands {
         count: usize,
         #[arg(default_value = "0")]
         skip: usize,
+        /// Include memo text from OP_RETURN outputs
+        #[arg(long)]
+        with_memos: bool,
     },
     /// List won spaces including ones
     /// still in auction with a winning bid
     #[command(name = "listspaces")]
     ListSpaces,
+    /// List all spaces in the chain state (not just wallet-related)
+    #[command(name = "listallspaces")]
+    ListAllSpaces,
     /// List unspent auction outputs i.e. outputs that can be
     /// auctioned off in the bidding process
     #[command(name = "listbidouts")]
@@ -672,6 +692,92 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn parse_ptr_for_json(ptr: &spaces_ptr::FullPtrOut) -> serde_json::Value {
+    use spaces_ptr::vtlv;
+    
+    let mut ptr_json = serde_json::to_value(ptr).expect("ptr should be serializable");
+    
+    // Since ptrout and sptr are flattened via serde(flatten), the data field
+    // appears directly in the JSON object, not nested. Look for "data" at the top level.
+    if let Some(obj) = ptr_json.as_object_mut() {
+        if let Some(data) = obj.remove("data") {
+            // Bytes serializes as hex string in JSON
+            if let Some(hex_str) = data.as_str() {
+                if let Ok(data_bytes) = hex::decode(hex_str) {
+                    match vtlv::parse_vtlv(&data_bytes) {
+                        Ok(parsed) => {
+                            obj.insert("parsed".to_string(), serde_json::to_value(parsed).expect("parsed should be serializable"));
+                        }
+                        Err(_) => {
+                            // If parsing fails, keep the original data
+                            obj.insert("data".to_string(), data);
+                        }
+                    }
+                } else {
+                    obj.insert("data".to_string(), data);
+                }
+            } else {
+                // Not a string, keep as-is
+                obj.insert("data".to_string(), data);
+            }
+        }
+    }
+    
+    ptr_json
+}
+
+fn parse_space_for_json(space: &spaces_protocol::FullSpaceOut) -> serde_json::Value {
+    use spaces_ptr::vtlv;
+    
+    let mut space_json = serde_json::to_value(space).expect("space should be serializable");
+    
+    // Check if covenant has data field (only Transfer covenant has data)
+    if let Some(obj) = space_json.as_object_mut() {
+        if let Some(covenant) = obj.get_mut("covenant") {
+            if let Some(covenant_obj) = covenant.as_object_mut() {
+                // Check if covenant type is "transfer" and has "data" field
+                if covenant_obj.get("type").and_then(|t| t.as_str()) == Some("transfer") {
+                    if let Some(data) = covenant_obj.remove("data") {
+                        // Skip if data is null
+                        if !data.is_null() {
+                            // Bytes serializes as hex string in JSON
+                            if let Some(hex_str) = data.as_str() {
+                                if let Ok(data_bytes) = hex::decode(hex_str) {
+                                    match vtlv::parse_vtlv(&data_bytes) {
+                                        Ok(parsed) => {
+                                            // Insert parsed with records structure
+                                            if let Ok(parsed_value) = serde_json::to_value(parsed) {
+                                                covenant_obj.insert("parsed".to_string(), parsed_value);
+                                            } else {
+                                                // If serialization fails, keep original data
+                                                covenant_obj.insert("data".to_string(), data);
+                                            }
+                                        }
+                                        Err(_) => {
+                                            // If parsing fails, keep the original data
+                                            covenant_obj.insert("data".to_string(), data);
+                                        }
+                                    }
+                                } else {
+                                    covenant_obj.insert("data".to_string(), data);
+                                }
+                            } else {
+                                // Not a string, keep as-is
+                                covenant_obj.insert("data".to_string(), data);
+                            }
+                        } else {
+                            // Data is null, keep it as null
+                            covenant_obj.insert("data".to_string(), data);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    space_json
+}
+
 async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), ClientError> {
     match command {
         Commands::GetRollout {
@@ -687,7 +793,15 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
         Commands::GetSpace { space } => {
             let space = normalize_space(&space);
             let response = cli.client.get_space(&space).await?;
-            println!("{}", serde_json::to_string_pretty(&response)?);
+            match response {
+                Some(space_out) => {
+                    let parsed_space = parse_space_for_json(&space_out);
+                    println!("{}", serde_json::to_string_pretty(&parsed_space)?);
+                }
+                None => {
+                    println!("null");
+                }
+            }
         }
         Commands::GetSpaceOut { outpoint } => {
             let response = cli.client.get_spaceout(outpoint).await?;
@@ -852,12 +966,24 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
         Commands::SendCoins {
             amount,
             to,
+            memo,
             fee_rate,
         } => {
+            // Validate memo length if provided
+            if let Some(ref memo_text) = memo {
+                if memo_text.len() > 80 {
+                    return Err(ClientError::Custom(format!(
+                        "memo length ({}) exceeds maximum of 80 characters",
+                        memo_text.len()
+                    )));
+                }
+            }
+
             cli.send_request(
                 Some(RpcWalletRequest::SendCoins(SendCoinsParams {
                     amount: Amount::from_sat(amount),
                     to,
+                    memo: memo.clone(),
                 })),
                 None,
                 fee_rate,
@@ -894,6 +1020,9 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
                 .await?;
             } else {
                 // TODO: support set data for spaces
+                return Err(ClientError::Custom(format!(
+                    "setrawfallback: setting data for spaces is not yet supported. Use an SPTR (sptr1...) instead of a space name."
+                )));
                 // // Space fallback: use existing space script
                 // let space = normalize_space(&space_or_sptr);
                 // let space_script =
@@ -919,17 +1048,22 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
             let bidouts = cli.client.wallet_list_bidouts(&cli.wallet).await?;
             print_list_bidouts(bidouts, cli.format);
         }
-        Commands::ListTransactions { count, skip } => {
+        Commands::ListTransactions { count, skip, with_memos } => {
             let txs = cli
                 .client
-                .wallet_list_transactions(&cli.wallet, count, skip)
+                .wallet_list_transactions(&cli.wallet, count, skip, with_memos)
                 .await?;
-            print_list_transactions(txs, cli.format);
+            print_list_transactions(txs, cli.format, with_memos);
         }
         Commands::ListSpaces => {
             let tip = cli.client.get_server_info().await?;
             let spaces = cli.client.wallet_list_spaces(&cli.wallet).await?;
             print_list_spaces_response(tip.tip.height, spaces, cli.format);
+        }
+        Commands::ListAllSpaces => {
+            let tip = cli.client.get_server_info().await?;
+            let spaces = cli.client.get_all_spaces().await?;
+            print_list_all_spaces(tip.tip.height, spaces, cli.format);
         }
         Commands::Balance => {
             let balance = cli.client.wallet_get_balance(&cli.wallet).await?;
@@ -1100,15 +1234,25 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
 
             println!("{}", serde_json::to_string(&event).expect("result"));
         }
-        Commands::CreatePtr { spk, fee_rate } => {
+        Commands::CreatePtr { spk, data, fee_rate } => {
             let spk = ScriptBuf::from(hex::decode(spk)
                 .map_err(|_| ClientError::Custom("Invalid spk hex".to_string()))?);
+
+            let data = match data {
+                Some(data_hex) => {
+                    Some(hex::decode(data_hex).map_err(|e| {
+                        ClientError::Custom(format!("Could not hex decode data: {}", e))
+                    })?)
+                }
+                None => None,
+            };
 
             let sptr = Sptr::from_spk::<Sha256>(spk.clone());
             println!("Creating sptr: {}", sptr);
             cli.send_request(
                 Some(RpcWalletRequest::CreatePtr(CreatePtrParams {
                     spk: hex::encode(spk.as_bytes()),
+                    data,
                 })),
                 None,
                 fee_rate,
@@ -1126,6 +1270,17 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
                 .await
                 .map_err(|e| ClientError::Custom(e.to_string()))?;
             println!("{}", serde_json::to_string(&ptr).expect("result"));
+        }
+        Commands::GetAllPtrs { with_data } => {
+            let ptrs = cli
+                .client
+                .get_all_ptrs(with_data)
+                .await
+                .map_err(|e| ClientError::Custom(e.to_string()))?;
+            let parsed_ptrs: Vec<serde_json::Value> = ptrs.iter()
+                .map(|ptr| parse_ptr_for_json(ptr))
+                .collect();
+            println!("{}", serde_json::to_string(&parsed_ptrs).expect("result"));
         }
 
         Commands::GetPtrOut { outpoint } => {
@@ -1219,6 +1374,15 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
                 return Err(ClientError::Custom("space is not delegated - use delegate @<your-space> first.".to_string()));
             }
             let delegation = delegation.unwrap();
+
+            // Verify the PTR actually exists before trying to transfer it
+            let ptr_info = cli.client.get_ptr(delegation).await?;
+            if ptr_info.is_none() {
+                return Err(ClientError::Custom(format!(
+                    "authorize: PTR '{}' for delegation of '{}' does not exist. The delegation may have been revoked or the PTR was never created.",
+                    delegation, label
+                )));
+            }
 
             cli.send_request(
                 Some(RpcWalletRequest::Transfer(TransferSpacesParams {

@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap},
+    collections::{BTreeMap, BTreeSet},
     fs::OpenOptions,
     io,
     io::ErrorKind,
@@ -121,6 +121,8 @@ pub trait PtrChainState {
         &mut self,
         space_hash: &Sptr,
     ) -> Result<Option<FullPtrOut>>;
+
+    fn get_all_ptrs(&mut self, with_data: bool) -> Result<Vec<FullPtrOut>>;
 }
 
 impl PtrChainState for PtrLiveSnapshot {
@@ -156,6 +158,75 @@ impl PtrChainState for PtrLiveSnapshot {
             }));
         }
         Ok(None)
+    }
+
+    fn get_all_ptrs(&mut self, with_data: bool) -> Result<Vec<FullPtrOut>> {
+        let mut ptrs = Vec::new();
+        let mut seen_keys = BTreeSet::new();
+        
+        // First, collect staged changes (memory) - collect Sptr keys first, then process
+        let mut staged_sptrs = Vec::new();
+        {
+            let rlock = self.staged.read().expect("acquire lock");
+            for (key, value) in rlock.memory.iter() {
+                // Skip deleted entries
+                if value.is_none() {
+                    continue;
+                }
+                
+                // Try to decode key as Sptr (32 bytes) - Hash is already [u8; 32]
+                // Use unsafe transmute since Hash and Sptr are both [u8; 32]
+                let sptr = unsafe { std::mem::transmute::<Hash, Sptr>(*key) };
+                
+                // Check if value decodes as EncodableOutpoint (indicates it's a PTR entry)
+                if let Some(value) = value {
+                    let decode_result: Result<(EncodableOutpoint, usize), _> = bincode::decode_from_slice(&value, config::standard());
+                    if decode_result.is_ok() {
+                        seen_keys.insert(*key);
+                        staged_sptrs.push(sptr);
+                    }
+                }
+            }
+        }
+        
+        // Now process staged SPTRs (lock is dropped)
+        for sptr in staged_sptrs {
+            if let Ok(Some(ptr_out)) = self.get_ptr_info(&sptr) {
+                // Filter by with_data flag if set
+                if !with_data || (ptr_out.ptrout.sptr.is_some() && ptr_out.ptrout.sptr.as_ref().unwrap().data.is_some()) {
+                    ptrs.push(ptr_out);
+                }
+            }
+        }
+        
+        // Then iterate through snapshot
+        let snapshot = self.inner()?;
+        for item in snapshot.iter() {
+            let (key, value) = item?;
+            
+            // Skip if already processed from staged changes
+            if seen_keys.contains(&key) {
+                continue;
+            }
+            
+            // Try to decode key as Sptr (32 bytes) - Hash is already [u8; 32]
+            // Use unsafe transmute since Hash and Sptr are both [u8; 32]
+            let sptr = unsafe { std::mem::transmute::<Hash, Sptr>(key) };
+            
+            // Check if value decodes as EncodableOutpoint (indicates it's a PTR entry)
+            let decode_result: Result<(EncodableOutpoint, usize), _> = bincode::decode_from_slice(&value, config::standard());
+            if decode_result.is_ok() {
+                // Try to get ptr info - if successful, it's a valid PTR
+                if let Ok(Some(ptr_out)) = self.get_ptr_info(&sptr) {
+                    // Filter by with_data flag if set
+                    if !with_data || (ptr_out.ptrout.sptr.is_some() && ptr_out.ptrout.sptr.as_ref().unwrap().data.is_some()) {
+                        ptrs.push(ptr_out);
+                    }
+                }
+            }
+        }
+        
+        Ok(ptrs)
     }
 }
 

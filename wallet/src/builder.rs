@@ -939,6 +939,7 @@ impl Builder {
         }
 
         let has_transfers = !params.transfers.is_empty();
+        let has_binds = !params.binds.is_empty();
 
         // Handle transfers:
         for transfer in params.transfers {
@@ -962,9 +963,9 @@ impl Builder {
             );
         }
 
-        // Add data OP_RETURN if present (only makes sense with transfers)
+        // Add data OP_RETURN if present (works with transfers or binds)
         if let Some(data) = params.data {
-            if has_transfers {
+            if has_transfers || has_binds {
                 let script = create_data_script(&data);
                 builder.add_recipient(script, Amount::from_sat(0));
             }

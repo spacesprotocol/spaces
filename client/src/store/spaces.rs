@@ -174,6 +174,8 @@ pub trait SpacesState {
         &mut self,
         space_hash: &spaces_protocol::hasher::SpaceKey,
     ) -> anyhow::Result<Option<FullSpaceOut>>;
+
+    fn get_all_spaces(&mut self) -> anyhow::Result<Vec<FullSpaceOut>>;
 }
 
 impl SpacesState for SpLiveSnapshot {
@@ -204,6 +206,79 @@ impl SpacesState for SpLiveSnapshot {
             }));
         }
         Ok(None)
+    }
+
+    fn get_all_spaces(&mut self) -> anyhow::Result<Vec<FullSpaceOut>> {
+        let mut spaces = Vec::new();
+        let mut seen_keys = BTreeSet::new();
+        
+        // First, collect staged changes (memory) - collect outpoints first, then process
+        let mut staged_outpoints = Vec::new();
+        {
+            let rlock = self.staged.read().expect("acquire lock");
+            for (key, value) in rlock.memory.iter() {
+                if SpaceKey::is_valid(key) {
+                    // Skip deleted entries
+                    if value.is_none() {
+                        continue;
+                    }
+                    
+                    if let Some(value) = value {
+                        let decode_result: Result<(EncodableOutpoint, usize), _> = bincode::decode_from_slice(&value, config::standard());
+                        if let Ok((outpoint_enc, _)) = decode_result {
+                            seen_keys.insert(*key);
+                            let outpoint: OutPoint = outpoint_enc.into();
+                            staged_outpoints.push(outpoint);
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Now process staged outpoints (lock is dropped)
+        for outpoint in staged_outpoints {
+            if let Ok(Some(spaceout)) = self.get_spaceout(&outpoint) {
+                // Only include owned spaces
+                if spaceout.space.as_ref().map(|s| s.is_owned()).unwrap_or(false) {
+                    spaces.push(FullSpaceOut {
+                        txid: outpoint.txid,
+                        spaceout,
+                    });
+                }
+            }
+        }
+        
+        // Then iterate through snapshot
+        let snapshot = self.inner()?;
+        for item in snapshot.iter() {
+            let (key, value) = item?;
+            
+            // Only process SpaceKey entries (not BidKey or OutpointKey)
+            if SpaceKey::is_valid(&key) {
+                // Skip if already processed from staged changes
+                if seen_keys.contains(&key) {
+                    continue;
+                }
+                
+                // Decode the value as EncodableOutpoint
+                let decode_result: Result<(EncodableOutpoint, usize), _> = bincode::decode_from_slice(&value, config::standard());
+                if let Ok((outpoint_enc, _)) = decode_result {
+                    let outpoint: OutPoint = outpoint_enc.into();
+                    // Get the spaceout for this outpoint
+                    if let Ok(Some(spaceout)) = self.get_spaceout(&outpoint) {
+                        // Only include owned spaces
+                        if spaceout.space.as_ref().map(|s| s.is_owned()).unwrap_or(false) {
+                            spaces.push(FullSpaceOut {
+                                txid: outpoint.txid,
+                                spaceout,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        
+        Ok(spaces)
     }
 }
 
