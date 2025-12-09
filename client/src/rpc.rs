@@ -440,6 +440,7 @@ pub trait Rpc {
         wallet: &str,
         count: usize,
         skip: usize,
+        with_memos: bool,
     ) -> Result<Vec<TxInfo>, ErrorObjectOwned>;
 
     #[method(name = "walletforcespend")]
@@ -584,6 +585,7 @@ pub struct SetPtrDataParams {
 pub struct SendCoinsParams {
     pub amount: Amount,
     pub to: String,
+    pub memo: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -1395,10 +1397,11 @@ impl RpcServer for RpcServerImpl {
         wallet: &str,
         count: usize,
         skip: usize,
+        with_memos: bool,
     ) -> Result<Vec<TxInfo>, ErrorObjectOwned> {
         self.wallet(&wallet)
             .await?
-            .send_list_transactions(count, skip)
+            .send_list_transactions(count, skip, with_memos)
             .await
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
     }

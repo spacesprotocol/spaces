@@ -166,10 +166,28 @@ pub fn print_list_all_spaces(
     }
 }
 
-pub fn print_list_transactions(txs: Vec<TxInfo>, format: Format) {
+pub fn print_list_transactions(txs: Vec<TxInfo>, format: Format, with_memos: bool) {
     match format {
         Format::Text => {
-            println!("{}", ascii_table(txs));
+            if with_memos {
+                // Print transactions with memos displayed separately
+                println!("{}", ascii_table(txs.iter().map(|tx| {
+                    let mut display_tx = tx.clone();
+                    // Temporarily remove memo from table display
+                    display_tx.memo = None;
+                    display_tx
+                }).collect::<Vec<_>>()));
+                
+                // Print memos separately
+                for tx in &txs {
+                    if let Some(ref memo) = tx.memo {
+                        println!("\nTransaction {}:", tx.txid);
+                        println!("  Memo: {}", memo);
+                    }
+                }
+            } else {
+                println!("{}", ascii_table(txs));
+            }
         }
         Format::Json => {
             println!("{}", serde_json::to_string_pretty(&txs).unwrap());

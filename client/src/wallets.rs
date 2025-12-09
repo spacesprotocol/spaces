@@ -84,7 +84,7 @@ impl FromStr for ResolvableTarget {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let s = s.trim();
         if let Some(rest) = s.strip_prefix('@') {
-            return SLabel::from_str(rest)
+            return SLabel::from_str_unprefixed(rest)
                 .map(ResolvableTarget::Space)
                 .map_err(ResolvableTargetParseError::SpaceLabelParseError);
         }
@@ -190,6 +190,8 @@ pub struct TxInfo {
     pub fee: Option<Amount>,
     #[tabled(rename = "DETAILS", display_with = "display_events")]
     pub events: Vec<TxEvent>,
+    #[tabled(skip)]
+    pub memo: Option<String>,
 }
 
 fn display_block_height(block_height: &Option<u32>) -> String {
@@ -249,6 +251,7 @@ pub enum WalletCommand {
     ListTransactions {
         count: usize,
         skip: usize,
+        with_memos: bool,
         resp: crate::rpc::Responder<anyhow::Result<Vec<TxInfo>>>,
     },
     ListSpaces {
@@ -547,8 +550,8 @@ impl RpcWallet {
             WalletCommand::ListUnspent { resp } => {
                 _ = resp.send(wallet.list_unspent_with_details(chain));
             }
-            WalletCommand::ListTransactions { count, skip, resp } => {
-                let transactions = Self::list_transactions(wallet, count, skip);
+            WalletCommand::ListTransactions { count, skip, with_memos, resp } => {
+                let transactions = Self::list_transactions(wallet, count, skip, with_memos);
                 _ = resp.send(transactions);
             }
             WalletCommand::ListSpaces { resp } => {
@@ -958,7 +961,10 @@ impl RpcWallet {
         wallet: &mut SpacesWallet,
         count: usize,
         skip: usize,
+        with_memos: bool,
     ) -> anyhow::Result<Vec<TxInfo>> {
+        use spaces_protocol::script::find_op_set_data;
+        
         let mut transactions: Vec<_> = wallet.transactions().collect();
         transactions.sort();
 
@@ -976,6 +982,27 @@ impl RpcWallet {
                 let txid = ctx.tx_node.txid.clone();
                 let (sent, received) = wallet.sent_and_received(&tx);
                 let fee = wallet.calculate_fee(&tx).ok();
+                
+                // Extract memo from OP_RETURN if requested
+                let memo = if with_memos {
+                    find_op_set_data(&tx.output)
+                        .and_then(|data_bytes| {
+                            let data_slice = data_bytes.as_slice();
+                            // Try to decode as hex string first (since we encode memos as hex)
+                            if let Ok(hex_str) = String::from_utf8(data_slice.to_vec()) {
+                                if let Ok(decoded) = hex::decode(&hex_str) {
+                                    if let Ok(original_text) = String::from_utf8(decoded) {
+                                        return Some(original_text);
+                                    }
+                                }
+                            }
+                            // Fallback: try to decode as UTF-8 directly
+                            String::from_utf8(data_slice.to_vec()).ok()
+                        })
+                } else {
+                    None
+                };
+                
                 TxInfo {
                     block_height,
                     txid,
@@ -983,6 +1010,7 @@ impl RpcWallet {
                     received,
                     fee,
                     events: vec![],
+                    memo,
                 }
             })
             .collect();
@@ -1107,6 +1135,14 @@ impl RpcWallet {
                         amount: params.amount,
                         recipient: recipient.clone(),
                     });
+                    
+                    // Add memo as OP_RETURN output if provided
+                    if let Some(memo_text) = &params.memo {
+                        // Convert memo text to hex-encoded bytes (hex string representation)
+                        let hex_string = hex::encode(memo_text.as_bytes());
+                        let memo_bytes = hex_string.as_bytes().to_vec();
+                        builder = builder.add_data(memo_bytes);
+                    }
                 }
                 RpcWalletRequest::Transfer(params) => {
                     let recipient = if let Some(to) = params.to {
@@ -1642,10 +1678,11 @@ impl RpcWallet {
         &self,
         count: usize,
         skip: usize,
+        with_memos: bool,
     ) -> anyhow::Result<Vec<TxInfo>> {
         let (resp, resp_rx) = oneshot::channel();
         self.sender
-            .send(WalletCommand::ListTransactions { count, skip, resp })
+            .send(WalletCommand::ListTransactions { count, skip, with_memos, resp })
             .await?;
         resp_rx.await?
     }
