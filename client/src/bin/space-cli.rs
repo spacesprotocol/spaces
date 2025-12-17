@@ -18,11 +18,9 @@ use jsonrpsee::{
     core::{client::Error, ClientError},
     http_client::HttpClient,
 };
-use serde::{Deserialize, Serialize};
 use spaces_client::{
     auth::{auth_token_from_cookie, auth_token_from_creds, http_client_with_auth},
     config::{default_cookie_path, default_spaces_rpc_port, ExtendedNetwork},
-    deserialize_base64,
     format::{
         print_error_rpc_response, print_list_bidouts, print_list_spaces_response,
         print_list_transactions, print_list_unspent, print_list_wallets, print_server_info,
@@ -32,7 +30,6 @@ use spaces_client::{
         BidParams, OpenParams, RegisterParams, RpcClient, RpcWalletRequest,
         RpcWalletTxBuilder, SendCoinsParams, TransferSpacesParams,
     },
-    serialize_base64,
     wallets::{AddressKind, WalletResponse},
 };
 use spaces_client::rpc::{CommitParams, CreatePtrParams, DelegateParams, SetPtrDataParams};
@@ -452,29 +449,6 @@ struct SpaceCli {
     rpc_url: String,
     client: HttpClient,
 }
-
-#[derive(Serialize, Deserialize)]
-struct SignedDnsUpdate {
-    serial: u32,
-    space: String,
-    #[serde(
-        serialize_with = "serialize_base64",
-        deserialize_with = "deserialize_base64"
-    )]
-    packet: Vec<u8>,
-    signature: Signature,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    proof: Option<Base64Bytes>,
-}
-
-#[derive(Serialize, Deserialize)]
-struct Base64Bytes(
-    #[serde(
-        serialize_with = "serialize_base64",
-        deserialize_with = "deserialize_base64"
-    )]
-    Vec<u8>,
-);
 
 impl SpaceCli {
     async fn configure() -> anyhow::Result<(Self, Args)> {

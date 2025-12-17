@@ -345,6 +345,7 @@ impl<'a, Cs: CoinSelectionAlgorithm> TxBuilderSpacesUtils<'a, Cs> for TxBuilder<
 }
 
 impl Builder {
+    #[allow(unused_assignments)]
     fn prepare_all(
         median_time: u64,
         w: &mut SpacesWallet,
@@ -755,7 +756,7 @@ impl Builder {
         wallet: &mut SpacesWallet,
         unspendables: Vec<OutPoint>,
         confirmed_only: bool,
-    ) -> anyhow::Result<BuilderIterator> {
+    ) -> anyhow::Result<BuilderIterator<'_>> {
         let fee_rate = self
             .fee_rate
             .as_ref()

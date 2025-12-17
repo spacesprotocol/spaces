@@ -135,49 +135,44 @@ impl ChainAnchor {
     };
 }
 
-#[cfg(feature = "bincode")]
-pub mod bincode_impl {
+#[cfg(feature = "borsh")]
+pub mod borsh_impl {
     use alloc::vec::Vec;
 
-    use bincode::{
-        config,
-        de::Decoder,
-        enc::Encoder,
-        error::{DecodeError, EncodeError},
-        Decode, Encode,
-    };
     use bitcoin::{hashes::Hash, BlockHash};
+    use borsh::{io, BorshDeserialize, BorshSerialize};
 
-    use crate::{alloc::borrow::ToOwned, constants::ChainAnchor};
+    use crate::constants::ChainAnchor;
 
-    impl Encode for ChainAnchor {
-        fn encode<E: Encoder>(&self, encoder: &mut E) -> Result<(), EncodeError> {
-            Encode::encode(&self.hash.to_byte_array(), encoder)?;
-            Encode::encode(&self.height, encoder)
+    impl BorshSerialize for ChainAnchor {
+        fn serialize<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
+            writer.write_all(&self.hash.to_byte_array())?;
+            self.height.serialize(writer)
         }
     }
 
-    impl<Context> Decode<Context> for ChainAnchor {
-        fn decode<D: Decoder<Context=Context>>(decoder: &mut D) -> Result<Self, DecodeError> {
+    impl BorshDeserialize for ChainAnchor {
+        fn deserialize_reader<R: io::Read>(reader: &mut R) -> io::Result<Self> {
+            let mut hash_bytes = [0u8; 32];
+            reader.read_exact(&mut hash_bytes)?;
+            let height: u32 = BorshDeserialize::deserialize_reader(reader)?;
             Ok(Self {
-                hash: BlockHash::from_byte_array(Decode::decode(decoder)?),
-                height: Decode::decode(decoder)?,
+                hash: BlockHash::from_byte_array(hash_bytes),
+                height,
             })
         }
     }
 
     impl TryFrom<&[u8]> for ChainAnchor {
-        type Error = DecodeError;
+        type Error = io::Error;
         fn try_from(value: &[u8]) -> core::result::Result<Self, Self::Error> {
-            let (meta, _): (ChainAnchor, _) = bincode::decode_from_slice(value, config::standard())
-                .map_err(|_| DecodeError::OtherString("could not parse chain anchor".to_owned()))?;
-            Ok(meta)
+            borsh::from_slice(value)
         }
     }
 
     impl ChainAnchor {
         pub fn to_vec(&self) -> Vec<u8> {
-            bincode::encode_to_vec(self, config::standard()).expect("encodes chain anchor")
+            borsh::to_vec(self).expect("encodes chain anchor")
         }
     }
 }

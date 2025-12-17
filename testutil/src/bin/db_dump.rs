@@ -2,9 +2,7 @@ use std::path::PathBuf;
 use std::collections::HashMap;
 use std::fs::OpenOptions;
 use anyhow::Result;
-use bincode::config;
 use spaces_protocol::{SpaceOut, hasher::{SpaceKey, OutpointKey, BidKey}};
-use spaces_protocol::bitcoin::OutPoint;
 use serde_json;
 use spacedb::{db::Database, fs::FileBackend, Configuration, Sha256Hasher};
 
@@ -167,12 +165,10 @@ fn identify_key_type(key: &[u8; 32]) -> &'static str {
 }
 
 fn decode_value(key: &[u8; 32], value: &[u8]) -> Result<serde_json::Value> {
-    let config = config::standard();
-
     if SpaceKey::is_valid(key) {
         // Value is a SpaceOut
-        match bincode::decode_from_slice::<SpaceOut, _>(value, config) {
-            Ok((spaceout, _)) => {
+        match borsh::from_slice::<SpaceOut>(value) {
+            Ok(spaceout) => {
                 return Ok(serde_json::to_value(&spaceout)?);
             }
             Err(e) => {
@@ -181,8 +177,8 @@ fn decode_value(key: &[u8; 32], value: &[u8]) -> Result<serde_json::Value> {
         }
     } else if OutpointKey::is_valid(key) {
         // Value is ALSO a SpaceOut (OutpointKey is used to look up spaceout by outpoint)
-        match bincode::decode_from_slice::<SpaceOut, _>(value, config) {
-            Ok((spaceout, _)) => {
+        match borsh::from_slice::<SpaceOut>(value) {
+            Ok(spaceout) => {
                 return Ok(serde_json::to_value(&spaceout)?);
             }
             Err(e) => {
@@ -191,8 +187,8 @@ fn decode_value(key: &[u8; 32], value: &[u8]) -> Result<serde_json::Value> {
         }
     } else if BidKey::is_valid(key) {
         // Value is a Space
-        match bincode::decode_from_slice::<spaces_protocol::Space, _>(value, config) {
-            Ok((space, _)) => {
+        match borsh::from_slice::<spaces_protocol::Space>(value) {
+            Ok(space) => {
                 return Ok(serde_json::to_value(&space)?);
             }
             Err(e) => {

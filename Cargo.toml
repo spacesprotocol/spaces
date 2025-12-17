@@ -1,4 +1,4 @@
 [workspace]
 
 resolver = "2"
-members = [ "client", "protocol", "veritas", "testutil", "wallet", "ptr"]
+members = [ "borsh_utils", "client", "protocol", "testutil", "wallet", "ptr"]

@@ -1,0 +1,8 @@
+[package]
+name = "borsh_utils"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bitcoin = { version = "0.32.2", features = ["serde"], default-features = false }
+borsh = { version = "1.5", default-features = false, features = ["derive"] }

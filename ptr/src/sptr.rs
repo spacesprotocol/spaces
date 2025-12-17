@@ -69,30 +69,24 @@ impl<'de> serde::Deserialize<'de> for Sptr {
     }
 }
 
-#[cfg(feature = "bincode")]
-mod bincode_impl {
-    use bincode::{
-        de::{Decoder},
-        enc::Encoder,
-        error::{DecodeError, EncodeError},
-        impl_borrow_decode, Decode, Encode,
-    };
+#[cfg(feature = "borsh")]
+mod borsh_impl {
+    use borsh::{io, BorshDeserialize, BorshSerialize};
     use super::*;
 
-    impl Encode for Sptr {
-        fn encode<E: Encoder>(&self, encoder: &mut E) -> Result<(), EncodeError> {
-            Encode::encode(&self.0, encoder)
+    impl BorshSerialize for Sptr {
+        fn serialize<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
+            writer.write_all(&self.0)
         }
     }
 
-    impl<Context> Decode<Context> for Sptr {
-        fn decode<D: Decoder<Context = Context>>(decoder: &mut D) -> Result<Self, DecodeError> {
-            let bytes: [u8; 32] = Decode::decode(decoder)?;
+    impl BorshDeserialize for Sptr {
+        fn deserialize_reader<R: io::Read>(reader: &mut R) -> io::Result<Self> {
+            let mut bytes = [0u8; 32];
+            reader.read_exact(&mut bytes)?;
             Ok(Sptr(bytes))
         }
     }
-
-    impl_borrow_decode!(Sptr);
 }
 
 impl From<bech32::DecodeError> for SptrParseError {

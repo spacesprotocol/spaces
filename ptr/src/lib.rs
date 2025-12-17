@@ -2,8 +2,8 @@
 pub mod sptr;
 pub mod constants;
 
-#[cfg(feature = "bincode")]
-use bincode::{Decode, Encode};
+#[cfg(feature = "borsh")]
+use borsh::{BorshDeserialize, BorshSerialize};
 
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
@@ -36,10 +36,16 @@ pub struct Validator {}
 
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "bincode", derive(Encode, Decode))]
+#[cfg_attr(feature = "borsh", derive(BorshSerialize, BorshDeserialize))]
 /// A `TxChangeSet` captures all resulting state changes.
 pub struct TxChangeSet {
-    #[cfg_attr(feature = "bincode", bincode(with_serde))]
+    #[cfg_attr(
+        feature = "borsh",
+        borsh(
+            serialize_with = "borsh_utils::serialize_txid",
+            deserialize_with = "borsh_utils::deserialize_txid"
+        )
+    )]
     pub txid: Txid,
     /// List of transaction input indexes spending a ptrout.
     pub spends: Vec<usize>,
@@ -54,7 +60,7 @@ pub struct TxChangeSet {
 
 #[derive(Clone, PartialEq, Debug)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "bincode", derive(Encode, Decode))]
+#[cfg_attr(feature = "borsh", derive(BorshSerialize, BorshDeserialize))]
 pub struct CommitmentInfo {
     pub space: SLabel,
     #[cfg_attr(feature = "serde", serde(flatten))]
@@ -63,7 +69,7 @@ pub struct CommitmentInfo {
 
 #[derive(Clone, PartialEq, Debug)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "bincode", derive(Encode, Decode))]
+#[cfg_attr(feature = "borsh", derive(BorshSerialize, BorshDeserialize))]
 pub struct DelegationInfo {
     pub space: SLabel,
     pub sptr: Sptr,
@@ -71,9 +77,15 @@ pub struct DelegationInfo {
 
 #[derive(Clone, PartialEq, Debug)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "bincode", derive(Encode, Decode))]
+#[cfg_attr(feature = "borsh", derive(BorshSerialize, BorshDeserialize))]
 pub struct FullPtrOut {
-    #[cfg_attr(feature = "bincode", bincode(with_serde))]
+    #[cfg_attr(
+        feature = "borsh",
+        borsh(
+            serialize_with = "borsh_utils::serialize_txid",
+            deserialize_with = "borsh_utils::deserialize_txid"
+        )
+    )]
     pub txid: Txid,
 
     #[cfg_attr(feature = "serde", serde(flatten))]
@@ -84,23 +96,35 @@ pub struct FullPtrOut {
 /// This structure is a superset of [bitcoin::TxOut]
 #[derive(Clone, PartialEq, Debug)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "bincode", derive(Encode, Decode))]
+#[cfg_attr(feature = "borsh", derive(BorshSerialize, BorshDeserialize))]
 pub struct PtrOut {
     pub n: usize,
     /// Any handle associated with this output
     #[cfg_attr(feature = "serde", serde(flatten))]
     pub sptr: Option<Ptr>,
     /// The value of the output, in satoshis.
-    #[cfg_attr(feature = "bincode", bincode(with_serde))]
+    #[cfg_attr(
+        feature = "borsh",
+        borsh(
+            serialize_with = "borsh_utils::serialize_amount",
+            deserialize_with = "borsh_utils::deserialize_amount"
+        )
+    )]
     pub value: Amount,
     /// The script which must be satisfied for the output to be spent.
-    #[cfg_attr(feature = "bincode", bincode(with_serde))]
+    #[cfg_attr(
+        feature = "borsh",
+        borsh(
+            serialize_with = "borsh_utils::serialize_script",
+            deserialize_with = "borsh_utils::deserialize_script"
+        )
+    )]
     pub script_pubkey: ScriptBuf,
 }
 
 #[derive(Clone, PartialEq, Debug)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "bincode", derive(Encode, Decode))]
+#[cfg_attr(feature = "borsh", derive(BorshSerialize, BorshDeserialize))]
 pub struct Ptr {
     pub id: Sptr,
     pub data: Option<Bytes>,
@@ -109,7 +133,7 @@ pub struct Ptr {
 
 #[derive(Clone, PartialEq, Debug)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "bincode", derive(Encode, Decode))]
+#[cfg_attr(feature = "borsh", derive(BorshSerialize, BorshDeserialize))]
 pub struct Commitment {
     /// Merkle/Trie commitment to the current state.
     #[cfg_attr(feature = "serde", serde(
@@ -163,22 +187,22 @@ pub fn ns_hash<H: KeyHasher>(kind: KeyKind, data: [u8; 32]) -> [u8; 32] {
 
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "bincode", derive(Encode, Decode))]
+#[cfg_attr(feature = "borsh", derive(BorshSerialize, BorshDeserialize))]
 pub struct RegistryKey([u8; 32]);
 
 #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Debug)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "bincode", derive(Encode, Decode))]
+#[cfg_attr(feature = "borsh", derive(BorshSerialize, BorshDeserialize))]
 pub struct RegistrySptrKey([u8; 32]);
 
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "bincode", derive(Encode, Decode))]
+#[cfg_attr(feature = "borsh", derive(BorshSerialize, BorshDeserialize))]
 pub struct CommitmentKey([u8; 32]);
 
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "bincode", derive(Encode, Decode))]
+#[cfg_attr(feature = "borsh", derive(BorshSerialize, BorshDeserialize))]
 pub struct PtrOutpointKey([u8; 32]);
 
 impl KeyHash for RegistryKey {}

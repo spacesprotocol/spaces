@@ -15,7 +15,7 @@ use bdk_wallet::{
     Wallet, WalletTx, WeightedUtxo,
 };
 use bdk_wallet::chain::keychain_txout::KeychainTxOutIndex;
-use bincode::config;
+use borsh::{BorshDeserialize, BorshSerialize, io};
 use bitcoin::{
     absolute::{Height, LockTime},
     bip32::ChildNumber,
@@ -256,7 +256,7 @@ impl SpacesWallet {
         })
     }
 
-    pub fn get_tx(&mut self, txid: Txid) -> Option<WalletTx> {
+    pub fn get_tx(&mut self, txid: Txid) -> Option<WalletTx<'_>> {
         self.internal.get_tx(txid)
     }
 
@@ -285,7 +285,7 @@ impl SpacesWallet {
         })
     }
 
-    pub fn transactions(&self) -> impl Iterator<Item=WalletTx> + '_ {
+    pub fn transactions(&self) -> impl Iterator<Item=WalletTx<'_>> + '_ {
         self.internal
             .transactions()
             .filter(|tx| !is_revert_tx(tx) && self.internal.spk_index().is_tx_relevant(&tx.tx_node))
@@ -303,7 +303,7 @@ impl SpacesWallet {
         &mut self,
         unspendables: Vec<OutPoint>,
         confirmed_only: bool,
-    ) -> anyhow::Result<TxBuilder<SpacesAwareCoinSelection>> {
+    ) -> anyhow::Result<TxBuilder<'_, SpacesAwareCoinSelection>> {
         self.create_builder(unspendables, None, confirmed_only)
     }
 
@@ -534,7 +534,7 @@ impl SpacesWallet {
     ///
     /// This is used to monitor bid txs in the mempool
     /// to check if they have been replaced.
-    pub fn unconfirmed_bids(&mut self) -> anyhow::Result<Vec<(WalletTx, OutPoint)>> {
+    pub fn unconfirmed_bids(&mut self) -> anyhow::Result<Vec<(WalletTx<'_>, OutPoint)>> {
         let txids: Vec<_> = {
             let unconfirmed: Vec<_> = self
                 .transactions()
@@ -1348,12 +1348,75 @@ impl SpaceScriptSigningInfo {
     }
 
     pub(crate) fn to_vec(&self) -> Vec<u8> {
-        bincode::serde::encode_to_vec(self, config::standard()).expect("signing info")
+        borsh::to_vec(self).expect("signing info")
     }
 
     pub fn from_slice(data: &[u8]) -> anyhow::Result<Self> {
-        let (de, _) = bincode::serde::decode_from_slice(data, config::standard())?;
+        let de = borsh::from_slice(data)?;
         Ok(de)
+    }
+}
+
+impl BorshSerialize for SpaceScriptSigningInfo {
+    fn serialize<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
+        // Serialize script as bytes
+        let script_bytes = self.script.to_bytes();
+        BorshSerialize::serialize(&(script_bytes.len() as u32), writer)?;
+        writer.write_all(&script_bytes)?;
+
+        // Serialize tweaked_address as bytes
+        let address_bytes = self.tweaked_address.to_bytes();
+        BorshSerialize::serialize(&(address_bytes.len() as u32), writer)?;
+        writer.write_all(&address_bytes)?;
+
+        // Serialize control_block as bytes
+        let control_block_bytes = self.control_block.serialize();
+        BorshSerialize::serialize(&(control_block_bytes.len() as u32), writer)?;
+        writer.write_all(&control_block_bytes)?;
+
+        // Serialize temp_key_pair secret bytes
+        let key_bytes = self.temp_key_pair.secret_bytes();
+        writer.write_all(&key_bytes)?;
+
+        Ok(())
+    }
+}
+
+impl BorshDeserialize for SpaceScriptSigningInfo {
+    fn deserialize_reader<R: io::Read>(reader: &mut R) -> io::Result<Self> {
+        // Deserialize script
+        let script_len = u32::deserialize_reader(reader)? as usize;
+        let mut script_bytes = vec![0u8; script_len];
+        reader.read_exact(&mut script_bytes)?;
+        let script = ScriptBuf::from_bytes(script_bytes);
+
+        // Deserialize tweaked_address
+        let address_len = u32::deserialize_reader(reader)? as usize;
+        let mut address_bytes = vec![0u8; address_len];
+        reader.read_exact(&mut address_bytes)?;
+        let tweaked_address = ScriptBuf::from_bytes(address_bytes);
+
+        // Deserialize control_block
+        let control_block_len = u32::deserialize_reader(reader)? as usize;
+        let mut control_block_bytes = vec![0u8; control_block_len];
+        reader.read_exact(&mut control_block_bytes)?;
+        let control_block = ControlBlock::decode(&control_block_bytes)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+
+        // Deserialize temp_key_pair (32 bytes for secret key)
+        let mut key_bytes = [0u8; 32];
+        reader.read_exact(&mut key_bytes)?;
+        let ctx = bitcoin::secp256k1::Secp256k1::new();
+        let temp_key_pair = UntweakedKeypair::from_seckey_slice(&ctx, &key_bytes)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+
+        Ok(SpaceScriptSigningInfo {
+            ctx,
+            script,
+            tweaked_address,
+            control_block,
+            temp_key_pair,
+        })
     }
 }
 

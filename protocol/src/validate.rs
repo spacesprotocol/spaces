@@ -1,7 +1,7 @@
 use alloc::{vec, vec::Vec};
 
-#[cfg(feature = "bincode")]
-use bincode::{Decode, Encode};
+#[cfg(feature = "borsh")]
+use borsh::{BorshDeserialize, BorshSerialize};
 use bitcoin::{Amount, OutPoint, Transaction, Txid};
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
@@ -19,10 +19,16 @@ pub struct Validator {}
 
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "bincode", derive(Encode, Decode))]
+#[cfg_attr(feature = "borsh", derive(BorshSerialize, BorshDeserialize))]
 /// A `TxChangeSet` captures all resulting state changes.
 pub struct TxChangeSet {
-    #[cfg_attr(feature = "bincode", bincode(with_serde))]
+    #[cfg_attr(
+        feature = "borsh",
+        borsh(
+            serialize_with = "borsh_utils::serialize_txid",
+            deserialize_with = "borsh_utils::deserialize_txid"
+        )
+    )]
     pub txid: Txid,
     /// List of transaction inputs.
     pub spends: Vec<SpaceIn>,
@@ -35,7 +41,7 @@ pub struct TxChangeSet {
 
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "bincode", derive(Encode, Decode))]
+#[cfg_attr(feature = "borsh", derive(BorshSerialize, BorshDeserialize))]
 pub struct SpaceIn {
     pub n: usize,
     #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
@@ -44,7 +50,7 @@ pub struct SpaceIn {
 
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "bincode", derive(Encode, Decode))]
+#[cfg_attr(feature = "borsh", derive(BorshSerialize, BorshDeserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case", tag = "type"))]
 pub enum UpdateKind {
     Revoke(RevokeReason),
@@ -54,7 +60,7 @@ pub enum UpdateKind {
 
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "bincode", derive(Encode, Decode))]
+#[cfg_attr(feature = "borsh", derive(BorshSerialize, BorshDeserialize))]
 pub struct UpdateOut {
     #[cfg_attr(feature = "serde", serde(flatten))]
     pub kind: UpdateKind,
@@ -63,22 +69,28 @@ pub struct UpdateOut {
 
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "bincode", derive(Encode, Decode))]
+#[cfg_attr(feature = "borsh", derive(BorshSerialize, BorshDeserialize))]
 pub struct RolloutDetails {
-    #[cfg_attr(feature = "bincode", bincode(with_serde))]
+    #[cfg_attr(
+        feature = "borsh",
+        borsh(
+            serialize_with = "borsh_utils::serialize_amount",
+            deserialize_with = "borsh_utils::deserialize_amount"
+        )
+    )]
     pub priority: Amount,
 }
 
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "bincode", derive(Encode, Decode))]
+#[cfg_attr(feature = "borsh", derive(BorshSerialize, BorshDeserialize))]
 pub struct RevokeParams {
     pub reason: RevokeReason,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "bincode", derive(Encode, Decode))]
+#[cfg_attr(feature = "borsh", derive(BorshSerialize, BorshDeserialize))]
 pub struct RejectParams {
     pub name: SLabel,
 
@@ -88,9 +100,15 @@ pub struct RejectParams {
 
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "bincode", derive(Encode, Decode))]
+#[cfg_attr(feature = "borsh", derive(BorshSerialize, BorshDeserialize))]
 pub struct EventOutput {
-    #[cfg_attr(feature = "bincode", bincode(with_serde))]
+    #[cfg_attr(
+        feature = "borsh",
+        borsh(
+            serialize_with = "borsh_utils::serialize_outpoint",
+            deserialize_with = "borsh_utils::deserialize_outpoint"
+        )
+    )]
     pub outpoint: OutPoint,
     pub spaceout: SpaceOut,
 }

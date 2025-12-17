@@ -1,7 +1,7 @@
 use alloc::vec::Vec;
 
-#[cfg(feature = "bincode")]
-use bincode::{Decode, Encode};
+#[cfg(feature = "borsh")]
+use borsh::{BorshDeserialize, BorshSerialize};
 use bitcoin::{opcodes::all::OP_DROP, script, script::{Instruction, PushBytesBuf}, Script, ScriptBuf, TxOut};
 use bitcoin::opcodes::all::{OP_PUSHNUM_1, OP_RETURN};
 #[cfg(feature = "serde")]
@@ -18,7 +18,7 @@ use crate::{hasher::{KeyHasher, SpaceKey}, prepare::SpacesSource, slabel::{SLabe
     derive(Serialize, Deserialize),
     serde(tag = "type", rename_all = "snake_case")
 )]
-#[cfg_attr(feature = "bincode", derive(Encode, Decode))]
+#[cfg_attr(feature = "borsh", derive(BorshSerialize, BorshDeserialize))]
 #[non_exhaustive]
 pub enum OpenError {
     MalformedName,
@@ -112,7 +112,7 @@ pub fn load_open_context<T: SpacesSource, H: KeyHasher>(
 }
 
 
-fn find_open(script: &Script) -> Option<OpenResult<SLabelRef>> {
+fn find_open(script: &Script) -> Option<OpenResult<SLabelRef<'_>>> {
     // Find the first OP_PUSH bytes in a bitcoin script prefixed with our magic
     let mut open_bytes = None;
     for op in script.instructions() {

@@ -4,7 +4,7 @@ pub extern crate spaces_protocol;
 use std::{error::Error, fmt};
 
 use anyhow::{anyhow, Result};
-use bincode::{Decode, Encode};
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde::de::Error as SerdeError;
 use spaces_protocol::{
@@ -84,20 +84,20 @@ pub struct Client {
 
 /// A block structure containing validated transaction metadata
 /// relevant to the Spaces protocol
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct BlockMeta {
     pub height: u32,
     pub tx_meta: Vec<TxEntry>,
 }
 
 /// A block structure containing validated transaction metadata for ptrs
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct PtrBlockMeta {
     pub height: u32,
     pub tx_meta: Vec<PtrTxEntry>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct PtrTxEntry {
     #[serde(flatten)]
     pub changeset: spaces_ptr::TxChangeSet,
@@ -106,7 +106,7 @@ pub struct PtrTxEntry {
 }
 
 
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct TxEntry {
     #[serde(flatten)]
     pub changeset: TxChangeSet,
@@ -114,7 +114,7 @@ pub struct TxEntry {
     pub tx: Option<TxData>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct TxData {
     pub position: u32,
     pub raw: Bytes,
@@ -547,6 +547,6 @@ fn deserialize_hex<'de, D>(d: D) -> std::result::Result<Vec<u8>, D::Error>
 where
     D: Deserializer<'de>,
 {
-    let s = String::deserialize(d)?;
+    let s = <String as Deserialize>::deserialize(d)?;
     hex::decode(s).map_err(D::Error::custom)
 }

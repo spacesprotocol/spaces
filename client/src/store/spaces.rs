@@ -10,7 +10,7 @@ use std::{
 };
 
 use anyhow::{anyhow, Context, Result};
-use bincode::{config, Decode, Encode};
+use borsh::{BorshDeserialize, BorshSerialize};
 use jsonrpsee::core::Serialize;
 use serde::Deserialize;
 use spacedb::{
@@ -83,11 +83,11 @@ impl SpStore {
         Ok(Database::new(Box::new(FileBackend::new(file)?), config)?)
     }
 
-    pub fn iter(&self) -> SnapshotIterator<Sha256Hasher> {
+    pub fn iter(&self) -> SnapshotIterator<'_, Sha256Hasher> {
         return self.0.iter();
     }
 
-    pub fn write(&self) -> Result<WriteTx> {
+    pub fn write(&self) -> Result<WriteTx<'_>> {
         Ok(self.0.begin_write()?)
     }
 
@@ -260,18 +260,18 @@ impl SpLiveSnapshot {
         Ok(&mut self.snapshot.1)
     }
 
-    pub fn insert<K: KeyHash + Into<Hash>, T: Encode>(&self, key: K, value: T) {
-        let value = bincode::encode_to_vec(value, config::standard()).expect("encodes value");
+    pub fn insert<K: KeyHash + Into<Hash>, T: BorshSerialize>(&self, key: K, value: T) {
+        let value = borsh::to_vec(&value).expect("encodes value");
         self.insert_raw(key.into(), value);
     }
 
-    pub fn get<K: KeyHash + Into<Hash>, T: Decode<()>>(
+    pub fn get<K: KeyHash + Into<Hash>, T: BorshDeserialize>(
         &mut self,
         key: K,
     ) -> spacedb::Result<Option<T>> {
         match self.get_raw(&key.into())? {
             Some(value) => {
-                let (decoded, _): (T, _) = bincode::decode_from_slice(&value, config::standard())
+                let decoded: T = borsh::from_slice(&value)
                     .map_err(|e| {
                     spacedb::Error::IO(io::Error::new(ErrorKind::Other, e.to_string()))
                 })?;

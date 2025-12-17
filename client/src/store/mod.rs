@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use bincode::{Decode, Encode};
+use borsh::{BorshDeserialize, BorshSerialize};
 use spacedb::db::Database;
 use spacedb::{Hash, NodeHasher, Sha256Hasher};
 use spacedb::tx::{ReadTransaction, WriteTransaction};
@@ -17,8 +17,14 @@ type WriteMemory = BTreeMap<Hash, Option<Vec<u8>>>;
 pub struct Sha256;
 
 
-#[derive(Encode, Decode)]
-pub struct EncodableOutpoint(#[bincode(with_serde)] pub OutPoint);
+#[derive(BorshSerialize, BorshDeserialize)]
+pub struct EncodableOutpoint(
+    #[borsh(
+        serialize_with = "borsh_utils::serialize_outpoint",
+        deserialize_with = "borsh_utils::deserialize_outpoint"
+    )]
+    pub OutPoint
+);
 
 impl From<OutPoint> for EncodableOutpoint {
     fn from(value: OutPoint) -> Self {

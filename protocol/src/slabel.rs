@@ -16,42 +16,38 @@ pub const PUNYCODE_PREFIX: &[u8] = b"xn--";
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SLabel([u8; MAX_LABEL_LEN + 1]);
 
-#[cfg(feature = "bincode")]
-pub mod bincode_impl {
-    use bincode::{
-        de::{read::Reader, Decoder},
-        enc::Encoder,
-        error::{DecodeError, EncodeError},
-        impl_borrow_decode, Decode, Encode,
-    };
+#[cfg(feature = "borsh")]
+pub mod borsh_impl {
+    use borsh::{io, BorshDeserialize, BorshSerialize};
 
     use super::*;
 
-    impl Encode for SLabel {
-        fn encode<E: Encoder>(&self, encoder: &mut E) -> Result<(), EncodeError> {
-            // We skip encoding the length byte since bincode adds a length prefix
-            // which we reuse as our length byte when decoding
-            Encode::encode(&self.as_ref()[1..], encoder)
+    impl BorshSerialize for SLabel {
+        fn serialize<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
+            // Serialize the full label including length byte
+            let len = self.0[0] as usize;
+            writer.write_all(&self.0[..=len])
         }
     }
 
-    impl<Context> Decode<Context> for SLabel {
-        fn decode<D: Decoder<Context = Context>>(decoder: &mut D) -> Result<Self, DecodeError> {
-            let reader = decoder.reader();
+    impl BorshDeserialize for SLabel {
+        fn deserialize_reader<R: io::Read>(reader: &mut R) -> io::Result<Self> {
             let mut buf = [0u8; MAX_LABEL_LEN + 1];
 
-            // read bincode's length byte
-            reader.read(&mut buf[..1])?;
+            // Read the length byte first
+            reader.read_exact(&mut buf[..1])?;
             let len = buf[0] as usize;
             if len > MAX_LABEL_LEN {
-                return Err(DecodeError::Other("length exceeds maximum for the label"));
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "length exceeds maximum for the label",
+                ));
             }
-            reader.read(&mut buf[1..=len])?;
+            // Read the label bytes
+            reader.read_exact(&mut buf[1..=len])?;
             Ok(SLabel(buf))
         }
     }
-
-    impl_borrow_decode!(SLabel);
 }
 
 #[cfg(feature = "serde")]
@@ -247,7 +243,7 @@ impl Display for SLabelRef<'_> {
 }
 
 impl SLabel {
-    pub fn as_name_ref(&self) -> SLabelRef {
+    pub fn as_name_ref(&self) -> SLabelRef<'_> {
         SLabelRef(&self.0)
     }
 
@@ -423,21 +419,18 @@ mod tests {
             );
         }
 
-        #[cfg(feature = "bincode")]
+        #[cfg(feature = "borsh")]
         {
-            use bincode::config;
+            use borsh::{from_slice, to_vec};
             let label = SLabel::try_from("@example").unwrap();
-            let serialized =
-                bincode::encode_to_vec(label.clone(), config::standard()).expect("encoded");
+            let serialized = to_vec(&label).expect("encoded");
 
             assert_eq!(
                 serialized.len(),
                 label.as_ref().len(),
                 "Serialization should produce correct length"
             );
-            let (deserialized, _): (SLabel, _) =
-                bincode::decode_from_slice(serialized.as_slice(), config::standard())
-                    .expect("deserialize");
+            let deserialized: SLabel = from_slice(&serialized).expect("deserialize");
             assert_eq!(
                 deserialized, label,
                 "Deserialization should produce the original label"
