@@ -1,7 +1,7 @@
 [package]
 name = "spaces_protocol"
-version = "0.0.7"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 
 [dependencies]
 bitcoin = { version = "0.32.2", features = ["base64", "serde"], default-features = false }

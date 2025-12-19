@@ -111,7 +111,6 @@ pub fn load_open_context<T: SpacesSource, H: KeyHasher>(
     Ok(Some(Ok(ctx)))
 }
 
-
 fn find_open(script: &Script) -> Option<OpenResult<SLabelRef>> {
     // Find the first OP_PUSH bytes in a bitcoin script prefixed with our magic
     let mut open_bytes = None;

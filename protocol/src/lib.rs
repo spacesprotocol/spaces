@@ -350,7 +350,7 @@ impl FullSpaceOut {
 
     pub fn refund_signing_info(
         &self,
-    ) -> Option<(Transaction, Prevouts<TxOut>, schnorr::Signature)> {
+    ) -> Option<(Transaction, Prevouts<'_, TxOut>, schnorr::Signature)> {
         if self.spaceout.space.is_none() {
             return None;
         }

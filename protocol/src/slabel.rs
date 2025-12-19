@@ -247,7 +247,7 @@ impl Display for SLabelRef<'_> {
 }
 
 impl SLabel {
-    pub fn as_name_ref(&self) -> SLabelRef {
+    pub fn as_name_ref(&self) -> SLabelRef<'_> {
         SLabelRef(&self.0)
     }
 

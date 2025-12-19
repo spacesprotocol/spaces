@@ -256,7 +256,7 @@ impl SpacesWallet {
         })
     }
 
-    pub fn get_tx(&mut self, txid: Txid) -> Option<WalletTx> {
+    pub fn get_tx(&mut self, txid: Txid) -> Option<WalletTx<'_>> {
         self.internal.get_tx(txid)
     }
 
@@ -285,7 +285,7 @@ impl SpacesWallet {
         })
     }
 
-    pub fn transactions(&self) -> impl Iterator<Item=WalletTx> + '_ {
+    pub fn transactions(&self) -> impl Iterator<Item=WalletTx<'_>> + '_ {
         self.internal
             .transactions()
             .filter(|tx| !is_revert_tx(tx) && self.internal.spk_index().is_tx_relevant(&tx.tx_node))
@@ -303,7 +303,7 @@ impl SpacesWallet {
         &mut self,
         unspendables: Vec<OutPoint>,
         confirmed_only: bool,
-    ) -> anyhow::Result<TxBuilder<SpacesAwareCoinSelection>> {
+    ) -> anyhow::Result<TxBuilder<'_, SpacesAwareCoinSelection>> {
         self.create_builder(unspendables, None, confirmed_only)
     }
 
@@ -534,7 +534,7 @@ impl SpacesWallet {
     ///
     /// This is used to monitor bid txs in the mempool
     /// to check if they have been replaced.
-    pub fn unconfirmed_bids(&mut self) -> anyhow::Result<Vec<(WalletTx, OutPoint)>> {
+    pub fn unconfirmed_bids(&mut self) -> anyhow::Result<Vec<(WalletTx<'_>, OutPoint)>> {
         let txids: Vec<_> = {
             let unconfirmed: Vec<_> = self
                 .transactions()

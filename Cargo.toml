@@ -2,3 +2,7 @@
 
 resolver = "2"
 members = [ "client", "protocol", "veritas", "testutil", "wallet", "ptr"]
+
+[workspace.package]
+version = "0.0.9"
+edition = "2021"

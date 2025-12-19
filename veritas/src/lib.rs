@@ -122,7 +122,7 @@ impl Veritas {
 }
 
 impl Proof {
-    pub fn iter(&self) -> ProofIter {
+    pub fn iter(&self) -> ProofIter<'_> {
         ProofIter {
             proof_type: self.proof_type,
             inner: self.inner.iter(),
