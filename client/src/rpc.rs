@@ -124,6 +124,13 @@ pub struct PtrBlockMetaWithHash {
     pub block_meta: PtrBlockMeta,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommitmentResponse {
+    #[serde(flatten)]
+    pub commitment: Commitment,
+    pub blocks_until_finalized: u32,
+}
+
 pub enum ChainStateCommand {
     CheckPackage {
         txs: Vec<String>,
@@ -147,7 +154,7 @@ pub enum ChainStateCommand {
     GetCommitment {
         space: SLabel,
         root: Option<Hash>,
-        resp: Responder<anyhow::Result<Option<Commitment>>>,
+        resp: Responder<anyhow::Result<Option<CommitmentResponse>>>,
     },
     GetDelegation {
         space: SLabel,
@@ -276,7 +283,7 @@ pub trait Rpc {
     async fn get_ptrout(&self, outpoint: OutPoint) -> Result<Option<PtrOut>, ErrorObjectOwned>;
 
     #[method(name = "getcommitment")]
-    async fn get_commitment(&self, space: SLabel, root: Option<sha256::Hash>) -> Result<Option<Commitment>, ErrorObjectOwned>;
+    async fn get_commitment(&self, space: SLabel, root: Option<sha256::Hash>) -> Result<Option<CommitmentResponse>, ErrorObjectOwned>;
 
     #[method(name = "getdelegation")]
     async fn get_delegation(&self, space: SLabel) -> Result<Option<Sptr>, ErrorObjectOwned>;
@@ -1070,7 +1077,7 @@ impl RpcServer for RpcServerImpl {
         Ok(spaceout)
     }
 
-    async fn get_commitment(&self, space: SLabel, root: Option<sha256::Hash>) -> Result<Option<Commitment>, ErrorObjectOwned> {
+    async fn get_commitment(&self, space: SLabel, root: Option<sha256::Hash>) -> Result<Option<CommitmentResponse>, ErrorObjectOwned> {
         let c = self
             .store
             .get_commitment(space, root.map(|r| *r.as_ref()))
@@ -1649,7 +1656,19 @@ impl AsyncChainState {
             }
             ChainStateCommand::GetCommitment { space, root, resp } => {
                 let result = get_commitment(state, space, root);
-                let _ = resp.send(result);
+                let response = result.map(|opt_commitment| {
+                    opt_commitment.map(|commitment| {
+                        let current_height = state.ptrs_tip().height;
+                        let finality_height = commitment.finality_height();
+                        let blocks_until_finalized = finality_height.saturating_sub(current_height);
+                        
+                        CommitmentResponse {
+                            commitment,
+                            blocks_until_finalized,
+                        }
+                    })
+                });
+                let _ = resp.send(response);
             }
             ChainStateCommand::GetDelegation { space, resp } => {
                 let result = get_delegation(state, space);
@@ -2218,7 +2237,7 @@ impl AsyncChainState {
         resp_rx.await?
     }
 
-    pub async fn get_commitment(&self, space: SLabel, root: Option<Hash>) -> anyhow::Result<Option<Commitment>> {
+    pub async fn get_commitment(&self, space: SLabel, root: Option<Hash>) -> anyhow::Result<Option<CommitmentResponse>> {
         let (resp, resp_rx) = oneshot::channel();
         self.sender
             .send(ChainStateCommand::GetCommitment { space, root, resp })

@@ -17,6 +17,8 @@ use bitcoin::script::{Instruction, PushBytesBuf};
 use spaces_protocol::hasher::{KeyHasher, KeyHash, Hash};
 use spaces_protocol::slabel::SLabel;
 use spaces_protocol::{Bytes, SpaceOut};
+#[cfg(feature = "std")]
+use log::info;
 use crate::constants::COMMITMENT_FINALITY_INTERVAL;
 use crate::sptr::{Sptr};
 
@@ -192,6 +194,11 @@ impl Commitment {
     pub fn is_finalized(&self, height: u32) -> bool {
         let finality_height = self.block_height + COMMITMENT_FINALITY_INTERVAL;
         height > finality_height
+    }
+
+    /// Returns the block height at which this commitment will be finalized
+    pub fn finality_height(&self) -> u32 {
+        self.block_height + COMMITMENT_FINALITY_INTERVAL
     }
 }
 
@@ -505,6 +512,19 @@ impl Validator {
                                     }
                                 }
                             };
+                            // Log finality height for administrator visibility
+                            #[cfg(feature = "std")]
+                            {
+                                let finality_height = commitment.finality_height();
+                                let blocks_remaining = finality_height.saturating_sub(height);
+                                info!(
+                                    "New commitment created for space '{}' at block height {}: finality_height={}, blocks_until_finalized={}",
+                                    delegate.space.clone(),
+                                    height,
+                                    finality_height,
+                                    blocks_remaining
+                                );
+                            }
                             // Revoke pending commitment
                             if let Some(pending) = delegate.pending_tip {
                                 changeset.revoked_commitments.push(
