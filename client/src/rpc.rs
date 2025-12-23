@@ -222,6 +222,12 @@ pub enum ChainStateCommand {
         prefer_recent: bool,
         resp: Responder<anyhow::Result<ProofResult>>,
     },
+    ProveCertificate {
+        space: SLabel,
+        commitment_root: Option<Hash>,
+        prefer_recent: bool,
+        resp: Responder<anyhow::Result<CertificateProofResult>>,
+    },
     GetRootAnchors {
         resp: Responder<anyhow::Result<Vec<RootAnchor>>>,
     },
@@ -418,6 +424,14 @@ pub trait Rpc {
         prefer_recent: Option<bool>,
     ) -> Result<ProofResult, ErrorObjectOwned>;
 
+    #[method(name = "provecertificate")]
+    async fn prove_certificate(
+        &self,
+        space: SLabel,
+        commitment_root: Option<sha256::Hash>,
+        prefer_recent: Option<bool>,
+    ) -> Result<CertificateProofResult, ErrorObjectOwned>;
+
     #[method(name = "getrootanchors")]
     async fn get_root_anchors(&self) -> Result<Vec<RootAnchor>, ErrorObjectOwned>;
 
@@ -611,6 +625,42 @@ pub struct ProofResult {
         deserialize_with = "deserialize_base64"
     )]
     pub proof: Vec<u8>,
+}
+
+/// Combined proof result for certificate generation containing proofs from both
+/// spaces and ptrs trees at the same snapshot height.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct CertificateProofResult {
+    /// The block anchor these proofs are generated against
+    pub block: ChainAnchor,
+
+    /// Spaces tree root
+    pub spaces_root: Bytes,
+    /// Proof for the spaceout (outpoint -> spaceout)
+    #[serde(
+        serialize_with = "serialize_base64",
+        deserialize_with = "deserialize_base64"
+    )]
+    pub spaceout_proof: Vec<u8>,
+    /// The spaceout data
+    pub spaceout: SpaceOut,
+    /// The space name extracted from the spaceout
+    pub space: SLabel,
+
+    /// PTRs tree root
+    pub ptrs_root: Bytes,
+    /// Combined proof for ptrout and commitment (or their non-existence)
+    #[serde(
+        serialize_with = "serialize_base64",
+        deserialize_with = "deserialize_base64"
+    )]
+    pub ptrs_proof: Vec<u8>,
+    /// The ptrout data (None if non-existence proof)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ptrout: Option<PtrOut>,
+    /// The commitment data (None if non-existence proof)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commitment: Option<Commitment>,
 }
 
 fn serialize_hash<S>(
@@ -1355,6 +1405,22 @@ impl RpcServer for RpcServerImpl {
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
     }
 
+    async fn prove_certificate(
+        &self,
+        space: SLabel,
+        commitment_root: Option<sha256::Hash>,
+        prefer_recent: Option<bool>,
+    ) -> Result<CertificateProofResult, ErrorObjectOwned> {
+        self.store
+            .prove_certificate(
+                space,
+                commitment_root.map(|h| *h.as_ref()),
+                prefer_recent.unwrap_or(false),
+            )
+            .await
+            .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
+    }
+
     async fn get_root_anchors(&self) -> Result<Vec<RootAnchor>, ErrorObjectOwned> {
         self.store
             .get_root_anchors()
@@ -1725,6 +1791,19 @@ impl AsyncChainState {
                     prefer_recent,
                 ));
             }
+            ChainStateCommand::ProveCertificate {
+                space,
+                commitment_root,
+                prefer_recent,
+                resp,
+            } => {
+                _ = resp.send(Self::handle_prove_certificate(
+                    state,
+                    space,
+                    commitment_root,
+                    prefer_recent,
+                ));
+            }
             ChainStateCommand::GetRootAnchors { resp } => {
                 _ = resp.send(Self::handle_get_anchor(anchors_path, state));
             }
@@ -1899,7 +1978,6 @@ impl AsyncChainState {
                     ))
                 }
             };
-
             // Use the last_update height from the PTR to find an appropriate snapshot
             let target_snapshot = match &ptrout.sptr {
                 Some(ptr) => {
@@ -1966,6 +2044,149 @@ impl AsyncChainState {
         Ok(ProofResult {
             proof: buf,
             root: Bytes::new(root),
+        })
+    }
+
+    fn handle_prove_certificate(
+        state: &mut Chain,
+        space: SLabel,
+        commitment_root: Option<Hash>,
+        prefer_recent: bool,
+    ) -> anyhow::Result<CertificateProofResult> {
+        // Look up the spaceout by space name
+        let space_key = SpaceKey::from(Sha256::hash(space.as_ref()));
+        let full_spaceout = state.get_space_info(&space_key)?
+            .ok_or_else(|| anyhow!("Space not found: {}", space))?;
+
+        let spaceout = &full_spaceout.spaceout;
+        let space_data = spaceout.space.as_ref()
+            .ok_or_else(|| anyhow!("Spaceout has no associated space data"))?;
+
+        // Look up the ptrout by Sptr (derived from the spaceout's script_pubkey)
+        let sptr = Sptr::from_spk::<Sha256>(spaceout.script_pubkey.clone());
+        let full_ptrout = state.get_ptr_info(&sptr)?;
+        let ptrout = full_ptrout.as_ref().map(|f| f.ptrout.clone());
+
+        let registry_key = RegistryKey::from_slabel::<Sha256>(&space_data.name);
+        // Get commitment if not set pick the latest or prove non-existence of a tip
+        let commitment = if let Some(root) = commitment_root {
+            let ck = CommitmentKey::new::<Sha256>(&space, root);
+            Some(state.get_commitment(&ck)?
+                .ok_or_else(|| anyhow!("Commitment not found for space {} with root {}", space, hex::encode(root)))?)
+        } else {
+            let tip = state.get_commitments_tip(&registry_key)?;
+            if let Some(root) = tip {
+                let ck = CommitmentKey::new::<Sha256>(&space, root);
+                Some(state.get_commitment(&ck)?
+                    .ok_or_else(|| anyhow!("Commitment not found for space {} with root {}", space, hex::encode(root)))?)
+            } else {
+                None
+            }
+        };
+
+        // Determine target snapshot based on the most recent last_update across all items
+        let target_snapshot = if !prefer_recent {
+            let mut most_recent_update: u32 = 0;
+
+            // Check spaceout last update
+            match &space_data.covenant {
+                Covenant::Transfer { expire_height, .. } => {
+                    let last_update = expire_height.saturating_sub(spaces_protocol::constants::RENEWAL_INTERVAL);
+                    most_recent_update = std::cmp::max(most_recent_update, last_update);
+                }
+                _ => return Err(anyhow!("Cannot find older proofs for a non-registered space (try with prefer_recent: true)")),
+            }
+
+            // Check ptrout last update if present
+            if let Some(ref ptr) = ptrout {
+                if let Some(ref ptr_data) = ptr.sptr {
+                    most_recent_update = std::cmp::max(most_recent_update, ptr_data.last_update);
+                }
+            }
+
+            // Check commitment block height if present
+            if let Some(ref c) = commitment {
+                most_recent_update = std::cmp::max(most_recent_update, c.block_height);
+            }
+
+            let tip = state.tip();
+            Self::compute_target_snapshot(most_recent_update, tip.height)
+        } else {
+            0 // Will use current snapshot
+        };
+
+        // Generate spaceout proof using OutpointKey
+        let spaceout_key = OutpointKey::from_outpoint::<Sha256>(full_spaceout.outpoint());
+        let (spaces_proof, spaces_root, block_anchor) = if prefer_recent {
+            let snapshot = state.spaces_inner()?;
+            let root = snapshot.compute_root()?;
+            let meta: ChainAnchor = snapshot.metadata().try_into()?;
+            let proof = snapshot.prove(&[spaceout_key.into()], ProofType::Standard)?;
+            (proof, root, meta)
+        } else {
+            let proof = state.prove_spaces_with_snapshot(&[spaceout_key.into()], target_snapshot)?;
+            let root = proof.compute_root()?;
+            // Get block anchor from the snapshot
+            let anchor = ChainAnchor::new(root, target_snapshot);
+            (proof, root, anchor)
+        };
+
+        let mut spaceout_buf = vec![0u8; 4096];
+        let offset = spaces_proof.write_to_slice(&mut spaceout_buf)?;
+        spaceout_buf.truncate(offset);
+
+        info!("Proving certificate with spaces root {}", hex::encode(spaces_root));
+
+        let (ptrs_root, ptrs_proof) = {
+            // Collect keys to prove
+            let mut ptrs_keys: Vec<Hash> = Vec::new();
+
+            // Add ptrout key if we have one
+            if let Some(ref fpo) = full_ptrout {
+                let ptr_outpoint = OutPoint::new(fpo.txid, fpo.ptrout.n as u32);
+                let key = PtrOutpointKey::from_outpoint::<Sha256>(ptr_outpoint);
+                ptrs_keys.push(key.into());
+            } else {
+                // non-existence proof
+                ptrs_keys.push(sptr.into());
+            }
+
+            // Add commitment key if requested
+            if let Some(c) = commitment.as_ref() {
+                let key = CommitmentKey::new::<Sha256>(&space, c.state_root);
+                ptrs_keys.push(key.into());
+            } else {
+                ptrs_keys.push(registry_key.into());
+            }
+
+            // Generate combined proof at the same target snapshot
+            let proof = if prefer_recent {
+                let snapshot = state.ptrs_mut().state.inner()?;
+                snapshot.prove(&ptrs_keys, ProofType::Standard)?
+            } else {
+                state.prove_ptrs_with_snapshot(&ptrs_keys, target_snapshot)?
+            };
+
+            let root = proof.compute_root()?;
+            info!("Proving certificate with ptrs root {}", hex::encode(root));
+
+            let mut ptrs_buf = vec![0u8; 8192];
+            let offset = proof.write_to_slice(&mut ptrs_buf)?;
+            ptrs_buf.truncate(offset);
+
+            (Bytes::new(root.to_vec()), ptrs_buf)
+        };
+
+        Ok(CertificateProofResult {
+            block: block_anchor,
+            spaces_root: Bytes::new(spaces_root.to_vec()),
+            spaceout_proof: spaceout_buf,
+            spaceout: spaceout.clone(),
+            space,
+            ptrs_root,
+            ptrs_proof,
+            ptrout,
+            commitment,
         })
     }
 
@@ -2084,6 +2305,24 @@ impl AsyncChainState {
             .send(ChainStateCommand::ProveCommitment {
                 space,
                 root,
+                prefer_recent,
+                resp,
+            })
+            .await?;
+        resp_rx.await?
+    }
+
+    pub async fn prove_certificate(
+        &self,
+        space: SLabel,
+        commitment_root: Option<Hash>,
+        prefer_recent: bool,
+    ) -> anyhow::Result<CertificateProofResult> {
+        let (resp, resp_rx) = oneshot::channel();
+        self.sender
+            .send(ChainStateCommand::ProveCertificate {
+                space,
+                commitment_root,
                 prefer_recent,
                 resp,
             })
