@@ -96,7 +96,7 @@ impl Chain {
     }
 
     pub fn load(_network: Network, genesis: ChainAnchor, ptrs_genesis: ChainAnchor, dir: &Path, index_spaces: bool, index_ptrs: bool) -> anyhow::Result<Self> {
-        let proto_db_path = dir.join("spaces.sdb");
+        let proto_db_path = dir.join("root.sdb");
         let ptrs_db_path = dir.join("refs.sdb");
         let initial_sp_sync = !proto_db_path.exists();
         let initial_pt_sync = !ptrs_db_path.exists();
@@ -298,6 +298,10 @@ impl Chain {
 
     pub(crate) fn insert_registry(&self, key: RegistryKey, state_root: Hash) {
         self.db.pt.state.insert_registry(key, state_root)
+    }
+
+    pub(crate) fn remove_registry(&self, key: RegistryKey) {
+        self.db.pt.state.remove_registry(key)
     }
 
     pub fn remove_ptr_utxo(&mut self, outpoint: OutPoint) {

@@ -3,13 +3,14 @@ use std::{path::PathBuf, str::FromStr};
 use spaces_client::{
     rpc::{
         BidParams, OpenParams, RegisterParams, RpcClient, RpcWalletRequest,
-        RpcWalletTxBuilder, TransferSpacesParams,
+        RpcWalletTxBuilder, SpaceOrPtr, TransferSpacesParams,
     },
     wallets::{AddressKind, WalletResponse},
 };
 use spaces_protocol::{
     bitcoin::{Amount, FeeRate},
     constants::RENEWAL_INTERVAL,
+    slabel::SLabel,
     Covenant,
 };
 use spaces_testutil::TestRig;
@@ -1253,6 +1254,174 @@ async fn it_should_allow_sign_verify_messages(rig: &TestRig) -> anyhow::Result<(
     Ok(())
 }
 
+async fn it_should_handle_expired_spaces(rig: &TestRig) -> anyhow::Result<()> {
+    rig.wait_until_wallet_synced(ALICE).await?;
+    rig.wait_until_synced().await?;
+
+    // Get a space that Alice owns
+    let alice_spaces = rig.spaced.client.wallet_list_spaces(ALICE).await?;
+    let owned_space = alice_spaces.owned.first()
+        .expect("Alice should own at least one space");
+    let space = owned_space.spaceout.space.as_ref().expect("space");
+    let space_name = space.name.to_string();
+
+    let current_height = rig.get_block_count().await? as u32;
+    println!("Space {} current height: {}", space_name, current_height);
+
+    // Use debug RPC to set expire_height to current height (making it expired)
+    let new_expire_height = current_height;
+    println!("Setting expire_height to {} to expire the space...", new_expire_height);
+    rig.spaced.client.debug_set_expire_height(&space_name, new_expire_height).await?;
+
+    // Mine one block to trigger expiration check
+    rig.mine_blocks(1, None).await?;
+    rig.wait_until_synced().await?;
+
+    let new_height = rig.get_block_count().await? as u32;
+    println!("New height: {}, space should now be expired", new_height);
+    assert!(new_height > new_expire_height, "should have passed expire_height");
+
+    // Test 1: Try to renew/transfer the expired space - should fail
+    println!("Attempting to renew expired space (should fail)...");
+    rig.wait_until_wallet_synced(ALICE).await?;
+
+    let renew_result = wallet_do(
+        rig,
+        ALICE,
+        vec![RpcWalletRequest::Transfer(TransferSpacesParams {
+            spaces: vec![SpaceOrPtr::Space(
+                SLabel::from_str(&space_name).expect("valid")
+            )],
+            to: None, // renew to self
+            data: None,
+        })],
+        false,
+    ).await;
+
+    // The transfer should fail since the space is expired
+    assert!(renew_result.is_err() || renew_result.as_ref().unwrap().result.iter().any(|r| r.error.is_some()),
+        "renewing an expired space should fail");
+    println!("✓ Renewing expired space correctly failed");
+
+    // Verify the space is no longer in Alice's owned list (it was revoked)
+    rig.wait_until_wallet_synced(ALICE).await?;
+    let alice_spaces_after = rig.spaced.client.wallet_list_spaces(ALICE).await?;
+    let _still_owns = alice_spaces_after.owned.iter()
+        .any(|s| s.spaceout.space.as_ref().unwrap().name.to_string() == space_name);
+
+    // Test 2: Open the expired space for auction - should succeed
+    println!("Opening expired space {} for auction...", space_name);
+    let open_result = wallet_do(
+        rig,
+        BOB, // BOB opens the expired space
+        vec![RpcWalletRequest::Open(OpenParams {
+            name: format!("@{}", space_name.trim_start_matches('@')),
+            amount: 1000,
+        })],
+        false,
+    ).await?;
+
+    // Check that the open succeeded
+    let has_error = open_result.result.iter().any(|r| r.error.is_some());
+    assert!(!has_error, "opening an expired space should succeed: {:?}", open_result);
+    println!("✓ Opening expired space for auction succeeded");
+
+    rig.mine_blocks(1, None).await?;
+    rig.wait_until_synced().await?;
+
+    // Verify the space is now in auction (BOB's winning list)
+    rig.wait_until_wallet_synced(BOB).await?;
+    let bob_spaces = rig.spaced.client.wallet_list_spaces(BOB).await?;
+    let bob_winning = bob_spaces.winning.iter()
+        .any(|s| s.spaceout.space.as_ref().unwrap().name.to_string() == space_name);
+    assert!(bob_winning, "BOB should be winning the reopened auction");
+    println!("✓ Expired space is now back in auction");
+    
+    // ========== Test Case 2: Expire second space, force renew, then open ==========
+    println!("\n=== Test Case 2: Force renew expired space ===");
+
+    // Get a second space that Alice owns
+    rig.wait_until_wallet_synced(ALICE).await?;
+    let alice_spaces_2 = rig.spaced.client.wallet_list_spaces(ALICE).await?;
+    let owned_space_2 = alice_spaces_2.owned.get(1)
+        .expect("Alice should own at least two spaces");
+    let space_2 = owned_space_2.spaceout.space.as_ref().expect("space");
+    let space_name_2 = space_2.name.to_string();
+
+    println!("Using second space: {}", space_name_2);
+
+    // Expire the second space
+    let current_height_2 = rig.get_block_count().await? as u32;
+    rig.spaced.client.debug_set_expire_height(&space_name_2, current_height_2).await?;
+    println!("Set expire_height to {} for {}", current_height_2, space_name_2);
+
+    // Mine one block to pass the expire height
+    rig.mine_blocks(1, None).await?;
+    rig.wait_until_synced().await?;
+    rig.wait_until_wallet_synced(ALICE).await?;
+
+    // Try to renew with force=true - this should allow the wallet to create the tx
+    println!("Attempting to renew expired space with force=true...");
+    let force_renew_result = wallet_do(
+        rig,
+        ALICE,
+        vec![RpcWalletRequest::Transfer(TransferSpacesParams {
+            spaces: vec![SpaceOrPtr::Space(
+                SLabel::from_str(&space_name_2).expect("valid")
+            )],
+            to: None,
+            data: None,
+        })],
+        true, // force=true
+    ).await;
+
+    // With force=true, the wallet should create the tx (even though it will be revoked on-chain)
+    assert!(force_renew_result.is_ok(), "force renew should allow tx creation: {:?}", force_renew_result);
+    let force_result = force_renew_result.unwrap();
+    println!("Force renew result: {:?}", force_result.result.iter().map(|r| &r.error).collect::<Vec<_>>());
+
+    // Mine the block - the transfer will be revoked because the space is expired
+    rig.mine_blocks(1, None).await?;
+    rig.wait_until_synced().await?;
+    rig.wait_until_wallet_synced(ALICE).await?;
+
+    // The space should be revoked (not in Alice's owned list anymore)
+    let alice_spaces_after_force = rig.spaced.client.wallet_list_spaces(ALICE).await?;
+    let still_owns_2 = alice_spaces_after_force.owned.iter()
+        .any(|s| s.spaceout.space.as_ref().unwrap().name.to_string() == space_name_2);
+    assert!(!still_owns_2, "Space should be revoked after forced renewal of expired space");
+    println!("✓ Space correctly revoked after forced renewal");
+
+    // Now open the expired space for auction
+    println!("Opening expired space {} for auction...", space_name_2);
+    let open_result_2 = wallet_do(
+        rig,
+        BOB,
+        vec![RpcWalletRequest::Open(OpenParams {
+            name: format!("@{}", space_name_2.trim_start_matches('@')),
+            amount: 1000,
+        })],
+        false,
+    ).await?;
+
+    let has_error_2 = open_result_2.result.iter().any(|r| r.error.is_some());
+    assert!(!has_error_2, "opening expired space should succeed: {:?}", open_result_2);
+    println!("✓ Opening second expired space for auction succeeded");
+
+    rig.mine_blocks(1, None).await?;
+    rig.wait_until_synced().await?;
+
+    // Verify BOB is winning the second auction too
+    rig.wait_until_wallet_synced(BOB).await?;
+    let bob_spaces_2 = rig.spaced.client.wallet_list_spaces(BOB).await?;
+    let bob_winning_2 = bob_spaces_2.winning.iter()
+        .any(|s| s.spaceout.space.as_ref().unwrap().name.to_string() == space_name_2);
+    assert!(bob_winning_2, "BOB should be winning the second reopened auction");
+    println!("✓ Second expired space is now back in auction");
+
+    Ok(())
+}
+
 async fn it_should_handle_reorgs(rig: &TestRig) -> anyhow::Result<()> {
     rig.wait_until_wallet_synced(ALICE).await.expect("synced");
     const NAME: &str = "hello_world";
@@ -1319,10 +1488,17 @@ async fn run_auction_tests() -> anyhow::Result<()> {
         .await
         .expect("should sign verify");
 
+    it_should_handle_expired_spaces(&rig)
+        .await
+        .expect("should handle expired spaces");
+
+
     // keep reorgs last as it can drop some txs from mempool and mess up wallet state
     it_should_handle_reorgs(&rig)
         .await
         .expect("should handle reorgs wallet");
+
+
     Ok(())
 }
 

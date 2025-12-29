@@ -113,6 +113,7 @@ pub trait PtrChainState {
     fn insert_ptrout(&self, key: PtrOutpointKey, ptrout: PtrOut);
     fn insert_commitment(&self, key: CommitmentKey, commitment: Commitment);
     fn insert_registry(&self, key: RegistryKey, state_root: Hash);
+    fn remove_registry(&self, key: RegistryKey);
     fn insert_registry_delegation(&self, key: RegistrySptrKey, space: SLabel);
     fn insert_ptr(&self, key: Sptr, outpoint: EncodableOutpoint);
 
@@ -134,6 +135,10 @@ impl PtrChainState for PtrLiveSnapshot {
 
     fn insert_registry(&self, key: RegistryKey, state_root: Hash) {
         self.insert(key, state_root)
+    }
+
+    fn remove_registry(&self, key: RegistryKey) {
+        self.remove(key)
     }
 
     fn insert_registry_delegation(&self, key: RegistrySptrKey, space: SLabel) {

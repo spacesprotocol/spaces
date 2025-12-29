@@ -287,6 +287,26 @@ async fn it_should_commit_and_rollback(rig: &TestRig) -> anyhow::Result<()> {
     ).await?.expect("finalized commitment should be preserved");
     assert_eq!(finalized.state_root, [2u8;32]);
 
+    // Test 6: Rollback pending [3u8;32] and verify registry points back to [2u8;32]
+    println!("Rolling back pending [3u8;32]...");
+    let rollback3 = wallet_do(
+        rig,
+        ALICE,
+        vec![RpcWalletRequest::Commit(CommitParams {
+            space: space_name.clone(),
+            root: None,
+        })],
+        false,
+    ).await?;
+    assert!(wallet_res_err(&rollback3).is_ok());
+    mine_and_sync(rig, 1).await?;
+
+    let tip_after_rollback = rig.spaced.client.get_commitment(space_name.clone(), None).await?
+        .expect("should still have finalized commitment after rollback");
+    assert_eq!(tip_after_rollback.state_root, [2u8;32],
+        "registry should point back to finalized [2u8;32] after rolling back pending");
+    println!("✓ Registry correctly updated to [2u8;32] after rollback");
+
     Ok(())
 }
 

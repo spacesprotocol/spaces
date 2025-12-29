@@ -284,13 +284,17 @@ impl Validator {
                 }
 
                 // Revoke the previously expired space
-                changeset.updates.push(UpdateOut {
-                    kind: UpdateKind::Revoke(RevokeReason::Expired),
-                    output: FullSpaceOut {
-                        txid: prev.txid,
-                        spaceout: prev.spaceout.clone(),
-                    },
-                });
+                if !changeset.updates.iter()
+                    .any(|update| update.output.outpoint() == prev.outpoint() &&
+                        matches!(update.kind, UpdateKind::Revoke(_))) {
+                    changeset.updates.push(UpdateOut {
+                        kind: UpdateKind::Revoke(RevokeReason::Expired),
+                        output: FullSpaceOut {
+                            txid: prev.txid,
+                            spaceout: prev.spaceout.clone(),
+                        },
+                    });
+                }
                 prev.spaceout.space.unwrap().name
             }
             OpenContext::NewSpace(name) => name,

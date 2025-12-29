@@ -1167,6 +1167,15 @@ impl RpcWallet {
                                         ));
                                     }
 
+                                    Some(full)
+                                    if !tx.force &&
+                                        full.spaceout.space.as_ref()
+                                            .is_some_and(|s| s.is_expired(tip_height)) => {
+                                        return Err(anyhow!(
+                                            "transfer/renew '{}': space is expired",
+                                            space
+                                        ));
+                                    }
                                     Some(full) => {
                                         let recipient_addr = match recipient.clone() {
                                             None => SpaceAddress(
@@ -1197,12 +1206,14 @@ impl RpcWallet {
                 }
                 RpcWalletRequest::Open(params) => {
                     let name = SLabel::from_str(&params.name)?;
-                    if !tx.force {
+                    if !tx.force  {
                         // Warn if already exists
                         let spacehash = SpaceKey::from(Sha256::hash(name.as_ref()));
-                        let spaceout = chain.get_space_info(&spacehash)?;
-                        if spaceout.is_some() {
-                            return Err(anyhow!("open '{}': space already exists", params.name));
+                        let full = chain.get_space_info(&spacehash)?;
+                        if let Some(full) = full {
+                            if !full.spaceout.space.is_some_and(|s| s.is_expired(tip_height)) {
+                                return Err(anyhow!("open '{}': space already exists", params.name));
+                            }
                         }
                     }
 

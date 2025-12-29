@@ -231,6 +231,11 @@ pub enum ChainStateCommand {
     GetRootAnchors {
         resp: Responder<anyhow::Result<Vec<RootAnchor>>>,
     },
+    DebugSetExpireHeight {
+        space: SLabel,
+        expire_height: u32,
+        resp: Responder<anyhow::Result<()>>,
+    },
 }
 
 #[derive(Clone)]
@@ -468,6 +473,10 @@ pub trait Rpc {
 
     #[method(name = "walletgetbalance")]
     async fn wallet_get_balance(&self, wallet: &str) -> Result<Balance, ErrorObjectOwned>;
+
+    /// Debug method to set a space's expire height (regtest only)
+    #[method(name = "debugsetexpireheight")]
+    async fn debug_set_expire_height(&self, space: &str, expire_height: u32) -> Result<(), ErrorObjectOwned>;
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -1491,6 +1500,23 @@ impl RpcServer for RpcServerImpl {
             .await
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
     }
+
+    async fn debug_set_expire_height(&self, space: &str, expire_height: u32) -> Result<(), ErrorObjectOwned> {
+        // Only allow on regtest
+        let info = self.store.get_server_info().await
+            .map_err(|e| ErrorObjectOwned::owned(-1, e.to_string(), None::<String>))?;
+        if info.network != ExtendedNetwork::Regtest {
+            return Err(ErrorObjectOwned::owned(-1, "debug_set_expire_height is only available on regtest", None::<String>));
+        }
+
+        let space_label = SLabel::from_str(space)
+            .map_err(|e| ErrorObjectOwned::owned(-1, format!("Invalid space name: {}", e), None::<String>))?;
+
+        self.store
+            .debug_set_expire_height(space_label, expire_height)
+            .await
+            .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
+    }
 }
 
 impl AsyncChainState {
@@ -1807,7 +1833,39 @@ impl AsyncChainState {
             ChainStateCommand::GetRootAnchors { resp } => {
                 _ = resp.send(Self::handle_get_anchor(anchors_path, state));
             }
+            ChainStateCommand::DebugSetExpireHeight { space, expire_height, resp } => {
+                _ = resp.send(Self::handle_debug_set_expire_height(state, space, expire_height));
+            }
         }
+    }
+
+    fn handle_debug_set_expire_height(
+        state: &mut Chain,
+        space: SLabel,
+        expire_height: u32,
+    ) -> anyhow::Result<()> {
+        let space_key = SpaceKey::from(Sha256::hash(space.as_ref()));
+        let outpoint = state.get_space_outpoint(&space_key)?
+            .ok_or_else(|| anyhow::anyhow!("Space not found: {}", space))?;
+        let mut spaceout = state.get_spaceout(&outpoint)?
+            .ok_or_else(|| anyhow::anyhow!("Spaceout not found for outpoint"))?;
+
+        // Update expire_height in the covenant
+        if let Some(ref mut space_data) = spaceout.space {
+            match &mut space_data.covenant {
+                Covenant::Transfer { expire_height: ref mut eh, .. } => {
+                    *eh = expire_height;
+                }
+                _ => return Err(anyhow::anyhow!("Space is not in Transfer covenant (not owned)")),
+            }
+        } else {
+            return Err(anyhow::anyhow!("SpaceOut has no space data"));
+        }
+
+        // Write back to database
+        let outpoint_key = OutpointKey::from_outpoint::<Sha256>(outpoint);
+        state.insert_spaceout(outpoint_key, spaceout);
+        Ok(())
     }
 
     fn handle_get_anchor(
@@ -2334,6 +2392,14 @@ impl AsyncChainState {
         let (resp, resp_rx) = oneshot::channel();
         self.sender
             .send(ChainStateCommand::GetRootAnchors { resp })
+            .await?;
+        resp_rx.await?
+    }
+
+    pub async fn debug_set_expire_height(&self, space: SLabel, expire_height: u32) -> anyhow::Result<()> {
+        let (resp, resp_rx) = oneshot::channel();
+        self.sender
+            .send(ChainStateCommand::DebugSetExpireHeight { space, expire_height, resp })
             .await?;
         resp_rx.await?
     }

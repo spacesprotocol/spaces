@@ -315,6 +315,14 @@ impl Client {
         for revoked in changeset.revoked_commitments {
             let commitment_key = CommitmentKey::new::<Sha256>(&revoked.space, revoked.commitment.state_root);
             state.remove_commitment(commitment_key);
+
+            let registry_key = RegistryKey::from_slabel::<Sha256>(&revoked.space);
+            if let Some(prev) = revoked.commitment.prev_root {
+                // Points space -> prev commitments tip
+                state.insert_registry(registry_key, prev);
+            } else {
+                state.remove_registry(registry_key);
+            }
         }
 
         // Create new delegations
@@ -360,29 +368,6 @@ impl Client {
             state.remove_space_utxo(previous);
         }
 
-        // Apply outputs
-        for create in changeset.creates.into_iter() {
-            if let Some(space) = create.space.as_ref() {
-                assert!(
-                    !matches!(space.covenant, Covenant::Bid { .. }),
-                    "bid unexpected"
-                );
-            }
-            let outpoint = OutPoint {
-                txid: changeset.txid,
-                vout: create.n as u32,
-            };
-
-            // Space => Outpoint
-            if let Some(space) = create.space.as_ref() {
-                let space_key = SpaceKey::from(Sha256::hash(space.name.as_ref()));
-                state.insert_space(space_key, outpoint.into());
-            }
-            // Outpoint => SpaceOut
-            let outpoint_key = OutpointKey::from_outpoint::<Sha256>(outpoint);
-            state.insert_spaceout(outpoint_key, create);
-        }
-
         // Apply meta outputs
         for update in changeset.updates {
             match update.kind {
@@ -416,11 +401,14 @@ impl Client {
                             }
                         }
                         RevokeReason::Expired => {
-                            // Space => Outpoint mapping will be removed
-                            // since this type of revocation only happens when an
-                            // expired space is being re-opened for auction.
-                            // No bids here so only remove Outpoint -> Spaceout
+                            // Remove both Space -> Outpoint and
+                            // Outpoint -> Spaceout mappings
                             state.remove_space_utxo(update.output.outpoint());
+                            if let Some(space) = update.output.spaceout.space.as_ref() {
+                                let base_hash = Sha256::hash(space.name.as_ref());
+                                let space_key = SpaceKey::from(base_hash);
+                                state.remove_space(space_key);
+                            }
                         }
                     }
                 }
@@ -485,6 +473,29 @@ impl Client {
                     state.insert_spaceout(outpoint_key, update.output.spaceout);
                 }
             }
+        }
+
+        // Apply outputs
+        for create in changeset.creates.into_iter() {
+            if let Some(space) = create.space.as_ref() {
+                assert!(
+                    !matches!(space.covenant, Covenant::Bid { .. }),
+                    "bid unexpected"
+                );
+            }
+            let outpoint = OutPoint {
+                txid: changeset.txid,
+                vout: create.n as u32,
+            };
+
+            // Space => Outpoint
+            if let Some(space) = create.space.as_ref() {
+                let space_key = SpaceKey::from(Sha256::hash(space.name.as_ref()));
+                state.insert_space(space_key, outpoint.into());
+            }
+            // Outpoint => SpaceOut
+            let outpoint_key = OutpointKey::from_outpoint::<Sha256>(outpoint);
+            state.insert_spaceout(outpoint_key, create);
         }
     }
 
