@@ -74,6 +74,7 @@ pub(crate) type Responder<T> = oneshot::Sender<T>;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerInfo {
     pub network: ExtendedNetwork,
+    pub height: u32,
     pub tip: ChainAnchor,
     pub chain: ChainInfo,
     pub ready: bool,
@@ -2422,6 +2423,7 @@ async fn get_server_info(
 
     Ok(ServerInfo {
         network,
+        height: tip.height,
         tip,
         chain: ChainInfo {
             blocks: info.blocks,
