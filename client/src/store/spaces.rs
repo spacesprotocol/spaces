@@ -27,8 +27,7 @@ use spaces_protocol::{
     prepare::SpacesSource,
     Covenant, FullSpaceOut, SpaceOut,
 };
-
-use crate::rpc::RootAnchor;
+use spaces_ptr::RootAnchor;
 use crate::store::{EncodableOutpoint, ReadTx, Sha256, SpaceDb, WriteMemory, WriteTx};
 
 #[derive(Clone)]
@@ -230,7 +229,7 @@ impl SpLiveSnapshot {
         &self,
         keys: &[Hash],
         snapshot_block_height: u32,
-    ) -> Result<SubTree<Sha256Hasher>> {
+    ) -> Result<(ChainAnchor, SubTree<Sha256Hasher>)> {
         let snapshot = self.db.iter().filter_map(|s| s.ok()).find(|s| {
             let anchor: ChainAnchor = match s.metadata().try_into() {
                 Ok(a) => a,
@@ -239,9 +238,12 @@ impl SpLiveSnapshot {
             anchor.height == snapshot_block_height
         });
         if let Some(mut snapshot) = snapshot {
-            return snapshot
+            let anchor: ChainAnchor = snapshot.metadata().try_into()
+                .map_err(|_| anyhow!("Could not parse metadata"))?;
+            let proof = snapshot
                 .prove(keys, ProofType::Standard)
-                .or_else(|err| Err(anyhow!("Could not prove: {}", err)));
+                .or_else(|err| Err(anyhow!("Could not prove: {}", err)))?;
+            return Ok((anchor, proof));
         }
         Err(anyhow!(
             "Older snapshot targeting block {} could not be found",

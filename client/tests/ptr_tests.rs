@@ -1,5 +1,8 @@
 use std::{path::PathBuf, str::FromStr};
 use anyhow::anyhow;
+use spacedb::encode::SubTreeEncoder;
+use spacedb::Sha256Hasher;
+use spacedb::subtree::SubTree;
 use spaces_client::{
     rpc::{
         RpcClient, RpcWalletRequest,
@@ -11,6 +14,7 @@ use spaces_client::rpc::{CommitParams, CreatePtrParams, DelegateParams, SetPtrDa
 use spaces_client::store::Sha256;
 use spaces_protocol::{bitcoin, bitcoin::{FeeRate}};
 use spaces_protocol::bitcoin::hashes::{sha256, Hash};
+use spaces_ptr::CommitmentKey;
 use spaces_ptr::sptr::Sptr;
 use spaces_testutil::TestRig;
 use spaces_wallet::{export::WalletExport};
@@ -658,6 +662,125 @@ async fn it_should_reject_duplicate_sptr_delegations(rig: &TestRig) -> anyhow::R
     Ok(())
 }
 
+// ============== Test: Transfer Back to Original SPTR ==============
+// Regression test for https://github.com/spacesprotocol/spaces/issues/134
+
+async fn it_should_restore_delegation_when_transferring_back(rig: &TestRig) -> anyhow::Result<()> {
+    sync_all(rig).await?;
+
+    // Step 1: Get a fresh address and transfer a space to it first to establish baseline
+    let original_addr = rig.spaced.client.wallet_get_new_address(ALICE, AddressKind::Space).await?;
+    let original_spk = SpaceAddress::from_str(&original_addr)
+        .expect("valid space address")
+        .script_pubkey();
+    let original_sptr = Sptr::from_spk::<Sha256>(original_spk.clone());
+
+    // Get a space that Alice owns
+    let alice_spaces = rig.spaced.client.wallet_list_spaces(ALICE).await?;
+    let space = alice_spaces.owned.iter()
+        .find(|s| s.spaceout.space.is_some())
+        .expect("Alice needs at least 1 space for this test");
+
+    let space_name = space.spaceout.space.as_ref()
+        .expect("space must exist").name.clone();
+
+    println!("Testing transfer-away-and-back with space: {}", space_name);
+
+    // Transfer space to original_addr first to establish the delegation
+    println!("\nStep 1: Transferring {} to original address to establish delegation...", space_name);
+    let setup_transfer = wallet_do(
+        rig,
+        ALICE,
+        vec![RpcWalletRequest::Transfer(TransferSpacesParams {
+            spaces: vec![SpaceOrPtr::Space(space_name.clone())],
+            to: Some(original_addr.clone()),
+            data: None,
+        })],
+        false,
+    ).await?;
+    assert!(wallet_res_err(&setup_transfer).is_ok());
+    mine_and_sync(rig, 1).await?;
+
+    // Verify initial delegation is established
+    let initial_delegator = rig.spaced.client.get_delegator(original_sptr).await?
+        .expect("Original SPTR should have delegation after setup");
+    assert_eq!(initial_delegator, space_name);
+    println!("✓ Initial delegation established: {} -> {}", original_sptr, space_name);
+
+    // Step 2: Transfer space to a NEW address (different SPTR)
+    let new_addr = rig.spaced.client.wallet_get_new_address(ALICE, AddressKind::Space).await?;
+    let new_spk = SpaceAddress::from_str(&new_addr)
+        .expect("valid space address")
+        .script_pubkey();
+    let new_sptr = Sptr::from_spk::<Sha256>(new_spk.clone());
+
+    println!("\nStep 2: Transferring {} to new address...", space_name);
+    println!("New SPTR will be: {}", new_sptr);
+
+    let transfer1 = wallet_do(
+        rig,
+        ALICE,
+        vec![RpcWalletRequest::Transfer(TransferSpacesParams {
+            spaces: vec![SpaceOrPtr::Space(space_name.clone())],
+            to: Some(new_addr.clone()),
+            data: None,
+        })],
+        false,
+    ).await?;
+    assert!(wallet_res_err(&transfer1).is_ok());
+    mine_and_sync(rig, 1).await?;
+
+    // Verify: original SPTR should have NO delegation now
+    let delegator_after_transfer1 = rig.spaced.client.get_delegator(original_sptr).await?;
+    assert_eq!(delegator_after_transfer1, None,
+        "Original SPTR should have no delegation after space was transferred away");
+    println!("✓ Original SPTR delegation revoked: {:?}", delegator_after_transfer1);
+
+    // Verify: new SPTR should have the delegation
+    let delegator_new = rig.spaced.client.get_delegator(new_sptr).await?
+        .expect("New SPTR should have delegation");
+    assert_eq!(delegator_new, space_name,
+        "New SPTR should point to the space");
+    println!("✓ New SPTR has delegation: {} -> {}", new_sptr, delegator_new);
+
+    // Step 3: Transfer space BACK to original address
+    println!("\nStep 3: Transferring {} BACK to original address...", space_name);
+    println!("Original address: {}", original_addr);
+
+    let transfer2 = wallet_do(
+        rig,
+        ALICE,
+        vec![RpcWalletRequest::Transfer(TransferSpacesParams {
+            spaces: vec![SpaceOrPtr::Space(space_name.clone())],
+            to: Some(original_addr.clone()),
+            data: None,
+        })],
+        false,
+    ).await?;
+    assert!(wallet_res_err(&transfer2).is_ok());
+    mine_and_sync(rig, 1).await?;
+
+    // KEY TEST: Original SPTR should have delegation RESTORED
+    let delegator_restored = rig.spaced.client.get_delegator(original_sptr).await?;
+    println!("Delegation after transfer back: {:?}", delegator_restored);
+
+    assert!(delegator_restored.is_some(),
+        "Original SPTR should have delegation restored after transferring back!");
+    assert_eq!(delegator_restored.unwrap(), space_name,
+        "Original SPTR should point to the space again");
+
+    println!("✓ Original SPTR delegation RESTORED: {} -> {}", original_sptr, space_name);
+
+    // Verify: new SPTR should have NO delegation now
+    let delegator_new_after = rig.spaced.client.get_delegator(new_sptr).await?;
+    assert_eq!(delegator_new_after, None,
+        "New SPTR should have no delegation after space was transferred back");
+    println!("✓ New SPTR delegation revoked");
+
+    println!("\n✓ Transfer-back delegation restoration working correctly!");
+    Ok(())
+}
+
 // ============== Test: PTR Data ==============
 
 async fn it_should_set_and_persist_ptr_data(rig: &TestRig) -> anyhow::Result<()> {
@@ -776,6 +899,138 @@ async fn it_should_set_and_persist_ptr_data(rig: &TestRig) -> anyhow::Result<()>
     Ok(())
 }
 
+// ============== Test: Prove Certificate ==============
+
+async fn it_should_prove_certificate_with_commitment(rig: &TestRig) -> anyhow::Result<()> {
+    sync_all(rig).await?;
+
+    // Get a space that Alice owns
+    let alice_spaces = rig.spaced.client.wallet_list_spaces(ALICE).await?;
+    let owned = alice_spaces.owned.first().cloned()
+        .expect("Alice should own at least one space");
+    let space_name = owned.spaceout.space.as_ref()
+        .expect("space must exist").name.clone();
+
+    println!("Testing prove_certificate with space: {}", space_name);
+
+    // Setup: Delegate the space to establish SPTR
+    let delegate = wallet_do(
+        rig,
+        ALICE,
+        vec![RpcWalletRequest::Delegate(DelegateParams {
+            space: space_name.clone(),
+        })],
+        false,
+    ).await?;
+    assert!(wallet_res_err(&delegate).is_ok());
+    mine_and_sync(rig, 1).await?;
+
+    // Verify delegation is set up
+    let sptr = rig.spaced.client.get_delegation(space_name.clone()).await?
+        .expect("delegation should be established");
+    println!("Delegation established, SPTR: {}", sptr);
+
+    // Make a commitment
+    let commitment_root = [42u8; 32];
+    println!("Creating commitment with root: {}", hex::encode(&commitment_root));
+    let commit = wallet_do(
+        rig,
+        ALICE,
+        vec![RpcWalletRequest::Commit(CommitParams {
+            space: space_name.clone(),
+            root: Some(sha256::Hash::from_slice(&commitment_root).expect("valid")),
+        })],
+        false,
+    ).await?;
+    assert!(wallet_res_err(&commit).is_ok());
+    mine_and_sync(rig, 36).await?;
+
+    // Verify commitment exists
+    let commitment = rig.spaced.client.get_commitment(space_name.clone(), None).await?
+        .expect("commitment should exist");
+    assert_eq!(commitment.state_root, commitment_root);
+    println!("✓ Commitment created at block height: {}", commitment.block_height);
+
+    // Test 1: prove_certificate with prefer_recent=false (no specific commitment)
+    println!("\nTest 1: prove_certificate with prefer_recent=true");
+    let cert_result = rig.spaced.client.prove_certificate(
+        space_name.clone(),
+        None,  // no specific commitment root
+        None,  // prefer_recent
+    ).await?;
+
+    // Verify the result contains expected data
+    assert_eq!(cert_result.space, space_name, "space name should match");
+    assert!(cert_result.spaceout_proof.len() > 0, "spaceout proof should not be empty");
+    assert!(cert_result.ptrs_proof.len() > 0, "ptrs proof should not be empty");
+
+    // Verify commitment is included
+    let returned_commitment = cert_result.commitment
+        .expect("commitment should be included in result");
+    assert_eq!(returned_commitment.state_root, commitment_root, "commitment root should match");
+    println!("✓ prove_certificate returned commitment with root: {}", hex::encode(&returned_commitment.state_root));
+
+    let commitment_key = CommitmentKey::new
+        ::<Sha256>(&space_name, returned_commitment.state_root);
+
+    let ptrs_subtree : SubTree<Sha256Hasher> = SubTree::from_slice(cert_result.ptrs_proof.as_slice())
+        .expect("valid ptrs subtree");
+
+    assert!(ptrs_subtree.contains(&commitment_key.into())
+                .expect("commitment key exists"), "should be there");
+
+
+    // Test 2: prove_certificate with specific commitment root
+    println!("\nTest 2: prove_certificate with specific commitment root");
+    let cert_result2 = rig.spaced.client.prove_certificate(
+        space_name.clone(),
+        Some(sha256::Hash::from_slice(&commitment_root).expect("valid")),
+        Some(true),
+    ).await?;
+
+    let returned_commitment2 = cert_result2.commitment
+        .expect("commitment should be included");
+    assert_eq!(returned_commitment2.state_root, commitment_root, "specific commitment should be returned");
+    println!("✓ prove_certificate returned specific commitment");
+
+
+    // Test 3: prove_certificate with prefer_recent=false (older snapshot)
+    println!("\nTest 3: prove_certificate with prefer_recent=false");
+    let cert_result3 = rig.spaced.client.prove_certificate(
+        space_name.clone(),
+        None,
+        Some(false),  // prefer older snapshot
+    ).await?;
+
+    assert_eq!(cert_result3.space, space_name, "space name should match");
+    println!("✓ prove_certificate with prefer_recent=false succeeded");
+    println!("  Block anchor height: {}", cert_result3.block.height);
+
+    // Test 4: prove_certificate without commitment (space with no commitment)
+    println!("\nTest 4: prove_certificate for space without commitment");
+    // Get another space without commitment
+    let alice_spaces2 = rig.spaced.client.wallet_list_spaces(ALICE).await?;
+    if alice_spaces2.owned.len() > 1 {
+        let space2 = &alice_spaces2.owned[1];
+        let space2_name = space2.spaceout.space.as_ref()
+            .expect("space must exist").name.clone();
+
+        // Try prove_certificate - should work but return None for commitment
+        let cert_no_commit = rig.spaced.client.prove_certificate(
+            space2_name.clone(),
+            None,
+            Some(true),
+        ).await?;
+
+        // Should have spaceout proof but no commitment
+        assert!(cert_no_commit.spaceout_proof.len() > 0, "spaceout proof should exist");
+        println!("✓ prove_certificate for space without commitment: commitment={:?}",
+            cert_no_commit.commitment.as_ref().map(|c| hex::encode(&c.state_root)));
+    }
+
+    Ok(())
+}
+
 // ============== Main Test Runner ==============
 
 #[tokio::test]
@@ -797,6 +1052,9 @@ async fn run_ptr_tests() -> anyhow::Result<()> {
     println!("\n=== Running SPTR Uniqueness Tests ===");
     it_should_reject_duplicate_sptr_delegations(&rig).await?;
 
+    println!("\n=== Running Transfer-Back Delegation Restoration Tests ===");
+    it_should_restore_delegation_when_transferring_back(&rig).await?;
+
     println!("\n=== Running Commitment & Rollback Tests ===");
     it_should_commit_and_rollback(&rig).await?;
 
@@ -811,6 +1069,9 @@ async fn run_ptr_tests() -> anyhow::Result<()> {
 
     println!("\n=== Running PTR Data Tests ===");
     it_should_set_and_persist_ptr_data(&rig).await?;
+
+    println!("\n=== Running Prove Certificate Tests ===");
+    it_should_prove_certificate_with_commitment(&rig).await?;
 
     println!("\n=== All tests passed! ===");
     Ok(())

@@ -1235,10 +1235,11 @@ async fn it_should_allow_sign_verify_messages(rig: &TestRig) -> anyhow::Result<(
     let space_name = space.spaceout.space.as_ref().unwrap().name.to_string();
 
     let msg = NostrEvent::new(1, "hello world", vec![]);
+    let space_or_ptr = SpaceOrPtr::Space(SLabel::from_str(&space_name).unwrap());
     let signed = rig
         .spaced
         .client
-        .wallet_sign_event(BOB, &space_name, msg.clone())
+        .wallet_sign_event(BOB, space_or_ptr.clone(), msg.clone())
         .await
         .expect("sign");
 
@@ -1247,7 +1248,7 @@ async fn it_should_allow_sign_verify_messages(rig: &TestRig) -> anyhow::Result<(
 
     rig.spaced
         .client
-        .verify_event(&space_name, signed.clone())
+        .verify_event(space_or_ptr, signed.clone())
         .await
         .expect("verify");
 
