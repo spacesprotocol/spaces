@@ -282,9 +282,9 @@ dependencies = [
 
 [[package]]
 name = "bitcoin"
-version = "0.32.2"
+version = "0.32.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ea507acc1cd80fc084ace38544bbcf7ced7c2aa65b653b102de0ce718df668f6"
+checksum = "1e499f9fc0407f50fe98af744ab44fa67d409f76b6772e1689ec8485eb0c0f66"
 dependencies = [
  "base58ck",
  "base64 0.21.7",
@@ -1006,9 +1006,9 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
 name = "hex-conservative"
-version = "0.2.1"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5313b072ce3c597065a808dbf612c4c8e8590bdbf8b579508bf7a762c5eae6cd"
+checksum = "fda06d18ac606267c40c04e41b9947729bf8b9efe74bd4e82b61a5f26a510b9f"
 dependencies = [
  "arrayvec",
 ]
@@ -2187,18 +2187,28 @@ dependencies = [
 
 [[package]]
 name = "serde"
-version = "1.0.200"
+version = "1.0.228"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ddc6f9cc94d67c0e21aaf7eda3a010fd3af78ebf6e096aa6e2e13c79749cce4f"
+checksum = "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e"
+dependencies = [
+ "serde_core",
+ "serde_derive",
+]
+
+[[package]]
+name = "serde_core"
+version = "1.0.228"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "41d385c7d4ca58e59fc732af25c3983b67ac852c1a25000afe1175de458b67ad"
 dependencies = [
  "serde_derive",
 ]
 
 [[package]]
 name = "serde_derive"
-version = "1.0.200"
+version = "1.0.228"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "856f046b9400cee3c8c94ed572ecdb752444c24528c035cd35882aad6f492bcb"
+checksum = "d540f220d3187173da220f885ab66608367b6574e925011a9353e4badda91d79"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2316,10 +2326,11 @@ dependencies = [
 
 [[package]]
 name = "spacedb"
-version = "0.0.7"
-source = "git+https://github.com/spacesprotocol/spacedb#9496b2259df485f969b5d61f5445328fd8efe0ce"
+version = "0.0.9"
+source = "git+https://github.com/spacesprotocol/spacedb#1c5487d9693b284f8df74056c356d93361db8941"
 dependencies = [
  "bincode",
+ "borsh",
  "hex",
  "libc",
  "sha2",
@@ -2367,8 +2378,6 @@ dependencies = [
  "bitcoin",
  "borsh",
  "borsh_utils",
- "log",
- "rand",
  "serde",
  "serde_json",
 ]
@@ -2382,10 +2391,7 @@ dependencies = [
  "borsh",
  "borsh_utils",
  "hex",
- "log",
- "rand",
  "serde",
- "serde_json",
  "spaces_protocol",
 ]
 
@@ -2398,11 +2404,11 @@ dependencies = [
  "bitcoind",
  "borsh",
  "hex",
- "hyper 0.14.28",
  "serde_json",
  "spacedb",
  "spaces_client",
  "spaces_protocol",
+ "tokio",
  "zip",
 ]
 
@@ -2596,6 +2602,7 @@ dependencies = [
  "libc",
  "mio",
  "num_cpus",
+ "parking_lot",
  "pin-project-lite",
  "signal-hook-registry",
  "socket2",

@@ -39,6 +39,7 @@ use spaces_protocol::{
 };
 use spaces_wallet::{
     bdk_wallet as bdk, bdk_wallet::template::Bip86, bitcoin::hashes::Hash as BitcoinHash,
+    bitcoin::secp256k1::schnorr,
     export::WalletExport, nostr::NostrEvent, Balance, DoubleUtxo, Listing, SpacesWallet,
     WalletConfig, WalletDescriptors, WalletOutput,
 };
@@ -48,7 +49,7 @@ use tokio::{
     task::JoinSet,
 };
 use spaces_protocol::hasher::Hash;
-use spaces_ptr::{PtrSource, FullPtrOut, PtrOut, Commitment, RegistryKey, CommitmentKey, RegistrySptrKey, PtrOutpointKey};
+use spaces_ptr::{PtrSource, FullPtrOut, PtrOut, Commitment, RegistryKey, CommitmentKey, RegistrySptrKey, PtrOutpointKey, RootAnchor, ChainProofRequest, PtrKeyKind};
 use spaces_ptr::sptr::Sptr;
 use spaces_wallet::bitcoin::hashes::sha256;
 use crate::auth::BasicAuthLayer;
@@ -85,22 +86,6 @@ pub struct ServerInfo {
 pub struct ChainInfo {
     pub blocks: u32,
     pub headers: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RootAnchor {
-    #[serde(
-        serialize_with = "serialize_hash",
-        deserialize_with = "deserialize_hash"
-    )]
-    pub spaces_root: spaces_protocol::hasher::Hash,
-    #[serde(
-        skip_serializing_if = "Option::is_none",
-        serialize_with = "serialize_optional_hash",
-        deserialize_with = "deserialize_optional_hash"
-    )]
-    pub ptrs_root: Option<spaces_protocol::hasher::Hash>,
-    pub block: ChainAnchor,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -194,9 +179,15 @@ pub enum ChainStateCommand {
         resp: Responder<anyhow::Result<()>>,
     },
     VerifyEvent {
-        space: String,
+        space_or_sptr: SpaceOrPtr,
         event: NostrEvent,
         resp: Responder<anyhow::Result<NostrEvent>>,
+    },
+    VerifySchnorr {
+        space_or_sptr: SpaceOrPtr,
+        message: Vec<u8>,
+        signature: Vec<u8>,
+        resp: Responder<anyhow::Result<()>>,
     },
     ProveSpaceout {
         outpoint: OutPoint,
@@ -214,6 +205,7 @@ pub enum ChainStateCommand {
     },
     ProvePtrOutpoint {
         sptr: Sptr,
+        prefer_recent: bool,
         resp: Responder<anyhow::Result<ProofResult>>,
     },
     ProveCommitment {
@@ -227,6 +219,16 @@ pub enum ChainStateCommand {
         commitment_root: Option<Hash>,
         prefer_recent: bool,
         resp: Responder<anyhow::Result<CertificateProofResult>>,
+    },
+    ProvePtrCertificate {
+        sptr: Sptr,
+        target_block_height: u32,
+        resp: Responder<anyhow::Result<PtrCertificateResult>>,
+    },
+    BuildChainProof {
+        request: ChainProofRequest,
+        prefer_recent: bool,
+        resp: Responder<anyhow::Result<ChainProofResult>>,
     },
     GetRootAnchors {
         resp: Responder<anyhow::Result<Vec<RootAnchor>>>,
@@ -327,7 +329,7 @@ pub trait Rpc {
     #[method(name = "verifyevent")]
     async fn verify_event(
         &self,
-        space: &str,
+        space_or_sptr: SpaceOrPtr,
         event: NostrEvent,
     ) -> Result<NostrEvent, ErrorObjectOwned>;
 
@@ -335,9 +337,32 @@ pub trait Rpc {
     async fn wallet_sign_event(
         &self,
         wallet: &str,
-        space: &str,
+        space_or_sptr: SpaceOrPtr,
         event: NostrEvent,
     ) -> Result<NostrEvent, ErrorObjectOwned>;
+
+    #[method(name = "walletsignschnorr")]
+    async fn wallet_sign_schnorr(
+        &self,
+        wallet: &str,
+        space_or_sptr: SpaceOrPtr,
+        message: Bytes,
+    ) -> Result<Bytes, ErrorObjectOwned>;
+
+    #[method(name = "walletcanoperate")]
+    async fn wallet_can_operate(
+        &self,
+        wallet: &str,
+        space: SLabel,
+    ) -> Result<bool, ErrorObjectOwned>;
+
+    #[method(name = "verifyschnorr")]
+    async fn verify_schnorr(
+        &self,
+        space_or_sptr: SpaceOrPtr,
+        message: Bytes,
+        signature: Bytes,
+    ) -> Result<bool, ErrorObjectOwned>;
 
     #[method(name = "walletgetinfo")]
     async fn wallet_get_info(&self, name: &str)
@@ -419,6 +444,7 @@ pub trait Rpc {
     async fn prove_ptr_outpoint(
         &self,
         sptr: Sptr,
+        prefer_recent: Option<bool>,
     ) -> Result<ProofResult, ErrorObjectOwned>;
 
     #[method(name = "provecommitment")]
@@ -436,6 +462,20 @@ pub trait Rpc {
         commitment_root: Option<sha256::Hash>,
         prefer_recent: Option<bool>,
     ) -> Result<CertificateProofResult, ErrorObjectOwned>;
+
+    #[method(name = "proveptrcertificate")]
+    async fn prove_ptr_certificate(
+        &self,
+        sptr: Sptr,
+        target_block_height: u32,
+    ) -> Result<PtrCertificateResult, ErrorObjectOwned>;
+
+    #[method(name = "buildchainproof")]
+    async fn build_chain_proof(
+        &self,
+        request: ChainProofRequest,
+        prefer_recent: Option<bool>,
+    ) -> Result<ChainProofResult, ErrorObjectOwned>;
 
     #[method(name = "getrootanchors")]
     async fn get_root_anchors(&self) -> Result<Vec<RootAnchor>, ErrorObjectOwned>;
@@ -672,58 +712,46 @@ pub struct CertificateProofResult {
     pub commitment: Option<Commitment>,
 }
 
-fn serialize_hash<S>(
-    bytes: &spaces_protocol::hasher::Hash,
-    serializer: S,
-) -> Result<S::Ok, S::Error>
-where
-    S: Serializer,
-{
-    if serializer.is_human_readable() {
-        serializer.serialize_str(&hex::encode(bytes))
-    } else {
-        serializer.serialize_bytes(bytes)
-    }
+/// Proof result for PTR certificate - proves either existence or non-existence of a PTR
+#[derive(Clone, Serialize, Deserialize)]
+pub struct PtrCertificateResult {
+    /// The block anchor this proof is generated against
+    pub block: ChainAnchor,
+    /// PTRs tree root
+    pub root: Bytes,
+    /// Proof for ptrout (if exists) or sptr exclusion proof (if not)
+    #[serde(
+        serialize_with = "serialize_base64",
+        deserialize_with = "deserialize_base64"
+    )]
+    pub proof: Vec<u8>,
+    /// The ptrout data (None if ptr doesn't exist)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ptrout: Option<PtrOut>,
 }
 
-fn deserialize_hash<'de, D>(deserializer: D) -> Result<spaces_protocol::hasher::Hash, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let mut bytes = [0u8; 32];
-    if deserializer.is_human_readable() {
-        let s = String::deserialize(deserializer)?;
-        hex::decode_to_slice(s, &mut bytes).map_err(serde::de::Error::custom)?;
-    } else {
-        spaces_protocol::hasher::Hash::deserialize(deserializer)?;
-    }
-    Ok(bytes)
-}
-
-fn serialize_optional_hash<S>(
-    bytes: &Option<spaces_protocol::hasher::Hash>,
-    serializer: S,
-) -> Result<S::Ok, S::Error>
-where
-    S: Serializer,
-{
-    match bytes {
-        Some(b) => serialize_hash(b, serializer),
-        None => serializer.serialize_none(),
-    }
-}
-
-fn deserialize_optional_hash<'de, D>(deserializer: D) -> Result<Option<spaces_protocol::hasher::Hash>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    Option::<String>::deserialize(deserializer)?
-        .map(|s| {
-            let mut bytes = [0u8; 32];
-            hex::decode_to_slice(s, &mut bytes).map_err(serde::de::Error::custom)?;
-            Ok(bytes)
-        })
-        .transpose()
+/// Combined proof result for a chain proof request containing subtrees from both
+/// spaces and ptrs trees at the same snapshot height.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ChainProofResult {
+    /// The block anchor these proofs are generated against
+    pub block: ChainAnchor,
+    /// Spaces tree root
+    pub spaces_root: Bytes,
+    /// Subtree proof for the spaces tree
+    #[serde(
+        serialize_with = "serialize_base64",
+        deserialize_with = "deserialize_base64"
+    )]
+    pub spaces_proof: Vec<u8>,
+    /// PTRs tree root
+    pub ptrs_root: Bytes,
+    /// Subtree proof for the ptrs tree
+    #[serde(
+        serialize_with = "serialize_base64",
+        deserialize_with = "deserialize_base64"
+    )]
+    pub ptrs_proof: Vec<u8>,
 }
 
 #[derive(Clone)]
@@ -1227,11 +1255,11 @@ impl RpcServer for RpcServerImpl {
 
     async fn verify_event(
         &self,
-        space: &str,
+        space_or_sptr: SpaceOrPtr,
         event: NostrEvent,
     ) -> Result<NostrEvent, ErrorObjectOwned> {
         self.store
-            .verify_event(space, event)
+            .verify_event(space_or_sptr, event)
             .await
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
     }
@@ -1239,13 +1267,52 @@ impl RpcServer for RpcServerImpl {
     async fn wallet_sign_event(
         &self,
         wallet: &str,
-        space: &str,
+        space_or_sptr: SpaceOrPtr,
         event: NostrEvent,
     ) -> Result<NostrEvent, ErrorObjectOwned> {
         self.wallet(&wallet)
             .await?
-            .send_sign_event(space, event)
+            .send_sign_event(space_or_sptr, event)
             .await
+            .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
+    }
+
+    async fn wallet_sign_schnorr(
+        &self,
+        wallet: &str,
+        space_or_sptr: SpaceOrPtr,
+        message: Bytes,
+    ) -> Result<Bytes, ErrorObjectOwned> {
+        self.wallet(&wallet)
+            .await?
+            .send_sign_schnorr(space_or_sptr, message.to_vec())
+            .await
+            .map(|sig| Bytes::new(sig.as_ref().to_vec()))
+            .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
+    }
+
+    async fn wallet_can_operate(
+        &self,
+        wallet: &str,
+        space: SLabel,
+    ) -> Result<bool, ErrorObjectOwned> {
+        self.wallet(&wallet)
+            .await?
+            .send_can_operate(space)
+            .await
+            .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
+    }
+
+    async fn verify_schnorr(
+        &self,
+        space_or_sptr: SpaceOrPtr,
+        message: Bytes,
+        signature: Bytes,
+    ) -> Result<bool, ErrorObjectOwned> {
+        self.store
+            .verify_schnorr(space_or_sptr, message.to_vec(), signature.to_vec())
+            .await
+            .map(|_| true)
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
     }
 
@@ -1395,9 +1462,10 @@ impl RpcServer for RpcServerImpl {
     async fn prove_ptr_outpoint(
         &self,
         sptr: Sptr,
+        prefer_recent: Option<bool>,
     ) -> Result<ProofResult, ErrorObjectOwned> {
         self.store
-            .prove_ptr_outpoint(sptr)
+            .prove_ptr_outpoint(sptr, prefer_recent.unwrap_or(false))
             .await
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
     }
@@ -1426,6 +1494,28 @@ impl RpcServer for RpcServerImpl {
                 commitment_root.map(|h| *h.as_ref()),
                 prefer_recent.unwrap_or(false),
             )
+            .await
+            .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
+    }
+
+    async fn prove_ptr_certificate(
+        &self,
+        sptr: Sptr,
+        target_block_height: u32,
+    ) -> Result<PtrCertificateResult, ErrorObjectOwned> {
+        self.store
+            .prove_ptr_certificate(sptr, target_block_height)
+            .await
+            .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
+    }
+
+    async fn build_chain_proof(
+        &self,
+        request: ChainProofRequest,
+        prefer_recent: Option<bool>,
+    ) -> Result<ChainProofResult, ErrorObjectOwned> {
+        self.store
+            .build_chain_proof(request, prefer_recent.unwrap_or(false))
             .await
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
     }
@@ -1757,12 +1847,28 @@ impl AsyncChainState {
                     SpacesWallet::verify_listing::<Sha256>(state, &listing).map(|_| ()),
                 );
             }
-            ChainStateCommand::VerifyEvent { space, event, resp } => {
-                _ = resp.send(SpacesWallet::verify_event::<Sha256>(
+            ChainStateCommand::VerifyEvent { space_or_sptr, event, resp } => {
+                let space_or_sptr = match space_or_sptr {
+                    SpaceOrPtr::Space(label) => spaces_wallet::SpaceOrSptr::Space(label),
+                    SpaceOrPtr::Ptr(sptr) => spaces_wallet::SpaceOrSptr::Sptr(sptr),
+                };
+                _ = resp.send(SpacesWallet::verify_event::<Sha256, _>(
                     state,
-                    &space,
+                    space_or_sptr,
                     event,
                 ));
+            }
+            ChainStateCommand::VerifySchnorr { space_or_sptr, message, signature, resp } => {
+                let result = (|| {
+                    let space_or_sptr = match space_or_sptr {
+                        SpaceOrPtr::Space(label) => spaces_wallet::SpaceOrSptr::Space(label),
+                        SpaceOrPtr::Ptr(sptr) => spaces_wallet::SpaceOrSptr::Sptr(sptr),
+                    };
+                    let sig = schnorr::Signature::from_slice(&signature)
+                        .map_err(|_| anyhow!("Invalid signature format"))?;
+                    SpacesWallet::verify_schnorr::<Sha256, _>(state, space_or_sptr, &message, &sig)
+                })();
+                _ = resp.send(result);
             }
             ChainStateCommand::ProveSpaceout {
                 prefer_recent,
@@ -1797,11 +1903,13 @@ impl AsyncChainState {
             }
             ChainStateCommand::ProvePtrOutpoint {
                 sptr,
+                prefer_recent,
                 resp,
             } => {
                 _ = resp.send(Self::handle_prove_ptr_outpoint(
                     state,
                     sptr,
+                    prefer_recent,
                 ));
             }
             ChainStateCommand::ProveCommitment {
@@ -1827,6 +1935,28 @@ impl AsyncChainState {
                     state,
                     space,
                     commitment_root,
+                    prefer_recent,
+                ));
+            }
+            ChainStateCommand::ProvePtrCertificate {
+                sptr,
+                target_block_height,
+                resp,
+            } => {
+                _ = resp.send(Self::handle_prove_ptr_certificate(
+                    state,
+                    sptr,
+                    target_block_height,
+                ));
+            }
+            ChainStateCommand::BuildChainProof {
+                request,
+                prefer_recent,
+                resp,
+            } => {
+                _ = resp.send(Self::handle_build_chain_proof(
+                    state,
+                    request,
                     prefer_recent,
                 ));
             }
@@ -1982,7 +2112,7 @@ impl AsyncChainState {
                     _ => return Err(anyhow!("Cannot find older proofs for a non-registered space (try with oldest: false)")),
                 }
             };
-            state.prove_spaces_with_snapshot(&[key.into()], target_snapshot)?
+            state.prove_spaces_with_snapshot(&[key.into()], target_snapshot)?.1
         } else {
             let snapshot = state.spaces_inner()?;
             snapshot.prove(&[key.into()], ProofType::Standard)?
@@ -2003,20 +2133,40 @@ impl AsyncChainState {
     fn handle_prove_ptr_outpoint(
         state: &mut Chain,
         sptr: Sptr,
+        prefer_recent: bool,
     ) -> anyhow::Result<ProofResult> {
-        let snapshot = state.ptrs_mut().state.inner()?;
+        let key: Hash = sptr.into();
 
-        // warm up hash cache
-        let root = snapshot.compute_root()?;
-        let proof = snapshot.prove(&[sptr.to_bytes().into()], ProofType::Standard)?;
+        let proof = if !prefer_recent {
+            let ptr_info = match state.get_ptr_info(&sptr)? {
+                Some(info) => info,
+                None => {
+                    return Err(anyhow!(
+                        "Cannot find older proofs for a non-existent sptr (try with prefer_recent: true)"
+                    ))
+                }
+            };
+            let last_update = ptr_info.ptrout.sptr
+                .as_ref()
+                .map(|p| p.last_update)
+                .unwrap_or(0);
+            let tip = state.ptrs_tip();
+            let target_snapshot = Self::compute_target_snapshot(last_update, tip.height);
+            state.prove_ptrs_with_snapshot(&[key], target_snapshot)?.1
+        } else {
+            let snapshot = state.ptrs_mut().state.inner()?;
+            snapshot.prove(&[key], ProofType::Standard)?
+        };
 
+        let root = proof.compute_root()?.to_vec();
+        info!("Proving SPTR with root anchor {}", hex::encode(root.as_slice()));
         let mut buf = vec![0u8; 4096];
         let offset = proof.write_to_slice(&mut buf)?;
         buf.truncate(offset);
 
         Ok(ProofResult {
             proof: buf,
-            root: Bytes::new(root.to_vec()),
+            root: Bytes::new(root),
         })
     }
 
@@ -2048,7 +2198,7 @@ impl AsyncChainState {
                     ))
                 }
             };
-            state.prove_ptrs_with_snapshot(&[key.into()], target_snapshot)?
+            state.prove_ptrs_with_snapshot(&[key.into()], target_snapshot)?.1
         } else {
             let snapshot = state.ptrs_mut().state.inner()?;
             snapshot.prove(&[key.into()], ProofType::Standard)?
@@ -2087,7 +2237,7 @@ impl AsyncChainState {
             // Use the block_height from the commitment to find an appropriate snapshot
             let tip = state.ptrs_tip();
             let target_snapshot = Self::compute_target_snapshot(commitment.block_height, tip.height);
-            state.prove_ptrs_with_snapshot(&[key.into()], target_snapshot)?
+            state.prove_ptrs_with_snapshot(&[key.into()], target_snapshot)?.1
         } else {
             let snapshot = state.ptrs_mut().state.inner()?;
             snapshot.prove(&[key.into()], ProofType::Standard)?
@@ -2102,6 +2252,112 @@ impl AsyncChainState {
         Ok(ProofResult {
             proof: buf,
             root: Bytes::new(root),
+        })
+    }
+
+    fn handle_build_chain_proof(
+        state: &mut Chain,
+        mut request: ChainProofRequest,
+        prefer_recent: bool,
+    ) -> anyhow::Result<ChainProofResult> {
+        let mut most_recent_update = 0u32;
+        let mut space_tree_keys: Vec<Hash> = Vec::new();
+        let mut ptr_tree_keys: Vec<Hash> = Vec::new();
+
+        for space in request.spaces {
+            let space_key = SpaceKey::from(Sha256::hash(space.as_ref()));
+            let fso = state.get_space_info(&space_key)?
+                .ok_or_else(|| anyhow!("Space not found: {}", space))?;
+
+            space_tree_keys.push(space_key.into());
+            if let Some(space) = &fso.spaceout.space {
+                if let Covenant::Transfer { expire_height, .. } = &space.covenant {
+                    let last_update = expire_height
+                        .saturating_sub(spaces_protocol::constants::RENEWAL_INTERVAL);
+                    most_recent_update = std::cmp::max(most_recent_update, last_update);
+                }
+            }
+
+            let sptr = Sptr::from_spk::<Sha256>(fso.spaceout.script_pubkey);
+            request.ptrs_keys.push(PtrKeyKind::Sptr(sptr));
+        }
+
+        for key in request.ptrs_keys {
+            match key {
+                PtrKeyKind::Sptr(sptr) => {
+                    let fpt = state.get_ptr_info(&sptr)?;
+                    if let Some(fpt) = fpt {
+                        if let Some(ptr) = &fpt.ptrout.sptr {
+                            ptr_tree_keys.push(
+                                PtrOutpointKey::from_outpoint::<Sha256>(fpt.outpoint()).into()
+                            );
+                            most_recent_update = std::cmp::max(most_recent_update, ptr.last_update);
+                        } else {
+                            ptr_tree_keys.push(sptr.into());
+                        }
+                    } else {
+                        // non-existence proof
+                        ptr_tree_keys.push(sptr.into());
+                    }
+                }
+                PtrKeyKind::Commitment(k) => ptr_tree_keys.push(k.into()),
+                PtrKeyKind::Registry(k) => ptr_tree_keys.push(k.into()),
+            }
+        }
+
+        let (spaces_proof, spaces_root, block_anchor, ptrs_proof, ptrs_root) = if prefer_recent {
+            let spaces_snapshot = state.spaces_inner()?;
+            let spaces_root = spaces_snapshot.compute_root()?;
+            let spaces_anchor: ChainAnchor = spaces_snapshot.metadata().try_into()?;
+            let spaces_proof = spaces_snapshot.prove(&space_tree_keys, ProofType::Standard)?;
+
+            let ptrs_snapshot = state.ptrs_mut().state.inner()?;
+            let ptrs_anchor: ChainAnchor = ptrs_snapshot.metadata().try_into()?;
+            if spaces_anchor != ptrs_anchor {
+                return Err(anyhow!(
+                    "Spaces and PTRs snapshots have mismatched anchors (spaces: {}, ptrs: {})",
+                    spaces_anchor.height,
+                    ptrs_anchor.height
+                ));
+            }
+            let ptrs_proof = ptrs_snapshot.prove(&ptr_tree_keys, ProofType::Standard)?;
+            let ptrs_root = ptrs_proof.compute_root()?;
+
+            (spaces_proof, spaces_root, spaces_anchor, ptrs_proof, ptrs_root)
+        } else {
+            let tip = state.tip();
+            let target_snapshot = Self::compute_target_snapshot(most_recent_update, tip.height);
+
+            let (spaces_anchor, spaces_proof) = state.prove_spaces_with_snapshot(&space_tree_keys, target_snapshot)?;
+            let spaces_root = spaces_proof.compute_root()?;
+
+            let (ptrs_anchor, ptrs_proof) = state.prove_ptrs_with_snapshot(&ptr_tree_keys, target_snapshot)?;
+            let ptrs_root = ptrs_proof.compute_root()?;
+
+            if spaces_anchor != ptrs_anchor {
+                return Err(anyhow!(
+                    "Spaces and PTRs snapshots at height {} have mismatched anchors",
+                    target_snapshot
+                ));
+            }
+
+            (spaces_proof, spaces_root, spaces_anchor, ptrs_proof, ptrs_root)
+        };
+
+        let mut spaces_buf = vec![0u8; 4096];
+        let offset = spaces_proof.write_to_slice(&mut spaces_buf)?;
+        spaces_buf.truncate(offset);
+
+        let mut ptrs_buf = vec![0u8; 8192];
+        let offset = ptrs_proof.write_to_slice(&mut ptrs_buf)?;
+        ptrs_buf.truncate(offset);
+
+        Ok(ChainProofResult {
+            block: block_anchor,
+            spaces_root: Bytes::new(spaces_root.to_vec()),
+            spaces_proof: spaces_buf,
+            ptrs_root: Bytes::new(ptrs_root.to_vec()),
+            ptrs_proof: ptrs_buf,
         })
     }
 
@@ -2142,8 +2398,55 @@ impl AsyncChainState {
             }
         };
 
-        // Determine target snapshot based on the most recent last_update across all items
-        let target_snapshot = if !prefer_recent {
+        // Generate spaceout proof using OutpointKey
+        let spaceout_key = OutpointKey::from_outpoint::<Sha256>(full_spaceout.outpoint());
+
+        // Collect ptrs keys to prove
+        let mut ptrs_keys: Vec<Hash> = Vec::new();
+
+        // Add ptrout key if we have one
+        if let Some(ref fpo) = full_ptrout {
+            let ptr_outpoint = OutPoint::new(fpo.txid, fpo.ptrout.n as u32);
+            let key = PtrOutpointKey::from_outpoint::<Sha256>(ptr_outpoint);
+            ptrs_keys.push(key.into());
+        } else {
+            // non-existence proof
+            ptrs_keys.push(sptr.into());
+        }
+
+        // Add commitment key if requested
+        if let Some(c) = commitment.as_ref() {
+            let key = CommitmentKey::new::<Sha256>(&space, c.state_root);
+            ptrs_keys.push(key.into());
+        }
+
+        // In all cases, prove the commitments tip
+        // Needed to prove space has no commitments (exclusion) OR
+        // whether the proven commitment is the most recent (needed for temporary certificates)
+        ptrs_keys.push(registry_key.into());
+
+        let (spaces_proof, spaces_root, block_anchor, ptrs_proof, ptrs_root) = if prefer_recent {
+            // Use current snapshot directly
+            let spaces_snapshot = state.spaces_inner()?;
+            let spaces_root = spaces_snapshot.compute_root()?;
+            let spaces_anchor: ChainAnchor = spaces_snapshot.metadata().try_into()?;
+            let spaces_proof = spaces_snapshot.prove(&[spaceout_key.into()], ProofType::Standard)?;
+
+            let ptrs_snapshot = state.ptrs_mut().state.inner()?;
+            let ptrs_anchor: ChainAnchor = ptrs_snapshot.metadata().try_into()?;
+            if spaces_anchor != ptrs_anchor {
+                return Err(anyhow!(
+                    "Spaces and PTRs snapshots have mismatched anchors (spaces: {}, ptrs: {})",
+                    spaces_anchor.height,
+                    ptrs_anchor.height
+                ));
+            }
+            let ptrs_proof = ptrs_snapshot.prove(&ptrs_keys, ProofType::Standard)?;
+            let ptrs_root = ptrs_proof.compute_root()?;
+
+            (spaces_proof, spaces_root, spaces_anchor, ptrs_proof, ptrs_root)
+        } else {
+            // Determine target snapshot based on the most recent last_update across all items
             let mut most_recent_update: u32 = 0;
 
             // Check spaceout last update
@@ -2168,25 +2471,22 @@ impl AsyncChainState {
             }
 
             let tip = state.tip();
-            Self::compute_target_snapshot(most_recent_update, tip.height)
-        } else {
-            0 // Will use current snapshot
-        };
+            let target_snapshot = Self::compute_target_snapshot(most_recent_update, tip.height);
 
-        // Generate spaceout proof using OutpointKey
-        let spaceout_key = OutpointKey::from_outpoint::<Sha256>(full_spaceout.outpoint());
-        let (spaces_proof, spaces_root, block_anchor) = if prefer_recent {
-            let snapshot = state.spaces_inner()?;
-            let root = snapshot.compute_root()?;
-            let meta: ChainAnchor = snapshot.metadata().try_into()?;
-            let proof = snapshot.prove(&[spaceout_key.into()], ProofType::Standard)?;
-            (proof, root, meta)
-        } else {
-            let proof = state.prove_spaces_with_snapshot(&[spaceout_key.into()], target_snapshot)?;
-            let root = proof.compute_root()?;
-            // Get block anchor from the snapshot
-            let anchor = ChainAnchor::new(root, target_snapshot);
-            (proof, root, anchor)
+            let (spaces_anchor, spaces_proof) = state.prove_spaces_with_snapshot(&[spaceout_key.into()], target_snapshot)?;
+            let spaces_root = spaces_proof.compute_root()?;
+
+            let (ptrs_anchor, ptrs_proof) = state.prove_ptrs_with_snapshot(&ptrs_keys, target_snapshot)?;
+            let ptrs_root = ptrs_proof.compute_root()?;
+
+            if spaces_anchor != ptrs_anchor {
+                return Err(anyhow!(
+                    "Spaces and PTRs snapshots at height {} have mismatched anchors",
+                    target_snapshot
+                ));
+            }
+
+            (spaces_proof, spaces_root, spaces_anchor, ptrs_proof, ptrs_root)
         };
 
         let mut spaceout_buf = vec![0u8; 4096];
@@ -2194,46 +2494,11 @@ impl AsyncChainState {
         spaceout_buf.truncate(offset);
 
         info!("Proving certificate with spaces root {}", hex::encode(spaces_root));
+        info!("Proving certificate with ptrs root {}", hex::encode(ptrs_root));
 
-        let (ptrs_root, ptrs_proof) = {
-            // Collect keys to prove
-            let mut ptrs_keys: Vec<Hash> = Vec::new();
-
-            // Add ptrout key if we have one
-            if let Some(ref fpo) = full_ptrout {
-                let ptr_outpoint = OutPoint::new(fpo.txid, fpo.ptrout.n as u32);
-                let key = PtrOutpointKey::from_outpoint::<Sha256>(ptr_outpoint);
-                ptrs_keys.push(key.into());
-            } else {
-                // non-existence proof
-                ptrs_keys.push(sptr.into());
-            }
-
-            // Add commitment key if requested
-            if let Some(c) = commitment.as_ref() {
-                let key = CommitmentKey::new::<Sha256>(&space, c.state_root);
-                ptrs_keys.push(key.into());
-            } else {
-                ptrs_keys.push(registry_key.into());
-            }
-
-            // Generate combined proof at the same target snapshot
-            let proof = if prefer_recent {
-                let snapshot = state.ptrs_mut().state.inner()?;
-                snapshot.prove(&ptrs_keys, ProofType::Standard)?
-            } else {
-                state.prove_ptrs_with_snapshot(&ptrs_keys, target_snapshot)?
-            };
-
-            let root = proof.compute_root()?;
-            info!("Proving certificate with ptrs root {}", hex::encode(root));
-
-            let mut ptrs_buf = vec![0u8; 8192];
-            let offset = proof.write_to_slice(&mut ptrs_buf)?;
-            ptrs_buf.truncate(offset);
-
-            (Bytes::new(root.to_vec()), ptrs_buf)
-        };
+        let mut ptrs_buf = vec![0u8; 8192];
+        let offset = ptrs_proof.write_to_slice(&mut ptrs_buf)?;
+        ptrs_buf.truncate(offset);
 
         Ok(CertificateProofResult {
             block: block_anchor,
@@ -2241,10 +2506,69 @@ impl AsyncChainState {
             spaceout_proof: spaceout_buf,
             spaceout: spaceout.clone(),
             space,
-            ptrs_root,
-            ptrs_proof,
+            ptrs_root: Bytes::new(ptrs_root.to_vec()),
+            ptrs_proof: ptrs_buf,
             ptrout,
             commitment,
+        })
+    }
+
+    fn handle_prove_ptr_certificate(
+        state: &mut Chain,
+        sptr: Sptr,
+        target_block_height: u32,
+    ) -> anyhow::Result<PtrCertificateResult> {
+        let sptr_key: Hash = sptr.into();
+
+        // Check if ptr exists
+        let ptr_info = state.get_ptr_info(&sptr)?;
+
+        let (block, proof, ptrout) = match ptr_info {
+            Some(info) => {
+                // PTR exists - prove the ptrout key
+                let outpoint = OutPoint {
+                    txid: info.txid,
+                    vout: info.ptrout.n as u32,
+                };
+                let ptrout_key = PtrOutpointKey::from_outpoint::<Sha256>(outpoint);
+
+                let (anchor, proof) = state.prove_ptrs_with_snapshot(
+                    &[ptrout_key.into()],
+                    target_block_height,
+                )?;
+
+                (anchor, proof, Some(info.ptrout))
+            }
+            None => {
+                // PTR doesn't exist - prove sptr exclusion
+                let (anchor, proof) = state.prove_ptrs_with_snapshot(
+                    &[sptr_key],
+                    target_block_height,
+                )?;
+
+                (anchor, proof, None)
+            }
+        };
+
+        let root = proof.compute_root()?;
+
+        // Serialize the proof
+        let mut buf = vec![0u8; 4096];
+        let offset = proof.write_to_slice(&mut buf)?;
+        buf.truncate(offset);
+
+        info!(
+            "Proving PTR certificate for sptr {} at block {}, exists: {}",
+            sptr,
+            target_block_height,
+            ptrout.is_some()
+        );
+
+        Ok(PtrCertificateResult {
+            block,
+            root: Bytes::new(root.to_vec()),
+            proof: buf,
+            ptrout,
         })
     }
 
@@ -2286,12 +2610,30 @@ impl AsyncChainState {
         resp_rx.await?
     }
 
-    pub async fn verify_event(&self, space: &str, event: NostrEvent) -> anyhow::Result<NostrEvent> {
+    pub async fn verify_event(&self, space_or_sptr: SpaceOrPtr, event: NostrEvent) -> anyhow::Result<NostrEvent> {
         let (resp, resp_rx) = oneshot::channel();
         self.sender
             .send(ChainStateCommand::VerifyEvent {
-                space: space.to_string(),
+                space_or_sptr,
                 event,
+                resp,
+            })
+            .await?;
+        resp_rx.await?
+    }
+
+    pub async fn verify_schnorr(
+        &self,
+        space_or_sptr: SpaceOrPtr,
+        message: Vec<u8>,
+        signature: Vec<u8>,
+    ) -> anyhow::Result<()> {
+        let (resp, resp_rx) = oneshot::channel();
+        self.sender
+            .send(ChainStateCommand::VerifySchnorr {
+                space_or_sptr,
+                message,
+                signature,
                 resp,
             })
             .await?;
@@ -2341,11 +2683,12 @@ impl AsyncChainState {
         resp_rx.await?
     }
 
-    pub async fn prove_ptr_outpoint(&self, sptr: Sptr) -> anyhow::Result<ProofResult> {
+    pub async fn prove_ptr_outpoint(&self, sptr: Sptr, prefer_recent: bool) -> anyhow::Result<ProofResult> {
         let (resp, resp_rx) = oneshot::channel();
         self.sender
             .send(ChainStateCommand::ProvePtrOutpoint {
                 sptr,
+                prefer_recent,
                 resp,
             })
             .await?;
@@ -2381,6 +2724,38 @@ impl AsyncChainState {
             .send(ChainStateCommand::ProveCertificate {
                 space,
                 commitment_root,
+                prefer_recent,
+                resp,
+            })
+            .await?;
+        resp_rx.await?
+    }
+
+    pub async fn prove_ptr_certificate(
+        &self,
+        sptr: Sptr,
+        target_block_height: u32,
+    ) -> anyhow::Result<PtrCertificateResult> {
+        let (resp, resp_rx) = oneshot::channel();
+        self.sender
+            .send(ChainStateCommand::ProvePtrCertificate {
+                sptr,
+                target_block_height,
+                resp,
+            })
+            .await?;
+        resp_rx.await?
+    }
+
+    pub async fn build_chain_proof(
+        &self,
+        request: ChainProofRequest,
+        prefer_recent: bool,
+    ) -> anyhow::Result<ChainProofResult> {
+        let (resp, resp_rx) = oneshot::channel();
+        self.sender
+            .send(ChainStateCommand::BuildChainProof {
+                request,
                 prefer_recent,
                 resp,
             })

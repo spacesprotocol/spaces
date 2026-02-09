@@ -6,7 +6,7 @@ use bitcoin::{
     secp256k1::{schnorr, schnorr::Signature},
     Amount, OutPoint, Transaction, TxOut,
 };
-
+use bitcoin::taproot::LeafVersion;
 use crate::{errors::Result, hasher::{KeyHasher, SpaceKey}, script::{OpenResult}, Bytes, SpaceOut};
 use crate::script::{find_op_set_data, load_open_context, OpenContext};
 
@@ -113,8 +113,10 @@ impl TxContext {
 
             // Check for a name revealed in the witness
             if auctioned_output.is_some() && proposed_space.is_none() {
-                if let Some(script) = input.witness.tapscript() {
-                    proposed_space = load_open_context::<T, H>(src, script)?
+                if let Some(leaf_script) = input.witness
+                    .taproot_leaf_script()
+                    .filter(|ls| ls.version == LeafVersion::TapScript) {
+                    proposed_space = load_open_context::<T, H>(src, leaf_script.script)?
                         .map(|o| (n, o));
                 }
             }

@@ -1,12 +1,13 @@
 use std::{
     net::Ipv4Addr,
+    path::PathBuf,
     process::{Child, Stdio},
     time::Duration,
 };
 
 use anyhow::Result;
 use assert_cmd::cargo::CommandCargoExt;
-use bitcoind::{anyhow, anyhow::anyhow, get_available_port, tempfile::tempdir};
+use bitcoind::{anyhow, anyhow::anyhow, get_available_port, tempfile::{tempdir, TempDir}};
 use spaces_client::{
     auth::{auth_token_from_creds, http_client_with_auth},
     jsonrpsee::{http_client::HttpClient, tokio},
@@ -18,12 +19,14 @@ const LOCAL_IP: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 1);
 
 /// Conf a similar structure to bitcoind crate configuration
 #[non_exhaustive]
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, Clone)]
 pub struct Conf<'a> {
     /// Spaced command line arguments e.g. `vec!["--chain", "regtest"]`
     /// note that `--rpc-port`, `--data-dir` are automatically initialized.
     pub args: Vec<&'a str>,
     pub view_stdout: bool,
+    /// Optional fixed data directory. If None, a temp directory is used.
+    pub data_dir: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -31,6 +34,8 @@ pub struct SpaceD {
     process: Child,
     pub client: HttpClient,
     rpc_port: u16,
+    /// Temp directory handle - keeps it alive until SpaceD is dropped
+    _data_dir_tempdir: Option<TempDir>,
 }
 
 impl SpaceD {
@@ -44,19 +49,31 @@ impl SpaceD {
         };
 
         let args: Vec<_> = conf.args.into_iter().map(String::from).collect();
-        let process = tokio::task::spawn_blocking(move || -> Result<Child> {
-            Ok(std::process::Command::cargo_bin("spaced")?
+        let data_dir = conf.data_dir.clone();
+        let (process, tempdir_handle) = tokio::task::spawn_blocking(move || -> Result<(Child, Option<TempDir>)> {
+            let (data_dir_path, tempdir_handle) = match data_dir {
+                Some(path) => (path, None),
+                None => {
+                    let td = tempdir()?;
+                    let path = td.path().to_path_buf();
+                    (path, Some(td))
+                }
+            };
+
+            let child = std::process::Command::cargo_bin("spaced")?
                 .args(args)
                 .arg("--rpc-port")
                 .arg(rpc_port.to_string())
                 .arg("--data-dir")
-                .arg(tempdir()?.path())
+                .arg(&data_dir_path)
                 .arg("--rpc-user")
                 .arg("user")
                 .arg("--rpc-password")
                 .arg("pass")
                 .stdout(stdout)
-                .spawn()?)
+                .spawn()?;
+
+            Ok((child, tempdir_handle))
         })
         .await
         .expect("spawn blocking task")?;
@@ -68,6 +85,7 @@ impl SpaceD {
             process,
             rpc_port,
             client,
+            _data_dir_tempdir: tempdir_handle,
         };
 
         let mut i = 0;

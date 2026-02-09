@@ -186,7 +186,6 @@ pub fn ns_hash<H: KeyHasher>(kind: KeyKind, data: [u8; 32]) -> [u8; 32] {
 
 
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "borsh", derive(BorshSerialize, BorshDeserialize))]
 pub struct RegistryKey([u8; 32]);
 
@@ -196,7 +195,6 @@ pub struct RegistryKey([u8; 32]);
 pub struct RegistrySptrKey([u8; 32]);
 
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "borsh", derive(BorshSerialize, BorshDeserialize))]
 pub struct CommitmentKey([u8; 32]);
 
@@ -204,6 +202,47 @@ pub struct CommitmentKey([u8; 32]);
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "borsh", derive(BorshSerialize, BorshDeserialize))]
 pub struct PtrOutpointKey([u8; 32]);
+
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct RootAnchor {
+    #[cfg_attr(feature = "serde", serde(
+        serialize_with = "serialize_hash_serde",
+        deserialize_with = "deserialize_hash_serde"
+    ))]
+    pub spaces_root: Hash,
+    #[cfg_attr(feature = "serde", serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_optional_hash_serde",
+        deserialize_with = "deserialize_optional_hash_serde"
+    ))]
+    pub ptrs_root: Option<Hash>,
+    pub block: ChainAnchor,
+}
+
+/// Keys needed to fetch chain proofs for certificate verification.
+///
+/// Built from certificates, this tells a spaced client which merkle
+/// proof paths to include in the spaces and ptrs trees.
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct ChainProofRequest {
+    /// Spaces to prove (server resolves to outpoint keys).
+    pub spaces: Vec<SLabel>,
+    /// Typed keys to prove in the ptrs tree.
+    pub ptrs_keys: Vec<PtrKeyKind>,
+}
+
+/// A typed key for the ptrs tree.
+///
+/// Server resolves these to the appropriate merkle proof paths.
+/// For Sptr, the server must look o the outpoint to prove existence.
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", serde(tag = "key", content = "value", rename_all = "lowercase"))]
+pub enum PtrKeyKind {
+    Sptr(Sptr),
+    Commitment(CommitmentKey),
+    Registry(RegistryKey),
+}
 
 impl KeyHash for RegistryKey {}
 impl KeyHash for RegistrySptrKey {}
@@ -217,6 +256,14 @@ impl Commitment {
     }
 }
 
+impl FullPtrOut {
+    pub fn outpoint(&self) -> OutPoint {
+        OutPoint {
+            txid: self.txid,
+            vout: self.ptrout.n as _
+        }
+    }
+}
 
 impl From<RegistryKey> for Hash {
     fn from(value: RegistryKey) -> Self {
@@ -806,5 +853,31 @@ mod serde_helpers {
 
 #[cfg(feature = "serde")]
 use serde_helpers::*;
+
+#[cfg(feature = "serde")]
+mod hash_key_serde {
+    use serde::{Deserializer, Serializer};
+    use super::serde_helpers::*;
+
+    macro_rules! impl_hash_key_serde {
+        ($ty:ident) => {
+            impl serde::Serialize for super::$ty {
+                fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                    serialize_hash_serde(&self.0, serializer)
+                }
+            }
+
+            impl<'de> serde::Deserialize<'de> for super::$ty {
+                fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                    deserialize_hash_serde(deserializer).map(Self)
+                }
+            }
+        };
+    }
+
+    impl_hash_key_serde!(RegistryKey);
+    impl_hash_key_serde!(CommitmentKey);
+}
+use spaces_protocol::constants::ChainAnchor;
 use spaces_protocol::script::find_op_set_data;
 

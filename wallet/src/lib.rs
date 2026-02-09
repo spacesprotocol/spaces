@@ -46,6 +46,7 @@ use spaces_protocol::{
     slabel::SLabel,
     Covenant, FullSpaceOut, Space,
 };
+use spaces_ptr::{PtrSource, sptr::Sptr};
 
 use crate::{
     address::SpaceAddress,
@@ -80,6 +81,13 @@ pub struct SpacesWallet {
 pub struct Balance {
     pub balance: Amount,
     pub details: BalanceDetails,
+}
+
+/// Either a space name or an Sptr
+#[derive(Debug, Clone)]
+pub enum SpaceOrSptr {
+    Space(SLabel),
+    Sptr(Sptr),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -396,59 +404,69 @@ impl SpacesWallet {
         TxEvent::get_latest_events(&db_tx).context("could not read latest events")
     }
 
-    pub fn sign_event<H: KeyHasher>(
+    pub fn sign_event<H: KeyHasher, S: SpacesSource + PtrSource>(
         &mut self,
-        src: &mut impl SpacesSource,
-        space: &str,
+        src: &mut S,
+        space_or_sptr: SpaceOrSptr,
         mut event: NostrEvent,
     ) -> anyhow::Result<NostrEvent> {
-        if event.space().is_some_and(|s| s != space) {
-            return Err(anyhow::anyhow!("Space tag does not match specified space"));
-        }
+        let outpoint = match &space_or_sptr {
+            SpaceOrSptr::Space(label) => {
+                if event.space().is_some_and(|s| s != label.to_string()) {
+                    return Err(anyhow::anyhow!("Space tag does not match specified space"));
+                }
+                let space_key = SpaceKey::from(H::hash(label.as_ref()));
+                src.get_space_outpoint(&space_key)?
+                    .ok_or_else(|| anyhow::anyhow!("Space not found"))?
+            }
+            SpaceOrSptr::Sptr(sptr) => {
+                src.get_ptr_outpoint(sptr)?
+                    .ok_or_else(|| anyhow::anyhow!("Sptr not found"))?
+            }
+        };
 
-        let label = SLabel::from_str(space)?;
-        let space_key = SpaceKey::from(H::hash(label.as_ref()));
-        let outpoint = match src.get_space_outpoint(&space_key)? {
-            None => return Err(anyhow::anyhow!("Space not found")),
-            Some(outpoint) => outpoint,
-        };
-        let utxo = match self.get_utxo(outpoint) {
-            None => return Err(anyhow::anyhow!("Space not owned by wallet")),
-            Some(utxo) => utxo,
-        };
+        let utxo = self.get_utxo(outpoint)
+            .ok_or_else(|| anyhow::anyhow!("Not owned by wallet"))?;
 
         let keypair = self
             .get_taproot_keypair(utxo.keychain, utxo.derivation_index)
             .context("Could not derive taproot keypair to sign message")?;
 
-        event.sign(secp256k1::Secp256k1::new(), &keypair.to_inner())?;
+        event.sign(secp256k1::Secp256k1::new(), &keypair.to_keypair())?;
         Ok(event)
     }
 
-    pub fn verify_event<H: KeyHasher>(
-        src: &mut impl SpacesSource,
-        space: &str,
+    pub fn verify_event<H: KeyHasher, S: SpacesSource + PtrSource>(
+        src: &mut S,
+        space_or_sptr: SpaceOrSptr,
         mut event: NostrEvent,
     ) -> anyhow::Result<NostrEvent> {
-        if event.space().is_some_and(|s| s != space) {
-            return Err(anyhow::anyhow!("Space tag does not match specified space"));
+        let script_pubkey = match &space_or_sptr {
+            SpaceOrSptr::Space(label) => {
+                if event.space().is_some_and(|s| s != label.to_string()) {
+                    return Err(anyhow::anyhow!("Space tag does not match specified space"));
+                }
+                let space_key = SpaceKey::from(H::hash(label.as_ref()));
+                let outpoint = src.get_space_outpoint(&space_key)?
+                    .ok_or_else(|| anyhow::anyhow!("Space not found"))?;
+                let spaceout = src.get_spaceout(&outpoint)?
+                    .ok_or_else(|| anyhow::anyhow!("Space not found"))?;
+                spaceout.script_pubkey
+            }
+            SpaceOrSptr::Sptr(sptr) => {
+                let outpoint = src.get_ptr_outpoint(sptr)?
+                    .ok_or_else(|| anyhow::anyhow!("Sptr not found"))?;
+                let ptrout = src.get_ptrout(&outpoint)?
+                    .ok_or_else(|| anyhow::anyhow!("Ptrout not found"))?;
+                ptrout.script_pubkey
+            }
+        };
+
+        if !script_pubkey.is_witness_program() {
+            return Err(anyhow::anyhow!("Cannot verify non-taproot script"));
         }
 
-        let label = SLabel::from_str(&space)?;
-        let space_key = SpaceKey::from(H::hash(label.as_ref()));
-        let outpoint = match src.get_space_outpoint(&space_key)? {
-            None => return Err(anyhow::anyhow!("Space not found")),
-            Some(outpoint) => outpoint,
-        };
-        let spaceout = match src.get_spaceout(&outpoint)? {
-            None => return Err(anyhow::anyhow!("Space not found")),
-            Some(spaceout) => spaceout,
-        };
-        if !spaceout.script_pubkey.is_witness_program() {
-            return Err(anyhow::anyhow!("Cannot verify non-taproot spaces"));
-        }
-
-        let script_bytes = spaceout.script_pubkey.as_bytes();
+        let script_bytes = script_pubkey.as_bytes();
         if script_bytes.len() != secp256k1::constants::SCHNORR_PUBLIC_KEY_SIZE + 2 {
             return Err(anyhow::anyhow!("Expected a schnorr public key"));
         }
@@ -460,7 +478,7 @@ impl SpacesWallet {
             }
             Some(actual) => {
                 if actual != pubkey {
-                    return Err(anyhow::anyhow!("Event pubkey doesn't match space pubkey"));
+                    return Err(anyhow::anyhow!("Event pubkey doesn't match pubkey"));
                 }
             }
         }
@@ -469,6 +487,94 @@ impl SpacesWallet {
             return Err(anyhow::anyhow!("Could not verify signature"));
         }
         Ok(event)
+    }
+
+    /// Sign a message with the key controlling a space or sptr
+    pub fn sign_schnorr<H: KeyHasher, S: SpacesSource + PtrSource>(
+        &mut self,
+        src: &mut S,
+        space_or_sptr: SpaceOrSptr,
+        message: &[u8],
+    ) -> anyhow::Result<schnorr::Signature> {
+        use bitcoin::hashes::{sha256, Hash, HashEngine};
+
+        let outpoint = match space_or_sptr {
+            SpaceOrSptr::Space(ref label) => {
+                let space_key = SpaceKey::from(H::hash(label.as_ref()));
+                src.get_space_outpoint(&space_key)?
+                    .ok_or_else(|| anyhow::anyhow!("Space not found"))?
+            }
+            SpaceOrSptr::Sptr(ref sptr) => {
+                src.get_ptr_outpoint(sptr)?
+                    .ok_or_else(|| anyhow::anyhow!("Sptr not found"))?
+            }
+        };
+
+        let utxo = self.get_utxo(outpoint)
+            .ok_or_else(|| anyhow::anyhow!("Not owned by wallet"))?;
+
+        let keypair = self
+            .get_taproot_keypair(utxo.keychain, utxo.derivation_index)
+            .context("Could not derive taproot keypair to sign message")?;
+
+        // Hash the message with the prefix
+        let mut engine = sha256::Hash::engine();
+        engine.input(SPACES_SIGNED_MSG_PREFIX);
+        engine.input(message);
+        let digest = sha256::Hash::from_engine(engine);
+
+        let msg = secp256k1::Message::from_digest(digest.to_byte_array());
+        let sig = secp256k1::Secp256k1::new().sign_schnorr(&msg, &keypair.to_keypair());
+        Ok(sig)
+    }
+
+    /// Verify a schnorr signature against a space or sptr's public key
+    pub fn verify_schnorr<H: KeyHasher, S: SpacesSource + PtrSource>(
+        src: &mut S,
+        space_or_sptr: SpaceOrSptr,
+        message: &[u8],
+        signature: &schnorr::Signature,
+    ) -> anyhow::Result<()> {
+        use bitcoin::hashes::{sha256, Hash, HashEngine};
+
+        let script_pubkey = match space_or_sptr {
+            SpaceOrSptr::Space(ref label) => {
+                let space_key = SpaceKey::from(H::hash(label.as_ref()));
+                let outpoint = src.get_space_outpoint(&space_key)?
+                    .ok_or_else(|| anyhow::anyhow!("Space not found"))?;
+                let spaceout = src.get_spaceout(&outpoint)?
+                    .ok_or_else(|| anyhow::anyhow!("Space not found"))?;
+                spaceout.script_pubkey
+            }
+            SpaceOrSptr::Sptr(ref sptr) => {
+                let outpoint = src.get_ptr_outpoint(sptr)?
+                    .ok_or_else(|| anyhow::anyhow!("Sptr not found"))?;
+                let ptrout = src.get_ptrout(&outpoint)?
+                    .ok_or_else(|| anyhow::anyhow!("Ptrout not found"))?;
+                ptrout.script_pubkey
+            }
+        };
+
+        if !script_pubkey.is_witness_program() {
+            return Err(anyhow::anyhow!("Cannot verify non-taproot script"));
+        }
+
+        let script_bytes = script_pubkey.as_bytes();
+        if script_bytes.len() != secp256k1::constants::SCHNORR_PUBLIC_KEY_SIZE + 2 {
+            return Err(anyhow::anyhow!("Expected a schnorr public key"));
+        }
+        let pubkey = XOnlyPublicKey::from_slice(&script_bytes[2..])?;
+
+        // Hash the message with the prefix
+        let mut engine = sha256::Hash::engine();
+        engine.input(SPACES_SIGNED_MSG_PREFIX);
+        engine.input(message);
+        let digest = sha256::Hash::from_engine(engine);
+
+        let msg = secp256k1::Message::from_digest(digest.to_byte_array());
+        secp256k1::Secp256k1::new()
+            .verify_schnorr(signature, &msg, &pubkey)
+            .map_err(|_| anyhow::anyhow!("Invalid signature"))
     }
 
     pub fn list_unspent_with_details(

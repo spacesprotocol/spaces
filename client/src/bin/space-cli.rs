@@ -28,7 +28,7 @@ use spaces_client::{
     },
     rpc::{
         BidParams, OpenParams, RegisterParams, RpcClient, RpcWalletRequest,
-        RpcWalletTxBuilder, SendCoinsParams, TransferSpacesParams,
+        RpcWalletTxBuilder, SendCoinsParams, SpaceOrPtr, TransferSpacesParams,
     },
     wallets::{AddressKind, WalletResponse},
 };
@@ -500,9 +500,11 @@ impl SpaceCli {
         anchor: bool,
         most_recent: bool,
     ) -> Result<NostrEvent, ClientError> {
+        let space_or_ptr = parse_space_or_ptr(&space)
+            .map_err(|e| ClientError::Custom(format!("Invalid space or sptr: {}", e)))?;
         let mut result = self
             .client
-            .wallet_sign_event(&self.wallet, &space, event)
+            .wallet_sign_event(&self.wallet, space_or_ptr, event)
             .await?;
 
         if anchor {
@@ -591,6 +593,21 @@ fn normalize_space(space: &str) -> String {
         lowercase
     } else {
         format!("@{}", lowercase)
+    }
+}
+
+/// Parse a string as either a space name or an sptr
+fn parse_space_or_ptr(s: &str) -> anyhow::Result<SpaceOrPtr> {
+    // Try to parse as SPTR first (starts with "sptr1")
+    if s.starts_with("sptr1") {
+        Sptr::from_str(s)
+            .map(SpaceOrPtr::Ptr)
+            .map_err(|e| anyhow!("Invalid sptr: {}", e))
+    } else {
+        // Otherwise parse as space name
+        SLabel::from_str(s)
+            .map(SpaceOrPtr::Space)
+            .map_err(|e| anyhow!("Invalid space name: {}", e))
     }
 }
 
@@ -1053,9 +1070,11 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
                 Some(space) => space,
             };
 
+            let space_or_ptr = parse_space_or_ptr(&space)
+                .map_err(|e| ClientError::Custom(format!("Invalid space or sptr: {}", e)))?;
             let mut event = cli
                 .client
-                .verify_event(&space, event)
+                .verify_event(space_or_ptr, event)
                 .await
                 .map_err(|e| ClientError::Custom(e.to_string()))?;
             event.proof = None;
@@ -1066,9 +1085,11 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
         Commands::VerifyEvent { space, input } => {
             let event = read_event(input)
                 .map_err(|e| ClientError::Custom(format!("input error: {}", e.to_string())))?;
+            let space_or_ptr = parse_space_or_ptr(&space)
+                .map_err(|e| ClientError::Custom(format!("Invalid space or sptr: {}", e)))?;
             let event = cli
                 .client
-                .verify_event(&space, event)
+                .verify_event(space_or_ptr, event)
                 .await
                 .map_err(|e| ClientError::Custom(e.to_string()))?;
 

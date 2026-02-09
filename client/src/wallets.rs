@@ -21,11 +21,11 @@ use spaces_wallet::{
         KeychainKind,
     },
     bitcoin,
-    bitcoin::{Address, Amount, FeeRate, OutPoint},
+    bitcoin::{Address, Amount, FeeRate, OutPoint, secp256k1::schnorr},
     builder::{CoinTransfer, SpaceTransfer, SpacesAwareCoinSelection},
     nostr::NostrEvent,
     tx_event::{TxEvent, TxEventKind, TxRecord},
-    Balance, DoubleUtxo, Listing, SpacesWallet, WalletInfo, WalletOutput,
+    Balance, DoubleUtxo, Listing, SpacesWallet, SpaceOrSptr, WalletInfo, WalletOutput,
 };
 
 use tabled::Tabled;
@@ -281,9 +281,18 @@ pub enum WalletCommand {
     },
     UnloadWallet,
     SignEvent {
-        space: String,
+        space_or_sptr: SpaceOrPtr,
         event: NostrEvent,
         resp: crate::rpc::Responder<anyhow::Result<NostrEvent>>,
+    },
+    SignSchnorr {
+        space_or_sptr: SpaceOrPtr,
+        message: Vec<u8>,
+        resp: crate::rpc::Responder<anyhow::Result<schnorr::Signature>>,
+    },
+    CanOperate {
+        space: SLabel,
+        resp: crate::rpc::Responder<anyhow::Result<bool>>,
     },
 }
 
@@ -588,11 +597,51 @@ impl RpcWallet {
             WalletCommand::Sell { space, price, resp } => {
                 _ = resp.send(wallet.sell::<Sha256>(chain, &space, Amount::from_sat(price)));
             }
-            WalletCommand::SignEvent { space, event, resp } => {
-                _ = resp.send(wallet.sign_event::<Sha256>(chain, &space, event));
+            WalletCommand::SignEvent { space_or_sptr, event, resp } => {
+                let space_or_sptr = match space_or_sptr {
+                    SpaceOrPtr::Space(label) => SpaceOrSptr::Space(label),
+                    SpaceOrPtr::Ptr(sptr) => SpaceOrSptr::Sptr(sptr),
+                };
+                _ = resp.send(wallet.sign_event::<Sha256, _>(chain, space_or_sptr, event));
+            }
+            WalletCommand::SignSchnorr { space_or_sptr, message, resp } => {
+                let space_or_sptr = match space_or_sptr {
+                    SpaceOrPtr::Space(label) => SpaceOrSptr::Space(label),
+                    SpaceOrPtr::Ptr(sptr) => SpaceOrSptr::Sptr(sptr),
+                };
+                _ = resp.send(wallet.sign_schnorr::<Sha256, _>(chain, space_or_sptr, &message));
+            }
+            WalletCommand::CanOperate { space, resp } => {
+                let result = Self::can_operate(wallet, chain, space);
+                _ = resp.send(result);
             }
         }
         Ok(())
+    }
+
+    /// Check if wallet can operate on a space by verifying it controls the delegated sptr
+    fn can_operate(
+        wallet: &SpacesWallet,
+        chain: &mut Chain,
+        space: SLabel,
+    ) -> anyhow::Result<bool> {
+        // Use the same delegation lookup logic as get_delegation
+        let space_info = chain.get_space_info(&SpaceKey::from(Sha256::hash(space.as_ref())))?
+            .ok_or_else(|| anyhow::anyhow!("Space not found: {}", space))?;
+
+        let sptr = Sptr::from_spk::<Sha256>(space_info.spaceout.script_pubkey.clone());
+
+        // Check reverse mapping to verify delegation is valid
+        let delegator = chain.get_delegator(&RegistrySptrKey::from_sptr::<Sha256>(sptr))?;
+        if delegator.as_ref() != Some(&space) {
+            return Ok(false);
+        }
+
+        // Get ptr info and check if wallet controls it
+        let ptr_info = chain.get_ptr_info(&sptr)?
+            .ok_or_else(|| anyhow::anyhow!("PTR not found for sptr: {}", sptr))?;
+
+        Ok(wallet.is_mine(ptr_info.ptrout.script_pubkey))
     }
 
     /// Returns true if Bitcoin, protocol, and wallet tips match.
@@ -1631,13 +1680,13 @@ impl RpcWallet {
 
     pub async fn send_sign_event(
         &self,
-        space: &str,
+        space_or_sptr: SpaceOrPtr,
         event: NostrEvent,
     ) -> anyhow::Result<NostrEvent> {
         let (resp, resp_rx) = oneshot::channel();
         self.sender
             .send(WalletCommand::SignEvent {
-                space: space.to_string(),
+                space_or_sptr,
                 event,
                 resp,
             })
@@ -1703,6 +1752,30 @@ impl RpcWallet {
 
     pub async fn unload_wallet(&self) {
         _ = self.sender.send(WalletCommand::UnloadWallet);
+    }
+
+    pub async fn send_sign_schnorr(
+        &self,
+        space_or_sptr: SpaceOrPtr,
+        message: Vec<u8>,
+    ) -> anyhow::Result<schnorr::Signature> {
+        let (resp, resp_rx) = oneshot::channel();
+        self.sender
+            .send(WalletCommand::SignSchnorr {
+                space_or_sptr,
+                message,
+                resp,
+            })
+            .await?;
+        resp_rx.await?
+    }
+
+    pub async fn send_can_operate(&self, space: SLabel) -> anyhow::Result<bool> {
+        let (resp, resp_rx) = oneshot::channel();
+        self.sender
+            .send(WalletCommand::CanOperate { space, resp })
+            .await?;
+        resp_rx.await?
     }
 }
 

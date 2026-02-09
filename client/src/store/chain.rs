@@ -10,7 +10,7 @@ use spaces_protocol::hasher::{BaseHash, BidKey, OutpointKey, SpaceKey};
 use spaces_protocol::prepare::SpacesSource;
 use spaces_protocol::{FullSpaceOut, SpaceOut};
 use spaces_protocol::slabel::SLabel;
-use spaces_ptr::{Commitment, CommitmentKey, FullPtrOut, PtrOut, PtrSource, RegistryKey, RegistrySptrKey, PtrOutpointKey};
+use spaces_ptr::{Commitment, CommitmentKey, FullPtrOut, PtrOut, PtrSource, RegistryKey, RegistrySptrKey, PtrOutpointKey, RootAnchor};
 use spaces_ptr::sptr::Sptr;
 use spaces_wallet::bitcoin::Network;
 use crate::client::{BlockMeta, PtrBlockMeta};
@@ -336,7 +336,7 @@ impl Chain {
         &self,
         keys: &[Hash],
         snapshot_block_height: u32,
-    ) -> anyhow::Result<SubTree<Sha256Hasher>> {
+    ) -> anyhow::Result<(ChainAnchor, SubTree<Sha256Hasher>)> {
         self.db.sp.state.prove_with_snapshot(keys, snapshot_block_height)
     }
 
@@ -344,7 +344,7 @@ impl Chain {
         &self,
         keys: &[Hash],
         snapshot_block_height: u32,
-    ) -> anyhow::Result<SubTree<Sha256Hasher>> {
+    ) -> anyhow::Result<(ChainAnchor, SubTree<Sha256Hasher>)> {
         self.db.pt.state.prove_with_snapshot(keys, snapshot_block_height)
     }
 
@@ -503,7 +503,6 @@ impl Chain {
         use std::collections::HashMap;
         use std::fs;
         use std::io;
-        use crate::rpc::RootAnchor;
 
         info!("Updating root anchors ...");
 
