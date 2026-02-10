@@ -2326,8 +2326,8 @@ dependencies = [
 
 [[package]]
 name = "spacedb"
-version = "0.0.9"
-source = "git+https://github.com/spacesprotocol/spacedb#1c5487d9693b284f8df74056c356d93361db8941"
+version = "0.0.10"
+source = "git+https://github.com/spacesprotocol/spacedb#cae23d79df72aeab112ee1c312556ca5561a5942"
 dependencies = [
  "bincode",
  "borsh",

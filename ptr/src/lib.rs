@@ -225,6 +225,7 @@ pub struct RootAnchor {
 /// Built from certificates, this tells a spaced client which merkle
 /// proof paths to include in the spaces and ptrs trees.
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Clone)]
 pub struct ChainProofRequest {
     /// Spaces to prove (server resolves to outpoint keys).
     pub spaces: Vec<SLabel>,
@@ -238,6 +239,7 @@ pub struct ChainProofRequest {
 /// For Sptr, the server must look o the outpoint to prove existence.
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "serde", serde(tag = "key", content = "value", rename_all = "lowercase"))]
+#[derive(Clone, Copy)]
 pub enum PtrKeyKind {
     Sptr(Sptr),
     Commitment(CommitmentKey),
