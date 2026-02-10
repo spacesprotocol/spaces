@@ -149,12 +149,12 @@ pub struct Commitment {
     ))]
     pub prev_root: Option<[u8; 32]>,
 
-    /// Running history hash
+    /// Rolling hash for all previous commitments
     #[cfg_attr(feature = "serde", serde(
         serialize_with = "serialize_hash_serde",
         deserialize_with = "deserialize_hash_serde"
     ))]
-    pub history_hash: [u8; 32],
+    pub rolling_hash: [u8; 32],
 
     /// Block height at which the commitment was made
     pub block_height: u32,
@@ -464,7 +464,7 @@ impl TxContext {
     }
 }
 
-pub fn transcript_hash<H: KeyHasher>(old: [u8; 32], new_root: [u8; 32]) -> [u8; 32] {
+pub fn rolling_hash<H: KeyHasher>(old: [u8; 32], new_root: [u8; 32]) -> [u8; 32] {
     let mut data = [0u8; 64];
     data[0..32].copy_from_slice(&old);
     data[32..64].copy_from_slice(&new_root);
@@ -562,7 +562,7 @@ impl Validator {
                             let commitment = match delegate.finalized_tip {
                                 None => Commitment {
                                     state_root: *root,
-                                    history_hash: *root,
+                                    rolling_hash: *root,
                                     prev_root: None,
                                     block_height: height,
                                 },
@@ -570,7 +570,7 @@ impl Validator {
                                     assert!(prev.is_finalized(height), "expected a finalized tip");
                                     Commitment {
                                         state_root: *root,
-                                        history_hash: transcript_hash::<H>(prev.history_hash, *root),
+                                        rolling_hash: rolling_hash::<H>(prev.rolling_hash, *root),
                                         prev_root: Some(prev.state_root),
                                         block_height: height,
                                     }
