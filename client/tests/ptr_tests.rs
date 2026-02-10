@@ -1,6 +1,5 @@
 use std::{path::PathBuf, str::FromStr};
 use anyhow::anyhow;
-use spacedb::encode::SubTreeEncoder;
 use spacedb::Sha256Hasher;
 use spacedb::subtree::SubTree;
 use spaces_client::{

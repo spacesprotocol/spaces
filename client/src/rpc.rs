@@ -22,7 +22,7 @@ use jsonrpsee::{
 };
 use log::info;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use spacedb::{encode::SubTreeEncoder, tx::ProofType};
+use spacedb::tx::ProofType;
 use spaces_protocol::{
     bitcoin,
     bitcoin::{
@@ -2045,9 +2045,7 @@ impl AsyncChainState {
         let root = snapshot.compute_root()?;
         let proof = snapshot.prove(&[key.into()], ProofType::Standard)?;
 
-        let mut buf = vec![0u8; 4096];
-        let offset = proof.write_to_slice(&mut buf)?;
-        buf.truncate(offset);
+        let buf = proof.to_vec()?;
 
         Ok(ProofResult {
             proof: buf,
@@ -2120,9 +2118,7 @@ impl AsyncChainState {
 
         let root = proof.compute_root()?.to_vec();
         info!("Proving with root anchor {}", hex::encode(root.as_slice()));
-        let mut buf = vec![0u8; 4096];
-        let offset = proof.write_to_slice(&mut buf)?;
-        buf.truncate(offset);
+        let buf = proof.to_vec()?;
 
         Ok(ProofResult {
             proof: buf,
@@ -2160,9 +2156,7 @@ impl AsyncChainState {
 
         let root = proof.compute_root()?.to_vec();
         info!("Proving SPTR with root anchor {}", hex::encode(root.as_slice()));
-        let mut buf = vec![0u8; 4096];
-        let offset = proof.write_to_slice(&mut buf)?;
-        buf.truncate(offset);
+        let buf = proof.to_vec()?;
 
         Ok(ProofResult {
             proof: buf,
@@ -2206,9 +2200,7 @@ impl AsyncChainState {
 
         let root = proof.compute_root()?.to_vec();
         info!("Proving PTR with root anchor {}", hex::encode(root.as_slice()));
-        let mut buf = vec![0u8; 4096];
-        let offset = proof.write_to_slice(&mut buf)?;
-        buf.truncate(offset);
+        let buf = proof.to_vec()?;
 
         Ok(ProofResult {
             proof: buf,
@@ -2245,9 +2237,7 @@ impl AsyncChainState {
 
         let root = proof.compute_root()?.to_vec();
         info!("Proving commitment with root anchor {}", hex::encode(root.as_slice()));
-        let mut buf = vec![0u8; 4096];
-        let offset = proof.write_to_slice(&mut buf)?;
-        buf.truncate(offset);
+        let buf = proof.to_vec()?;
 
         Ok(ProofResult {
             proof: buf,
@@ -2344,13 +2334,9 @@ impl AsyncChainState {
             (spaces_proof, spaces_root, spaces_anchor, ptrs_proof, ptrs_root)
         };
 
-        let mut spaces_buf = vec![0u8; 4096];
-        let offset = spaces_proof.write_to_slice(&mut spaces_buf)?;
-        spaces_buf.truncate(offset);
+        let spaces_buf = spaces_proof.to_vec()?;
 
-        let mut ptrs_buf = vec![0u8; 8192];
-        let offset = ptrs_proof.write_to_slice(&mut ptrs_buf)?;
-        ptrs_buf.truncate(offset);
+        let ptrs_buf = ptrs_proof.to_vec()?;
 
         Ok(ChainProofResult {
             block: block_anchor,
@@ -2489,16 +2475,12 @@ impl AsyncChainState {
             (spaces_proof, spaces_root, spaces_anchor, ptrs_proof, ptrs_root)
         };
 
-        let mut spaceout_buf = vec![0u8; 4096];
-        let offset = spaces_proof.write_to_slice(&mut spaceout_buf)?;
-        spaceout_buf.truncate(offset);
+        let spaceout_buf = spaces_proof.to_vec()?;
 
         info!("Proving certificate with spaces root {}", hex::encode(spaces_root));
         info!("Proving certificate with ptrs root {}", hex::encode(ptrs_root));
 
-        let mut ptrs_buf = vec![0u8; 8192];
-        let offset = ptrs_proof.write_to_slice(&mut ptrs_buf)?;
-        ptrs_buf.truncate(offset);
+        let ptrs_buf = ptrs_proof.to_vec()?;
 
         Ok(CertificateProofResult {
             block: block_anchor,
@@ -2553,9 +2535,7 @@ impl AsyncChainState {
         let root = proof.compute_root()?;
 
         // Serialize the proof
-        let mut buf = vec![0u8; 4096];
-        let offset = proof.write_to_slice(&mut buf)?;
-        buf.truncate(offset);
+        let buf = proof.to_vec()?;
 
         info!(
             "Proving PTR certificate for sptr {} at block {}, exists: {}",
