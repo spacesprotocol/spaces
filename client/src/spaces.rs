@@ -29,6 +29,7 @@ pub struct Spaced {
     pub anchors_path: Option<PathBuf>,
     pub synced: bool,
     pub cbf: bool,
+    pub num_anchors: u32,
 }
 
 impl Spaced {
@@ -51,7 +52,7 @@ impl Spaced {
         };
 
         info!("Updating root anchors ...");
-        self.chain.update_anchors(anchors_path)?;
+        self.chain.update_anchors(anchors_path, self.num_anchors)?;
         Ok(())
     }
 
@@ -79,7 +80,6 @@ impl Spaced {
             hash: id.hash,
         };
         if self.chain.maybe_commit(new_tip)? {
-            // TODO: ptr anchors
             self.update_anchors()?;
         }
         Ok(())
