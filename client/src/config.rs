@@ -22,7 +22,7 @@ use crate::{
     source::{BitcoinRpc, BitcoinRpcAuth},
     spaces::Spaced,
 };
-use crate::store::chain::Chain;
+use crate::store::chain::{Chain, ROOT_ANCHORS_COUNT};
 
 const RPC_OPTIONS: &str = "RPC Server Options";
 
@@ -84,6 +84,10 @@ pub struct Args {
     /// The specified Bitcoin RPC is a light client
     #[arg(long, env = "SPACED_BITCOIN_RPC_LIGHT", default_value = "false")]
     bitcoin_rpc_light: bool,
+
+    /// Specify the number of anchors spaced will calculate for /root-anchors endpoint
+    #[arg(long, env = "SPACED_NUM_ANCHORS")]
+    num_anchors: Option<u32>,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug, ValueEnum, Serialize, Deserialize)]
@@ -223,6 +227,7 @@ impl Args {
             anchors_path,
             synced: false,
             cbf: args.bitcoin_rpc_light,
+            num_anchors: args.num_anchors.unwrap_or(ROOT_ANCHORS_COUNT),
         })
     }
 }

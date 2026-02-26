@@ -499,7 +499,7 @@ impl Chain {
         Err(anyhow!("Unable to restore to a valid state"))
     }
 
-    pub fn update_anchors(&self, anchors_path: &Path) -> anyhow::Result<()> {
+    pub fn update_anchors(&self, anchors_path: &Path, num_anchors: u32) -> anyhow::Result<()> {
         use std::collections::HashMap;
         use std::fs;
         use std::io;
@@ -519,7 +519,7 @@ impl Chain {
             .collect();
 
         let mut anchors = Vec::new();
-        let sp_iter = self.db.sp.store.iter().take(ROOT_ANCHORS_COUNT as _);
+        let sp_iter = self.db.sp.store.iter().take(num_anchors as _);
         let mut pt_iter = self.db.pt.store.iter();
 
         for sp_snap in sp_iter {
