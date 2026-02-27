@@ -180,6 +180,16 @@ enum Commands {
         #[arg(default_value = "0")]
         target: usize,
     },
+    /// Estimate fee rate for a given confirmation target
+    #[command(name = "estimatefee")]
+    EstimateFee {
+        /// Target number of blocks for confirmation (1-1008)
+        #[arg(default_value = "6")]
+        conf_target: u32,
+        /// Fee estimation mode: unset, conservative, or economical
+        #[arg(long, short)]
+        mode: Option<String>,
+    },
     /// Send the specified amount of BTC to the given name or address
     #[command(
         name = "send",
@@ -574,6 +584,18 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
         Commands::EstimateBid { target } => {
             let response = cli.client.estimate_bid(target).await?;
             println!("{} sat", Amount::from_sat(response).to_sat());
+        }
+        Commands::EstimateFee { conf_target, mode } => {
+            let response = cli.client.estimate_fee(conf_target, mode.clone()).await?;
+            match cli.format {
+                Format::Text => {
+                    println!("Fee rate: {} sat/vB", response.feerate_sat_vb);
+                    println!("Blocks: {}", response.blocks);
+                }
+                Format::Json => {
+                    println!("{}", serde_json::to_string_pretty(&response)?);
+                }
+            }
         }
         Commands::GetSpace { space } => {
             let space = normalize_space(&space);

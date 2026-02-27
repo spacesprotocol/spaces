@@ -340,6 +340,13 @@ pub trait Rpc {
 
     #[method(name = "walletgetbalance")]
     async fn wallet_get_balance(&self, wallet: &str) -> Result<Balance, ErrorObjectOwned>;
+
+    #[method(name = "estimatefee")]
+    async fn estimate_fee(
+        &self,
+        conf_target: u32,
+        estimate_mode: Option<String>,
+    ) -> Result<FeeEstimateResponse, ErrorObjectOwned>;
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -431,6 +438,12 @@ pub struct ProofResult {
         deserialize_with = "deserialize_base64"
     )]
     pub proof: Vec<u8>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct FeeEstimateResponse {
+    pub feerate_sat_vb: u64,
+    pub blocks: u64,
 }
 
 fn serialize_hash<S>(
@@ -1122,6 +1135,52 @@ impl RpcServer for RpcServerImpl {
             .send_get_balance()
             .await
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
+    }
+
+    async fn estimate_fee(
+        &self,
+        conf_target: u32,
+        estimate_mode: Option<String>,
+    ) -> Result<FeeEstimateResponse, ErrorObjectOwned> {
+        let mode = estimate_mode.unwrap_or_else(|| "unset".to_string());
+        let params = serde_json::json!([conf_target, mode]);
+        let rpc = self.wallet_manager.rpc.clone();
+        
+        let estimate_req = rpc.make_request("estimatesmartfee", params);
+        
+        // Use spawn_blocking to handle the blocking RPC call in async context
+        let result = tokio::task::spawn_blocking(move || {
+            let blocking_client = reqwest::blocking::Client::new();
+            rpc.send_json_blocking::<serde_json::Value>(&blocking_client, &estimate_req)
+        })
+        .await
+        .map_err(|e| ErrorObjectOwned::owned(-1, format!("Task join error: {}", e), None::<String>))?;
+        
+        match result {
+            Ok(res) => {
+                if let Some(fee_rate) = res["feerate"].as_f64() {
+                    // Convert BTC/kB to sat/vB
+                    let fee_rate_sat_vb = (fee_rate * 100_000.0).ceil() as u64;
+                    let blocks = res["blocks"].as_u64().unwrap_or(conf_target as u64);
+                    
+                    Ok(FeeEstimateResponse {
+                        feerate_sat_vb: fee_rate_sat_vb,
+                        blocks,
+                    })
+                } else {
+                    Err(ErrorObjectOwned::owned(
+                        -1,
+                        "Fee estimation unavailable: no feerate in response".to_string(),
+                        None::<String>,
+                    ))
+                }
+            }
+            Err(e) => Err(ErrorObjectOwned::owned(
+                -1,
+                format!("RPC error: {}", e),
+                None::<String>,
+            )),
+        }
     }
 }
 
