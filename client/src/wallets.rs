@@ -820,12 +820,6 @@ impl RpcWallet {
         let mut pending = vec![];
         let mut outbid = vec![];
         for (txid, event) in recent_events {
-            let tx = wallet.get_tx(txid);
-            if tx.as_ref().is_some_and(|tx| !tx.chain_position.is_confirmed()) {
-                pending.push(SLabel::from_str(event.space.as_ref().unwrap()).expect("valid space name"));
-                continue;
-            }
-
             if unspent.iter().any(|out| {
                 out.space
                     .as_ref()
@@ -833,6 +827,13 @@ impl RpcWallet {
             }) {
                 continue;
             }
+
+            let tx = wallet.get_tx(txid);
+            if tx.as_ref().is_some_and(|tx| !tx.chain_position.is_confirmed()) {
+                pending.push(SLabel::from_str(event.space.as_ref().unwrap()).expect("valid space name"));
+                continue;
+            }
+
             let name = SLabel::from_str(event.space.as_ref().unwrap()).expect("valid space name");
             let spacehash = SpaceKey::from(Sha256::hash(name.as_ref()));
             let space = state.get_space_info(&spacehash)?;
