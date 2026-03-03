@@ -96,6 +96,9 @@ pub fn load_open_context<T: SpacesSource, H: KeyHasher>(
     if name.is_reserved() {
         return Ok(Some(Err(OpenError::ReservedName)));
     }
+    if name.is_numeric() {
+        return Ok(Some(Err(OpenError::MalformedName)));
+    }
 
     let ctx = {
         let spacehash = SpaceKey::from(H::hash(name.as_ref()));
@@ -123,8 +126,8 @@ fn find_open(script: &Script) -> Option<OpenResult<SLabelRef<'_>>> {
             Instruction::Op(_) => continue,
             Instruction::PushBytes(push_bytes) => {
                 let mut bytes = push_bytes.as_bytes();
-                // Starts with our prefix + at least 1 additional op code byte
-                if bytes.len() < OPEN_MAGIC.len() || !bytes.starts_with(OPEN_MAGIC) {
+                // Starts with our prefix + at least 1 additional byte
+                if bytes.len() <= OPEN_MAGIC.len() || !bytes.starts_with(OPEN_MAGIC) {
                     continue;
                 }
                 bytes = &bytes[OPEN_MAGIC.len()..];

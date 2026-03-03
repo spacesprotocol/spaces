@@ -23,7 +23,7 @@ use spaces_protocol::{
     hasher::{KeyHash},
 };
 use spaces_protocol::slabel::SLabel;
-use spaces_ptr::{Commitment, CommitmentKey, FullPtrOut, PtrOut, PtrSource, RegistryKey, RegistrySptrKey, PtrOutpointKey};
+use spaces_ptr::{Commitment, CommitmentKey, FullPtrOut, NumericKey, PtrOut, PtrSource, RegistryKey, RegistrySptrKey, PtrOutpointKey};
 use spaces_ptr::sptr::Sptr;
 use crate::store::{EncodableOutpoint, Sha256};
 
@@ -116,6 +116,7 @@ pub trait PtrChainState {
     fn remove_registry(&self, key: RegistryKey);
     fn insert_registry_delegation(&self, key: RegistrySptrKey, space: SLabel);
     fn insert_ptr(&self, key: Sptr, outpoint: EncodableOutpoint);
+    fn insert_numeric(&self, key: NumericKey, sptr: Sptr);
 
     #[allow(dead_code)]
     fn get_ptr_info(
@@ -147,6 +148,10 @@ impl PtrChainState for PtrLiveSnapshot {
 
     fn insert_ptr(&self, key: Sptr, outpoint: EncodableOutpoint) {
         self.insert(key, outpoint)
+    }
+
+    fn insert_numeric(&self, key: NumericKey, sptr: Sptr) {
+        self.insert(key, sptr)
     }
 
     fn get_ptr_info(&mut self, hash: &Sptr) -> Result<Option<FullPtrOut>> {
@@ -362,6 +367,13 @@ impl PtrSource for PtrLiveSnapshot {
         let h = PtrOutpointKey::from_outpoint::<Sha256>(*outpoint);
         let result = self.get(h).map_err(|err| {
             spaces_protocol::errors::Error::IO(format!("getptrout: {}", err.to_string()))
+        })?;
+        Ok(result)
+    }
+
+    fn get_numeric(&mut self, key: &NumericKey) -> spaces_protocol::errors::Result<Option<Sptr>> {
+        let result = self.get(*key).map_err(|err| {
+            spaces_protocol::errors::Error::IO(format!("getnumeric: {}", err.to_string()))
         })?;
         Ok(result)
     }

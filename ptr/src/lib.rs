@@ -1,6 +1,7 @@
 #[cfg(feature = "std")]
 pub mod sptr;
 pub mod constants;
+pub mod snumeric;
 
 #[cfg(feature = "borsh")]
 use borsh::{BorshDeserialize, BorshSerialize};
@@ -8,6 +9,8 @@ use borsh::{BorshDeserialize, BorshSerialize};
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
+use spaces_protocol::constants::ChainAnchor;
+use spaces_protocol::script::find_op_set_data;
 use bitcoin::{Amount, OutPoint, ScriptBuf, Transaction, TxOut, Txid};
 use bitcoin::absolute::LockTime;
 use bitcoin::opcodes::all::{OP_PUSHNUM_2, OP_RETURN};
@@ -16,8 +19,8 @@ use spaces_protocol::hasher::{KeyHasher, KeyHash, Hash};
 use spaces_protocol::slabel::SLabel;
 use spaces_protocol::{Bytes, SpaceOut};
 use crate::constants::COMMITMENT_FINALITY_INTERVAL;
-use crate::sptr::{Sptr};
-
+use crate::snumeric::SNumeric;
+use crate::sptr::Sptr;
 
 pub trait PtrSource {
     fn get_ptr_outpoint(&mut self, sptr: &Sptr) -> spaces_protocol::errors::Result<Option<OutPoint>>;
@@ -29,6 +32,8 @@ pub trait PtrSource {
     fn get_delegator(&mut self, sptr: &RegistrySptrKey) -> spaces_protocol::errors::Result<Option<SLabel>>;
 
     fn get_ptrout(&mut self, outpoint: &OutPoint) -> spaces_protocol::errors::Result<Option<PtrOut>>;
+
+    fn get_numeric(&mut self, key: &NumericKey) -> spaces_protocol::errors::Result<Option<Sptr>>;
 }
 
 #[derive(Debug, Clone)]
@@ -127,6 +132,7 @@ pub struct PtrOut {
 #[cfg_attr(feature = "borsh", derive(BorshSerialize, BorshDeserialize))]
 pub struct Ptr {
     pub id: Sptr,
+    pub numeric: SNumeric,
     pub data: Option<Bytes>,
     pub last_update: u32,
 }
@@ -168,6 +174,7 @@ pub enum KeyKind {
     Registry = 0x03,
     RegistrySptr = 0x04,
     PtrOutpoint = 0x05,
+    SNumeric = 0x06,
 }
 
 impl KeyKind {
@@ -202,6 +209,10 @@ pub struct CommitmentKey([u8; 32]);
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "borsh", derive(BorshSerialize, BorshDeserialize))]
 pub struct PtrOutpointKey([u8; 32]);
+
+#[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
+#[cfg_attr(feature = "borsh", derive(BorshSerialize, BorshDeserialize))]
+pub struct NumericKey([u8; 32]);
 
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
@@ -250,6 +261,7 @@ impl KeyHash for RegistryKey {}
 impl KeyHash for RegistrySptrKey {}
 impl KeyHash for CommitmentKey {}
 impl KeyHash for PtrOutpointKey {}
+impl KeyHash for NumericKey {}
 
 impl Commitment {
     pub fn is_finalized(&self, height: u32) -> bool {
@@ -291,6 +303,12 @@ impl From<PtrOutpointKey> for Hash {
     }
 }
 
+impl From<NumericKey> for Hash {
+    fn from(value: NumericKey) -> Self {
+        value.0
+    }
+}
+
 impl PtrOutpointKey {
     pub fn from_outpoint<H: KeyHasher>(outpoint: OutPoint) -> Self {
         let mut buffer = [0u8; 36];
@@ -319,6 +337,15 @@ impl RegistryKey {
 impl RegistrySptrKey {
     pub fn from_sptr<H: KeyHasher>(sptr: Sptr) -> Self {
         RegistrySptrKey(ns_hash::<H>(KeyKind::RegistrySptr, sptr.to_bytes()))
+    }
+}
+
+impl NumericKey {
+    pub fn from_numeric<H: KeyHasher>(numeric: &SNumeric) -> Self {
+        let mut buf = [0u8; 6];
+        buf[..4].copy_from_slice(&numeric.block().to_le_bytes());
+        buf[4..].copy_from_slice(&numeric.tx_pos().to_le_bytes());
+        Self(ns_hash::<H>(KeyKind::SNumeric, H::hash(&buf)))
     }
 }
 
@@ -479,6 +506,7 @@ impl Validator {
     pub fn process<H: KeyHasher>(
         &self, height: u32,
         tx: &Transaction,
+        tx_pos: u16,
         mut ctx: TxContext,
         spent_space_utxos: Vec<SpaceOut>,
         new_space_utxos: Vec<SpaceOut>,
@@ -619,6 +647,7 @@ impl Validator {
                 n,
                 sptr: Some(Ptr {
                     id: Sptr::from_spk::<H>(output.script_pubkey.clone()),
+                    numeric: SNumeric::new(height, tx_pos),
                     data: data_op.clone(),
                     last_update: height,
                 }),
@@ -880,6 +909,5 @@ mod hash_key_serde {
     impl_hash_key_serde!(RegistryKey);
     impl_hash_key_serde!(CommitmentKey);
 }
-use spaces_protocol::constants::ChainAnchor;
-use spaces_protocol::script::find_op_set_data;
+
 

@@ -15,7 +15,7 @@ use spaces_protocol::{
     validate::{TxChangeSet, UpdateKind, Validator},
     Bytes, Covenant, FullSpaceOut, RevokeReason, SpaceOut,
 };
-use spaces_ptr::{CommitmentKey, RegistryKey, RegistrySptrKey, PtrOutpointKey};
+use spaces_ptr::{CommitmentKey, NumericKey, RegistryKey, RegistrySptrKey, PtrOutpointKey};
 use spaces_wallet::bitcoin::{Network, Transaction};
 
 use crate::{
@@ -268,7 +268,7 @@ impl Client {
                     .map(|input| input.sstxo.previous_output).collect::<Vec<_>>();
                 let created_spaceouts = spaceouts.unwrap_or_default();
                 let ptrs_validated = self.ptr_validator
-                    .process::<Sha256>(height, &tx, ptrs_ctx, spent_spaceouts, created_spaceouts);
+                    .process::<Sha256>(height, &tx, position as _, ptrs_ctx, spent_spaceouts, created_spaceouts);
 
                 if let Some(idx) = ptr_meta.as_mut() {
                     {
@@ -350,9 +350,11 @@ impl Client {
                 vout: create.n as u32,
             };
 
-            // Ptr => Outpoint
+            // Ptr => Outpoint + Numeric => Sptr
             if let Some(ptr) = create.sptr.as_ref() {
                 state.insert_ptr(ptr.id, outpoint.into());
+                let numeric_key = NumericKey::from_numeric::<Sha256>(&ptr.numeric);
+                state.insert_numeric(numeric_key, ptr.id);
             }
 
             // Outpoint => PtrOut
