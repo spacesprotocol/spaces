@@ -104,9 +104,8 @@ pub struct FullPtrOut {
 #[cfg_attr(feature = "borsh", derive(BorshSerialize, BorshDeserialize))]
 pub struct PtrOut {
     pub n: usize,
-    /// Any handle associated with this output
     #[cfg_attr(feature = "serde", serde(flatten))]
-    pub sptr: Option<Ptr>,
+    pub sptr: Ptr,
     /// The value of the output, in satoshis.
     #[cfg_attr(
         feature = "borsh",
@@ -253,6 +252,7 @@ pub struct ChainProofRequest {
 #[derive(Clone, Copy)]
 pub enum PtrKeyKind {
     Sptr(Sptr),
+    Numeric(SNumeric),
     Commitment(CommitmentKey),
     Registry(RegistryKey),
 }
@@ -408,51 +408,48 @@ impl TxContext {
             let ptrout = src.get_ptrout(&input.previous_output)?;
 
             if let Some(ptrout) = ptrout {
-                let delegate = match &ptrout.sptr {
-                    Some(sptr) => {
-                        let rsk = RegistrySptrKey::from_sptr::<H>(sptr.id);
+                let delegate = {
+                    let rsk = RegistrySptrKey::from_sptr::<H>(ptrout.sptr.id);
 
-                        match src.get_delegator(&rsk)? {
-                            Some(slabel) => {
-                                let registry_key = RegistryKey::from_slabel::<H>(&slabel);
-                                let tip_root = src.get_commitments_tip(&registry_key)?;
-                                let tip = match tip_root {
-                                    Some(root) => {
-                                        let ck = CommitmentKey::new::<H>(&slabel, root);
-                                        src.get_commitment(&ck)?
-                                    }
-                                    None => None,
-                                };
+                    match src.get_delegator(&rsk)? {
+                        Some(slabel) => {
+                            let registry_key = RegistryKey::from_slabel::<H>(&slabel);
+                            let tip_root = src.get_commitments_tip(&registry_key)?;
+                            let tip = match tip_root {
+                                Some(root) => {
+                                    let ck = CommitmentKey::new::<H>(&slabel, root);
+                                    src.get_commitment(&ck)?
+                                }
+                                None => None,
+                            };
 
-                                // Determine pending and finalized tips
-                                let (pending_tip, finalized_tip) = match tip {
-                                    Some(t) if t.is_finalized(height) => {
-                                        (None, Some(t))
-                                    }
-                                    Some(t) => {
-                                        // Tip is pending, check for previous finalized commitment
-                                        let finalized = match t.prev_root {
-                                            Some(prev_root) => {
-                                                let ck = CommitmentKey::new::<H>(&slabel, prev_root);
-                                                src.get_commitment(&ck)?
-                                            }
-                                            None => None,
-                                        };
-                                        (Some(t), finalized)
-                                    }
-                                    None => (None, None),
-                                };
+                            // Determine pending and finalized tips
+                            let (pending_tip, finalized_tip) = match tip {
+                                Some(t) if t.is_finalized(height) => {
+                                    (None, Some(t))
+                                }
+                                Some(t) => {
+                                    // Tip is pending, check for previous finalized commitment
+                                    let finalized = match t.prev_root {
+                                        Some(prev_root) => {
+                                            let ck = CommitmentKey::new::<H>(&slabel, prev_root);
+                                            src.get_commitment(&ck)?
+                                        }
+                                        None => None,
+                                    };
+                                    (Some(t), finalized)
+                                }
+                                None => (None, None),
+                            };
 
-                                Some(DelegateContext {
-                                    space: slabel,
-                                    pending_tip,
-                                    finalized_tip,
-                                })
-                            }
-                            None => None,
+                            Some(DelegateContext {
+                                space: slabel,
+                                pending_tip,
+                                finalized_tip,
+                            })
                         }
+                        None => None,
                     }
-                    None => None,
                 };
 
                 inputs.push(Stxo {
@@ -645,12 +642,12 @@ impl Validator {
 
             changeset.creates.push(PtrOut {
                 n,
-                sptr: Some(Ptr {
+                sptr: Ptr {
                     id: Sptr::from_spk::<H>(output.script_pubkey.clone()),
                     numeric: SNumeric::new(height, tx_pos),
                     data: data_op.clone(),
                     last_update: height,
-                }),
+                },
                 value: output.value,
                 script_pubkey: output.script_pubkey.clone(),
             });
@@ -669,10 +666,7 @@ impl Validator {
         height: u32,
         data: &Option<Bytes>,
     ) {
-        let mut ptr = match ptrout.sptr {
-            None => return,
-            Some(ptr) => ptr,
-        };
+        let mut ptr = ptrout.sptr;
         // if a corresponding output at the same index has the same value,
         // that output becomes the PTR
         let mut output_index = input_index;
@@ -707,7 +701,7 @@ impl Validator {
         ptrout.n = output_index;
         ptrout.value = output.value;
         ptrout.script_pubkey = output.script_pubkey.clone();
-        ptrout.sptr = Some(ptr);
+        ptrout.sptr = ptr;
         changeset.creates.push(ptrout);
     }
 }

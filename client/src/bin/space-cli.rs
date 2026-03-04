@@ -28,7 +28,7 @@ use spaces_client::{
     },
     rpc::{
         BidParams, OpenParams, RegisterParams, RpcClient, RpcWalletRequest,
-        RpcWalletTxBuilder, SendCoinsParams, SpaceOrPtr, TransferSpacesParams,
+        RpcWalletTxBuilder, SendCoinsParams, Subject, TransferSpacesParams,
     },
     wallets::{AddressKind, WalletResponse},
 };
@@ -36,6 +36,7 @@ use spaces_client::rpc::{CommitParams, CreatePtrParams, DelegateParams, SetPtrDa
 use spaces_client::store::Sha256;
 use spaces_protocol::bitcoin::{Amount, FeeRate, OutPoint, Txid};
 use spaces_protocol::slabel::SLabel;
+use spaces_ptr::snumeric::SNumeric;
 use spaces_ptr::sptr::Sptr;
 use spaces_wallet::{bitcoin::secp256k1::schnorr::Signature, export::WalletExport, nostr::{NostrEvent, NostrTag}, Listing};
 use spaces_wallet::bitcoin::hashes::sha256;
@@ -237,7 +238,8 @@ enum Commands {
     /// Get the current space a sptr is responsible for
     #[command(name = "getdelegator")]
     GetDelegator {
-        sptr: Sptr,
+        /// The sptr or numeric identifier (e.g., sptr1... or #800000-3)
+        sptr: String,
     },
     /// Get the current sptr responsible for a space
     #[command(name = "getdelegation")]
@@ -402,8 +404,8 @@ enum Commands {
     /// Associate on-chain record data with a space/sptr as a fallback to P2P options like Fabric.
     #[command(name = "setrawfallback")]
     SetRawFallback {
-        /// Space name or SPTR identifier
-        space_or_sptr: String,
+        /// Space name, SPTR, or numeric identifier
+        subject: String,
         /// Hex encoded data
         data: String,
         /// Fee rate to use in sat/vB
@@ -500,11 +502,11 @@ impl SpaceCli {
         anchor: bool,
         most_recent: bool,
     ) -> Result<NostrEvent, ClientError> {
-        let space_or_ptr = parse_space_or_ptr(&space)
-            .map_err(|e| ClientError::Custom(format!("Invalid space or sptr: {}", e)))?;
+        let subject = parse_subject(&space)
+            .map_err(|e| ClientError::Custom(format!("Invalid subject: {}", e)))?;
         let mut result = self
             .client
-            .wallet_sign_event(&self.wallet, space_or_ptr, event)
+            .wallet_sign_event(&self.wallet, subject, event)
             .await?;
 
         if anchor {
@@ -596,17 +598,19 @@ fn normalize_space(space: &str) -> String {
     }
 }
 
-/// Parse a string as either a space name or an sptr
-fn parse_space_or_ptr(s: &str) -> anyhow::Result<SpaceOrPtr> {
-    // Try to parse as SPTR first (starts with "sptr1")
+/// Parse a string as a space name, sptr, or numeric identifier
+fn parse_subject(s: &str) -> anyhow::Result<Subject> {
     if s.starts_with("sptr1") {
         Sptr::from_str(s)
-            .map(SpaceOrPtr::Ptr)
+            .map(Subject::Ptr)
             .map_err(|e| anyhow!("Invalid sptr: {}", e))
+    } else if s.starts_with('#') {
+        SNumeric::from_str(s)
+            .map(Subject::Numeric)
+            .map_err(|e| anyhow!("Invalid numeric: {}", e))
     } else {
-        // Otherwise parse as space name
         SLabel::from_str(s)
-            .map(SpaceOrPtr::Space)
+            .map(Subject::Space)
             .map_err(|e| anyhow!("Invalid space name: {}", e))
     }
 }
@@ -778,10 +782,9 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
             .await?
         }
         Commands::Renew { spaces, fee_rate } => {
-            use spaces_client::rpc::SpaceOrPtr;
             let spaces: Vec<_> = spaces.into_iter().map(|s| {
                 let normalized = normalize_space(&s);
-                SpaceOrPtr::Space(SLabel::from_str(&normalized).expect("valid space"))
+                Subject::Space(SLabel::from_str(&normalized).expect("valid space"))
             }).collect();
             cli.send_request(
                 Some(RpcWalletRequest::Transfer(TransferSpacesParams {
@@ -801,17 +804,17 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
             data,
             fee_rate,
         } => {
-            use spaces_client::rpc::SpaceOrPtr;
-            // Parse spaces and PTRs into SpaceOrPtr
+            // Parse spaces, PTRs, and numerics into Subject
             let spaces: Result<Vec<_>, _> = spaces.into_iter().map(|s| {
                 if s.starts_with("sptr1") {
-                    // Parse as SPTR
-                    Sptr::from_str(&s).map(SpaceOrPtr::Ptr)
+                    Sptr::from_str(&s).map(Subject::Ptr)
                         .map_err(|e| ClientError::Custom(format!("Invalid SPTR '{}': {}", s, e)))
+                } else if s.starts_with('#') {
+                    SNumeric::from_str(&s).map(Subject::Numeric)
+                        .map_err(|e| ClientError::Custom(format!("Invalid numeric '{}': {}", s, e)))
                 } else {
-                    // Normalize and parse as space
                     let normalized = normalize_space(&s);
-                    SLabel::from_str(&normalized).map(SpaceOrPtr::Space)
+                    SLabel::from_str(&normalized).map(Subject::Space)
                         .map_err(|e| ClientError::Custom(format!("Invalid space '{}': {}", s, e)))
                 }
             }).collect();
@@ -857,7 +860,7 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
             .await?
         }
         Commands::SetRawFallback {
-            space_or_sptr,
+            subject: subject_str,
             data,
             fee_rate,
         } => {
@@ -871,35 +874,21 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
                 }
             };
 
-            // Check if it's an SPTR (starts with "sptr1")
-            if space_or_sptr.starts_with("sptr1") {
-                let sptr = Sptr::from_str(&space_or_sptr).map_err(|e| {
-                    ClientError::Custom(format!("Invalid SPTR: {}", e))
-                })?;
-                cli.send_request(
-                    Some(RpcWalletRequest::SetPtrData(SetPtrDataParams { sptr, data })),
-                    None,
-                    fee_rate,
-                    false,
-                )
-                .await?;
-            } else {
-                // TODO: support set data for spaces
-                // // Space fallback: use existing space script
-                // let space = normalize_space(&space_or_sptr);
-                // let space_script =
-                //     spaces_protocol::script::create_set_data(data.as_slice());
-                //
-                // cli.send_request(
-                //     Some(RpcWalletRequest::Execute(ExecuteParams {
-                //         context: vec![space],
-                //         space_script,
-                //     })),
-                //     None,
-                //     fee_rate,
-                //     false,
-                // )
-                // .await?;
+            let subject = parse_subject(&subject_str)
+                .map_err(|e| ClientError::Custom(format!("Invalid subject: {}", e)))?;
+            match &subject {
+                Subject::Ptr(_) | Subject::Numeric(_) => {
+                    cli.send_request(
+                        Some(RpcWalletRequest::SetPtrData(SetPtrDataParams { subject, data })),
+                        None,
+                        fee_rate,
+                        false,
+                    )
+                    .await?;
+                }
+                Subject::Space(_) => {
+                    // TODO: support set data for spaces
+                }
             }
         }
         Commands::ListUnspent => {
@@ -1070,11 +1059,11 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
                 Some(space) => space,
             };
 
-            let space_or_ptr = parse_space_or_ptr(&space)
-                .map_err(|e| ClientError::Custom(format!("Invalid space or sptr: {}", e)))?;
+            let subject = parse_subject(&space)
+                .map_err(|e| ClientError::Custom(format!("Invalid subject: {}", e)))?;
             let mut event = cli
                 .client
-                .verify_event(space_or_ptr, event)
+                .verify_event(subject, event)
                 .await
                 .map_err(|e| ClientError::Custom(e.to_string()))?;
             event.proof = None;
@@ -1085,11 +1074,11 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
         Commands::VerifyEvent { space, input } => {
             let event = read_event(input)
                 .map_err(|e| ClientError::Custom(format!("input error: {}", e.to_string())))?;
-            let space_or_ptr = parse_space_or_ptr(&space)
-                .map_err(|e| ClientError::Custom(format!("Invalid space or sptr: {}", e)))?;
+            let subject = parse_subject(&space)
+                .map_err(|e| ClientError::Custom(format!("Invalid subject: {}", e)))?;
             let event = cli
                 .client
-                .verify_event(space_or_ptr, event)
+                .verify_event(subject, event)
                 .await
                 .map_err(|e| ClientError::Custom(e.to_string()))?;
 
@@ -1112,12 +1101,11 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
                 .await?
         }
         Commands::GetPtr { spk } => {
-            let sptr = Sptr::from_str(&spk)
-                .map_err(|e| ClientError::Custom(format!("input error: {}", e.to_string())))?;
-
+            let subject = parse_subject(&spk)
+                .map_err(|e| ClientError::Custom(format!("input error: {}", e)))?;
             let ptr = cli
                 .client
-                .get_ptr(sptr)
+                .get_ptr(subject)
                 .await
                 .map_err(|e| ClientError::Custom(e.to_string()))?;
             println!("{}", serde_json::to_string(&ptr).expect("result"));
@@ -1207,7 +1195,6 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
                 None => return Err(ClientError::Custom("no such space".to_string()))
             };
 
-            use spaces_client::rpc::SpaceOrPtr;
             let label = space_info.spaceout.space.as_ref().expect("space").name.clone();
             let delegation = cli.client.get_delegation(label.clone()).await?;
             if delegation.is_none() {
@@ -1217,7 +1204,7 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
 
             cli.send_request(
                 Some(RpcWalletRequest::Transfer(TransferSpacesParams {
-                    spaces: vec![SpaceOrPtr::Ptr(delegation)],
+                    spaces: vec![Subject::Ptr(delegation)],
                     to: Some(to),
                     data: None,
                 })),
@@ -1228,9 +1215,11 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
                 .await?;
         }
         Commands::GetDelegator { sptr } => {
+            let subject = parse_subject(&sptr)
+                .map_err(|e| ClientError::Custom(format!("Invalid subject: {}", e)))?;
             let delegator = cli
                 .client
-                .get_delegator(sptr)
+                .get_delegator(subject)
                 .await
                 .map_err(|e| ClientError::Custom(e.to_string()))?;
             println!("{}", serde_json::to_string(&delegator).expect("result"));

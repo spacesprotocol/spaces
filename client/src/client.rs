@@ -351,11 +351,9 @@ impl Client {
             };
 
             // Ptr => Outpoint + Numeric => Sptr
-            if let Some(ptr) = create.sptr.as_ref() {
-                state.insert_ptr(ptr.id, outpoint.into());
-                let numeric_key = NumericKey::from_numeric::<Sha256>(&ptr.numeric);
-                state.insert_numeric(numeric_key, ptr.id);
-            }
+            state.insert_ptr(create.sptr.id, outpoint.into());
+            let numeric_key = NumericKey::from_numeric::<Sha256>(&create.sptr.numeric);
+            state.insert_numeric(numeric_key, create.sptr.id);
 
             // Outpoint => PtrOut
             let outpoint_key = PtrOutpointKey::from_outpoint::<Sha256>(outpoint);
