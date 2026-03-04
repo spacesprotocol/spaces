@@ -46,7 +46,8 @@ use spaces_protocol::{
     slabel::SLabel,
     Covenant, FullSpaceOut, Space,
 };
-use spaces_ptr::{PtrSource, sptr::Sptr};
+use spaces_ptr::{NumericKey, PtrSource, sptr::Sptr};
+use spaces_ptr::snumeric::SNumeric;
 
 use crate::{
     address::SpaceAddress,
@@ -83,11 +84,44 @@ pub struct Balance {
     pub details: BalanceDetails,
 }
 
-/// Either a space name or an Sptr
+/// A space name, sptr, or numeric identifier
 #[derive(Debug, Clone)]
-pub enum SpaceOrSptr {
+pub enum Subject {
     Space(SLabel),
-    Sptr(Sptr),
+    Ptr(Sptr),
+    Numeric(SNumeric),
+}
+
+impl Serialize for Subject {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Subject::Space(label) => serializer.serialize_str(&label.to_string()),
+            Subject::Ptr(sptr) => serializer.serialize_str(&sptr.to_string()),
+            Subject::Numeric(num) => serializer.serialize_str(&num.to_string()),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Subject {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = <String as Deserialize>::deserialize(deserializer)?;
+        if s.starts_with("sptr1") {
+            Sptr::from_str(&s)
+                .map(Subject::Ptr)
+                .map_err(serde::de::Error::custom)
+        } else if s.starts_with('#') {
+            SNumeric::from_str(&s)
+                .map(Subject::Numeric)
+                .map_err(serde::de::Error::custom)
+        } else {
+            SLabel::from_str(&s)
+                .map(Subject::Space)
+                .map_err(serde::de::Error::custom)
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -407,11 +441,11 @@ impl SpacesWallet {
     pub fn sign_event<H: KeyHasher, S: SpacesSource + PtrSource>(
         &mut self,
         src: &mut S,
-        space_or_sptr: SpaceOrSptr,
+        subject: Subject,
         mut event: NostrEvent,
     ) -> anyhow::Result<NostrEvent> {
-        let outpoint = match &space_or_sptr {
-            SpaceOrSptr::Space(label) => {
+        let outpoint = match &subject {
+            Subject::Space(label) => {
                 if event.space().is_some_and(|s| s != label.to_string()) {
                     return Err(anyhow::anyhow!("Space tag does not match specified space"));
                 }
@@ -419,8 +453,15 @@ impl SpacesWallet {
                 src.get_space_outpoint(&space_key)?
                     .ok_or_else(|| anyhow::anyhow!("Space not found"))?
             }
-            SpaceOrSptr::Sptr(sptr) => {
+            Subject::Ptr(sptr) => {
                 src.get_ptr_outpoint(sptr)?
+                    .ok_or_else(|| anyhow::anyhow!("Sptr not found"))?
+            }
+            Subject::Numeric(numeric) => {
+                let key = NumericKey::from_numeric::<H>(numeric);
+                let sptr = src.get_numeric(&key)?
+                    .ok_or_else(|| anyhow::anyhow!("Numeric '{}' not found", numeric))?;
+                src.get_ptr_outpoint(&sptr)?
                     .ok_or_else(|| anyhow::anyhow!("Sptr not found"))?
             }
         };
@@ -438,11 +479,11 @@ impl SpacesWallet {
 
     pub fn verify_event<H: KeyHasher, S: SpacesSource + PtrSource>(
         src: &mut S,
-        space_or_sptr: SpaceOrSptr,
+        subject: Subject,
         mut event: NostrEvent,
     ) -> anyhow::Result<NostrEvent> {
-        let script_pubkey = match &space_or_sptr {
-            SpaceOrSptr::Space(label) => {
+        let script_pubkey = match &subject {
+            Subject::Space(label) => {
                 if event.space().is_some_and(|s| s != label.to_string()) {
                     return Err(anyhow::anyhow!("Space tag does not match specified space"));
                 }
@@ -453,8 +494,18 @@ impl SpacesWallet {
                     .ok_or_else(|| anyhow::anyhow!("Space not found"))?;
                 spaceout.script_pubkey
             }
-            SpaceOrSptr::Sptr(sptr) => {
+            Subject::Ptr(sptr) => {
                 let outpoint = src.get_ptr_outpoint(sptr)?
+                    .ok_or_else(|| anyhow::anyhow!("Sptr not found"))?;
+                let ptrout = src.get_ptrout(&outpoint)?
+                    .ok_or_else(|| anyhow::anyhow!("Ptrout not found"))?;
+                ptrout.script_pubkey
+            }
+            Subject::Numeric(numeric) => {
+                let key = NumericKey::from_numeric::<H>(numeric);
+                let sptr = src.get_numeric(&key)?
+                    .ok_or_else(|| anyhow::anyhow!("Numeric '{}' not found", numeric))?;
+                let outpoint = src.get_ptr_outpoint(&sptr)?
                     .ok_or_else(|| anyhow::anyhow!("Sptr not found"))?;
                 let ptrout = src.get_ptrout(&outpoint)?
                     .ok_or_else(|| anyhow::anyhow!("Ptrout not found"))?;
@@ -493,19 +544,26 @@ impl SpacesWallet {
     pub fn sign_schnorr<H: KeyHasher, S: SpacesSource + PtrSource>(
         &mut self,
         src: &mut S,
-        space_or_sptr: SpaceOrSptr,
+        subject: Subject,
         message: &[u8],
     ) -> anyhow::Result<schnorr::Signature> {
         use bitcoin::hashes::{sha256, Hash, HashEngine};
 
-        let outpoint = match space_or_sptr {
-            SpaceOrSptr::Space(ref label) => {
+        let outpoint = match &subject {
+            Subject::Space(label) => {
                 let space_key = SpaceKey::from(H::hash(label.as_ref()));
                 src.get_space_outpoint(&space_key)?
                     .ok_or_else(|| anyhow::anyhow!("Space not found"))?
             }
-            SpaceOrSptr::Sptr(ref sptr) => {
+            Subject::Ptr(sptr) => {
                 src.get_ptr_outpoint(sptr)?
+                    .ok_or_else(|| anyhow::anyhow!("Sptr not found"))?
+            }
+            Subject::Numeric(numeric) => {
+                let key = NumericKey::from_numeric::<H>(numeric);
+                let sptr = src.get_numeric(&key)?
+                    .ok_or_else(|| anyhow::anyhow!("Numeric '{}' not found", numeric))?;
+                src.get_ptr_outpoint(&sptr)?
                     .ok_or_else(|| anyhow::anyhow!("Sptr not found"))?
             }
         };
@@ -531,14 +589,14 @@ impl SpacesWallet {
     /// Verify a schnorr signature against a space or sptr's public key
     pub fn verify_schnorr<H: KeyHasher, S: SpacesSource + PtrSource>(
         src: &mut S,
-        space_or_sptr: SpaceOrSptr,
+        subject: Subject,
         message: &[u8],
         signature: &schnorr::Signature,
     ) -> anyhow::Result<()> {
         use bitcoin::hashes::{sha256, Hash, HashEngine};
 
-        let script_pubkey = match space_or_sptr {
-            SpaceOrSptr::Space(ref label) => {
+        let script_pubkey = match &subject {
+            Subject::Space(label) => {
                 let space_key = SpaceKey::from(H::hash(label.as_ref()));
                 let outpoint = src.get_space_outpoint(&space_key)?
                     .ok_or_else(|| anyhow::anyhow!("Space not found"))?;
@@ -546,8 +604,18 @@ impl SpacesWallet {
                     .ok_or_else(|| anyhow::anyhow!("Space not found"))?;
                 spaceout.script_pubkey
             }
-            SpaceOrSptr::Sptr(ref sptr) => {
+            Subject::Ptr(sptr) => {
                 let outpoint = src.get_ptr_outpoint(sptr)?
+                    .ok_or_else(|| anyhow::anyhow!("Sptr not found"))?;
+                let ptrout = src.get_ptrout(&outpoint)?
+                    .ok_or_else(|| anyhow::anyhow!("Ptrout not found"))?;
+                ptrout.script_pubkey
+            }
+            Subject::Numeric(numeric) => {
+                let key = NumericKey::from_numeric::<H>(numeric);
+                let sptr = src.get_numeric(&key)?
+                    .ok_or_else(|| anyhow::anyhow!("Numeric '{}' not found", numeric))?;
+                let outpoint = src.get_ptr_outpoint(&sptr)?
                     .ok_or_else(|| anyhow::anyhow!("Sptr not found"))?;
                 let ptrout = src.get_ptrout(&outpoint)?
                     .ok_or_else(|| anyhow::anyhow!("Ptrout not found"))?;

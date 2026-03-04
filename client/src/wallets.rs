@@ -25,7 +25,7 @@ use spaces_wallet::{
     builder::{CoinTransfer, SpaceTransfer, SpacesAwareCoinSelection},
     nostr::NostrEvent,
     tx_event::{TxEvent, TxEventKind, TxRecord},
-    Balance, DoubleUtxo, Listing, SpacesWallet, SpaceOrSptr, WalletInfo, WalletOutput,
+    Balance, DoubleUtxo, Listing, SpacesWallet, Subject, WalletInfo, WalletOutput,
 };
 
 use tabled::Tabled;
@@ -43,7 +43,9 @@ use crate::{calc_progress, checker::TxChecker, client::BlockSource, config::Exte
     BitcoinBlockSource, BitcoinRpc, BitcoinRpcError, BlockEvent, BlockFetchError, BlockFetcher,
 }, std_wait};
 use crate::cbf::{CompactFilterSync};
-use crate::rpc::{CommitParams, SpaceOrPtr};
+use crate::rpc::CommitParams;
+use spaces_ptr::NumericKey;
+use spaces_ptr::snumeric::SNumeric;
 use crate::spaces::Spaced;
 use crate::store::chain::Chain;
 use crate::store::Sha256;
@@ -57,6 +59,7 @@ pub enum ResolvableTarget {
     SpaceAddress(SpaceAddress),
     Address(Address),
     Sptr(Sptr),
+    Numeric(SNumeric),
 }
 
 #[derive(Debug)]
@@ -64,6 +67,7 @@ pub enum ResolvableTargetParseError {
     SpaceLabelParseError(spaces_protocol::errors::Error),
     AddressParseError(ParseError),
     SptrParseError(SptrParseError),
+    NumericParseError(spaces_ptr::snumeric::SNumericParseError),
 }
 
 impl Display for ResolvableTargetParseError {
@@ -72,6 +76,7 @@ impl Display for ResolvableTargetParseError {
             ResolvableTargetParseError::SpaceLabelParseError(e) => write!(f, "{}", e),
             ResolvableTargetParseError::AddressParseError(e) => write!(f, "{}", e),
             ResolvableTargetParseError::SptrParseError(e) => write!(f, "{}", e),
+            ResolvableTargetParseError::NumericParseError(e) => write!(f, "{}", e),
         }
     }
 }
@@ -93,6 +98,11 @@ impl FromStr for ResolvableTarget {
                 .map(ResolvableTarget::Sptr)
                 .map_err(ResolvableTargetParseError::SptrParseError);
         }
+        if s.starts_with('#') {
+            return SNumeric::from_str(s)
+                .map(ResolvableTarget::Numeric)
+                .map_err(ResolvableTargetParseError::NumericParseError);
+        }
 
         match SpaceAddress::from_str(s) {
             Ok(addr) => Ok(ResolvableTarget::SpaceAddress(addr)),
@@ -110,6 +120,7 @@ impl fmt::Display for ResolvableTarget {
         match self {
             ResolvableTarget::Space(label) => write!(f, "{}", label),
             ResolvableTarget::Sptr(sptr) => write!(f, "{}", sptr),
+            ResolvableTarget::Numeric(num) => write!(f, "{}", num),
             ResolvableTarget::SpaceAddress(addr) => write!(f, "{}", addr),
             ResolvableTarget::Address(addr) => write!(f, "{}", addr),
         }
@@ -281,12 +292,12 @@ pub enum WalletCommand {
     },
     UnloadWallet,
     SignEvent {
-        space_or_sptr: SpaceOrPtr,
+        subject: Subject,
         event: NostrEvent,
         resp: crate::rpc::Responder<anyhow::Result<NostrEvent>>,
     },
     SignSchnorr {
-        space_or_sptr: SpaceOrPtr,
+        subject: Subject,
         message: Vec<u8>,
         resp: crate::rpc::Responder<anyhow::Result<schnorr::Signature>>,
     },
@@ -597,19 +608,11 @@ impl RpcWallet {
             WalletCommand::Sell { space, price, resp } => {
                 _ = resp.send(wallet.sell::<Sha256>(chain, &space, Amount::from_sat(price)));
             }
-            WalletCommand::SignEvent { space_or_sptr, event, resp } => {
-                let space_or_sptr = match space_or_sptr {
-                    SpaceOrPtr::Space(label) => SpaceOrSptr::Space(label),
-                    SpaceOrPtr::Ptr(sptr) => SpaceOrSptr::Sptr(sptr),
-                };
-                _ = resp.send(wallet.sign_event::<Sha256, _>(chain, space_or_sptr, event));
+            WalletCommand::SignEvent { subject, event, resp } => {
+                _ = resp.send(wallet.sign_event::<Sha256, _>(chain, subject, event));
             }
-            WalletCommand::SignSchnorr { space_or_sptr, message, resp } => {
-                let space_or_sptr = match space_or_sptr {
-                    SpaceOrPtr::Space(label) => SpaceOrSptr::Space(label),
-                    SpaceOrPtr::Ptr(sptr) => SpaceOrSptr::Sptr(sptr),
-                };
-                _ = resp.send(wallet.sign_schnorr::<Sha256, _>(chain, space_or_sptr, &message));
+            WalletCommand::SignSchnorr { subject, message, resp } => {
+                _ = resp.send(wallet.sign_schnorr::<Sha256, _>(chain, subject, &message));
             }
             WalletCommand::CanOperate { space, resp } => {
                 let result = Self::can_operate(wallet, chain, space);
@@ -1089,6 +1092,21 @@ impl RpcWallet {
                     network.fallback_network(),
                 )?
             }
+            ResolvableTarget::Numeric(numeric) => {
+                let key = NumericKey::from_numeric::<Sha256>(&numeric);
+                let sptr = match chain.get_numeric(&key)? {
+                    None => return Ok(None),
+                    Some(sptr) => sptr,
+                };
+                let script_pubkey = match chain.get_ptr_info(&sptr)? {
+                    None => return Ok(None),
+                    Some(fullptrout) => fullptrout.ptrout.script_pubkey,
+                };
+                Address::from_script(
+                    script_pubkey.as_script(),
+                    network.fallback_network(),
+                )?
+            }
         };
         Ok(Some(address))
     }
@@ -1167,12 +1185,21 @@ impl RpcWallet {
                         None
                     };
 
-                    // Process each item - either a space or PTR
+                    // Process each item - space, PTR, or numeric
                     for item in &params.spaces {
                         match item {
-                            SpaceOrPtr::Ptr(sptr) => {
+                            Subject::Ptr(_) | Subject::Numeric(_) => {
+                                let sptr = match item {
+                                    Subject::Ptr(s) => *s,
+                                    Subject::Numeric(numeric) => {
+                                        let key = NumericKey::from_numeric::<Sha256>(numeric);
+                                        chain.get_numeric(&key)?
+                                            .ok_or_else(|| anyhow!("transfer: numeric '{}' not found", numeric))?
+                                    }
+                                    _ => unreachable!(),
+                                };
                                 // Handle PTR transfer
-                                let ptr = match chain.get_ptr_info(sptr)? {
+                                let ptr = match chain.get_ptr_info(&sptr)? {
                                     None => return Err(anyhow!("transfer: PTR '{}' not found or not owned", sptr)),
                                     Some(full) if !wallet.is_mine(full.ptrout.script_pubkey.clone()) => {
                                         return Err(anyhow!("transfer: you don't own PTR '{}'", sptr))
@@ -1196,7 +1223,7 @@ impl RpcWallet {
                                     recipient: recipient_addr,
                                 });
                             }
-                            SpaceOrPtr::Space(space) => {
+                            Subject::Space(space) => {
                                 // Handle space transfer
                                 let spacehash = SpaceKey::from(Sha256::hash(space.as_ref()));
                                 match chain.get_space_info(&spacehash)? {
@@ -1407,16 +1434,25 @@ impl RpcWallet {
                     });
                 }
                 RpcWalletRequest::SetPtrData(params) => {
+                    let sptr = match &params.subject {
+                        Subject::Ptr(s) => *s,
+                        Subject::Numeric(numeric) => {
+                            let key = NumericKey::from_numeric::<Sha256>(numeric);
+                            chain.get_numeric(&key)?
+                                .ok_or_else(|| anyhow!("setptrdata: numeric '{}' not found", numeric))?
+                        }
+                        Subject::Space(_) => return Err(anyhow!("setptrdata: expected a ptr or numeric, not a space")),
+                    };
                     // Find the PTR UTXO
-                    let ptr_info = match chain.get_ptr_info(&params.sptr)? {
-                        None => return Err(anyhow!("setptrdata: PTR '{}' not found", params.sptr)),
+                    let ptr_info = match chain.get_ptr_info(&sptr)? {
+                        None => return Err(anyhow!("setptrdata: PTR '{}' not found", sptr)),
                         Some(ptr) if !wallet.is_mine(ptr.ptrout.script_pubkey.clone()) => {
-                            return Err(anyhow!("setptrdata: you don't own '{}'", params.sptr))
+                            return Err(anyhow!("setptrdata: you don't own '{}'", sptr))
                         }
                         Some(ptr) if wallet.get_utxo(OutPoint::new(ptr.txid, ptr.ptrout.n as u32)).is_none() => {
                             return Err(anyhow!(
                                 "setptrdata '{}': wallet already has a pending tx for this PTR",
-                                params.sptr
+                                sptr
                             ))
                         }
                         Some(ptr) => ptr,
@@ -1680,13 +1716,13 @@ impl RpcWallet {
 
     pub async fn send_sign_event(
         &self,
-        space_or_sptr: SpaceOrPtr,
+        subject: Subject,
         event: NostrEvent,
     ) -> anyhow::Result<NostrEvent> {
         let (resp, resp_rx) = oneshot::channel();
         self.sender
             .send(WalletCommand::SignEvent {
-                space_or_sptr,
+                subject,
                 event,
                 resp,
             })
@@ -1756,13 +1792,13 @@ impl RpcWallet {
 
     pub async fn send_sign_schnorr(
         &self,
-        space_or_sptr: SpaceOrPtr,
+        subject: Subject,
         message: Vec<u8>,
     ) -> anyhow::Result<schnorr::Signature> {
         let (resp, resp_rx) = oneshot::channel();
         self.sender
             .send(WalletCommand::SignSchnorr {
-                space_or_sptr,
+                subject,
                 message,
                 resp,
             })

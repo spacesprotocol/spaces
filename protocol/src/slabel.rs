@@ -160,6 +160,27 @@ impl<'a> TryFrom<&'a [u8]> for SLabelRef<'a> {
             return Err(Error::Name(NameErrorKind::EOF));
         }
         let label = &value[..=len];
+
+        // Numeric label: #<digits>-<digits>
+        if label[1] == b'#' {
+            let content = &label[2..];
+            let dash_pos = content.iter().position(|&c| c == b'-')
+                .filter(|&p| p > 0)
+                .ok_or(Error::Name(NameErrorKind::InvalidCharacter))?;
+
+            let (before, after) = content.split_at(dash_pos);
+            let after = &after[1..]; // skip the dash
+
+            if after.is_empty()
+                || !before.iter().all(|c| c.is_ascii_digit())
+                || !after.iter().all(|c| c.is_ascii_digit())
+            {
+                return Err(Error::Name(NameErrorKind::InvalidCharacter));
+            }
+
+            return Ok(SLabelRef(label));
+        }
+
         let mut verify_range = &label[1..];
         if verify_range.starts_with(PUNYCODE_PREFIX) && len > PUNYCODE_PREFIX.len() {
             verify_range = &verify_range[PUNYCODE_PREFIX.len()..]
@@ -221,18 +242,24 @@ impl TryFrom<&str> for SLabel {
     type Error = Error;
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
-        if !value.starts_with('@') {
-            return Err(Error::Name(NameErrorKind::NotCanonical));
+        if value.starts_with('#') {
+            return Self::from_str_unprefixed(value);
         }
-        let label = &value[1..];
-        Self::from_str_unprefixed(label)
+        if value.starts_with('@') {
+            return Self::from_str_unprefixed(&value[1..]);
+        }
+        Err(Error::Name(NameErrorKind::NotCanonical))
     }
 }
 
 impl Display for SLabel {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         let label_str = self.as_str_unprefixed().map_err(|_| core::fmt::Error)?;
-        write!(f, "@{}", label_str)
+        if self.is_numeric() {
+            write!(f, "{}", label_str)
+        } else {
+            write!(f, "@{}", label_str)
+        }
     }
 }
 
@@ -247,6 +274,10 @@ impl SLabel {
         SLabelRef(&self.0)
     }
 
+    pub fn is_numeric(&self) -> bool {
+        self.0[0] > 0 && self.0[1] == b'#'
+    }
+
     pub fn is_reserved(&self) -> bool {
         self.as_name_ref().is_reserved()
     }
@@ -257,6 +288,10 @@ impl SLabelRef<'_> {
         let mut owned = SLabel([0; MAX_LABEL_LEN + 1]);
         owned.0[..self.0.len()].copy_from_slice(self.0);
         owned
+    }
+
+    pub fn is_numeric(&self) -> bool {
+        self.0[0] > 0 && self.0.get(1) == Some(&b'#')
     }
 
     pub fn is_reserved(&self) -> bool {
@@ -465,5 +500,94 @@ mod tests {
         assert!(SLabel::try_from("@xn-").is_err());
         assert!(SLabel::try_from("@xn--").is_err());
         assert!(SLabel::try_from("@xxn--test").is_err());
+    }
+
+    #[test]
+    fn test_numeric_valid() {
+        let label = SLabel::try_from("#800000-3").unwrap();
+        assert_eq!(label.to_string(), "#800000-3");
+        assert!(label.is_numeric());
+
+        let label = SLabel::try_from("#0-0").unwrap();
+        assert_eq!(label.to_string(), "#0-0");
+        assert!(label.is_numeric());
+
+        let label = SLabel::try_from("#1-1").unwrap();
+        assert_eq!(label.to_string(), "#1-1");
+
+        // Large values
+        let label = SLabel::try_from("#4294967295-65535").unwrap();
+        assert_eq!(label.to_string(), "#4294967295-65535");
+    }
+
+    #[test]
+    fn test_numeric_invalid() {
+        // Just "#" with nothing after
+        assert!(SLabel::try_from("#").is_err(), "bare # should be invalid");
+
+        // Missing separator
+        assert!(SLabel::try_from("#123").is_err(), "missing dash");
+
+        // No digits before dash
+        assert!(SLabel::try_from("#-3").is_err(), "no digits before dash");
+
+        // No digits after dash
+        assert!(SLabel::try_from("#3-").is_err(), "no digits after dash");
+
+        // Non-digit characters
+        assert!(SLabel::try_from("#abc-3").is_err(), "letters before dash");
+        assert!(SLabel::try_from("#3-abc").is_err(), "letters after dash");
+
+        // Multiple dashes
+        assert!(SLabel::try_from("#3-4-5").is_err(), "multiple dashes");
+
+        // Spaces
+        assert!(SLabel::try_from("# 3-4").is_err(), "space in numeric");
+
+        // Dash only content
+        assert!(SLabel::try_from("#-").is_err(), "just dash after #");
+    }
+
+    #[test]
+    fn test_numeric_is_numeric() {
+        let named = SLabel::try_from("@example").unwrap();
+        assert!(!named.is_numeric());
+
+        let numeric = SLabel::try_from("#100-5").unwrap();
+        assert!(numeric.is_numeric());
+    }
+
+    #[test]
+    fn test_numeric_display_no_at_prefix() {
+        let label = SLabel::try_from("#100-5").unwrap();
+        // Should display as "#100-5" NOT "@#100-5"
+        assert_eq!(format!("{}", label), "#100-5");
+    }
+
+    #[test]
+    fn test_numeric_fromstr_roundtrip() {
+        let original = "#999-42";
+        let label = SLabel::from_str(original).unwrap();
+        assert_eq!(label.to_string(), original);
+    }
+
+    #[test]
+    fn test_numeric_raw_bytes() {
+        let label = SLabel::try_from("#1-2").unwrap();
+        // Content stored is "#1-2" (4 bytes), length byte = 4
+        let raw = label.as_ref();
+        assert_eq!(raw[0], 4); // length
+        assert_eq!(&raw[1..], b"#1-2");
+    }
+
+    #[test]
+    fn test_numeric_slabelref() {
+        // Build raw bytes: length + "#1-2"
+        let bytes = b"\x04#1-2";
+        let label_ref = SLabelRef::try_from(bytes.as_slice()).unwrap();
+        assert!(label_ref.is_numeric());
+        let owned = label_ref.to_owned();
+        assert!(owned.is_numeric());
+        assert_eq!(owned.to_string(), "#1-2");
     }
 }

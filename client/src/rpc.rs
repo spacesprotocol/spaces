@@ -2,7 +2,7 @@ use std::{
     collections::BTreeMap, fs, fs::File, io::Write, net::SocketAddr, path::PathBuf, str::FromStr,
     sync::Arc,
 };
-
+use std::collections::HashSet;
 use anyhow::{anyhow, Context};
 use bdk::{
     bitcoin::{Amount, BlockHash, FeeRate, Network, Txid},
@@ -21,7 +21,7 @@ use jsonrpsee::{
     types::ErrorObjectOwned,
 };
 use log::info;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 use spacedb::tx::ProofType;
 use spaces_protocol::{
     bitcoin,
@@ -43,13 +43,14 @@ use spaces_wallet::{
     export::WalletExport, nostr::NostrEvent, Balance, DoubleUtxo, Listing, SpacesWallet,
     WalletConfig, WalletDescriptors, WalletOutput,
 };
+pub use spaces_wallet::Subject;
 use tokio::{
     select,
     sync::{broadcast, mpsc, oneshot, RwLock},
     task::JoinSet,
 };
 use spaces_protocol::hasher::Hash;
-use spaces_ptr::{PtrSource, FullPtrOut, PtrOut, Commitment, RegistryKey, CommitmentKey, RegistrySptrKey, PtrOutpointKey, RootAnchor, ChainProofRequest, PtrKeyKind};
+use spaces_ptr::{PtrSource, FullPtrOut, NumericKey, PtrOut, Commitment, RegistryKey, CommitmentKey, RegistrySptrKey, PtrOutpointKey, RootAnchor, ChainProofRequest, PtrKeyKind};
 use spaces_ptr::sptr::Sptr;
 use spaces_wallet::bitcoin::hashes::sha256;
 use crate::auth::BasicAuthLayer;
@@ -139,15 +140,15 @@ pub enum ChainStateCommand {
         resp: Responder<anyhow::Result<Option<Sptr>>>,
     },
     GetDelegator {
-        sptr: Sptr,
+        subject: Subject,
         resp: Responder<anyhow::Result<Option<SLabel>>>,
     },
     GetPtr {
-        hash: Sptr,
+        subject: Subject,
         resp: Responder<anyhow::Result<Option<FullPtrOut>>>,
     },
     GetPtrOutpoint {
-        hash: Sptr,
+        subject: Subject,
         resp: Responder<anyhow::Result<Option<OutPoint>>>,
     },
     GetPtrOut {
@@ -179,12 +180,12 @@ pub enum ChainStateCommand {
         resp: Responder<anyhow::Result<()>>,
     },
     VerifyEvent {
-        space_or_sptr: SpaceOrPtr,
+        subject: Subject,
         event: NostrEvent,
         resp: Responder<anyhow::Result<NostrEvent>>,
     },
     VerifySchnorr {
-        space_or_sptr: SpaceOrPtr,
+        subject: Subject,
         message: Vec<u8>,
         signature: Vec<u8>,
         resp: Responder<anyhow::Result<()>>,
@@ -204,7 +205,7 @@ pub enum ChainStateCommand {
         resp: Responder<anyhow::Result<ProofResult>>,
     },
     ProvePtrOutpoint {
-        sptr: Sptr,
+        subject: Subject,
         prefer_recent: bool,
         resp: Responder<anyhow::Result<ProofResult>>,
     },
@@ -221,7 +222,7 @@ pub enum ChainStateCommand {
         resp: Responder<anyhow::Result<CertificateProofResult>>,
     },
     ProvePtrCertificate {
-        sptr: Sptr,
+        subject: Subject,
         target_block_height: u32,
         resp: Responder<anyhow::Result<PtrCertificateResult>>,
     },
@@ -269,13 +270,13 @@ pub trait Rpc {
     #[method(name = "getptr")]
     async fn get_ptr(
         &self,
-        ptr: Sptr,
+        subject: Subject,
     ) -> Result<Option<FullPtrOut>, ErrorObjectOwned>;
 
     #[method(name = "getptrowner")]
     async fn get_ptr_owner(
         &self,
-        ptr: Sptr,
+        subject: Subject,
     ) -> Result<Option<OutPoint>, ErrorObjectOwned>;
 
     #[method(name = "getptrout")]
@@ -288,7 +289,7 @@ pub trait Rpc {
     async fn get_delegation(&self, space: SLabel) -> Result<Option<Sptr>, ErrorObjectOwned>;
 
     #[method(name = "getdelegator")]
-    async fn get_delegator(&self, sptr: Sptr) -> Result<Option<SLabel>, ErrorObjectOwned>;
+    async fn get_delegator(&self, subject: Subject) -> Result<Option<SLabel>, ErrorObjectOwned>;
 
     #[method(name = "checkpackage")]
     async fn check_package(
@@ -329,7 +330,7 @@ pub trait Rpc {
     #[method(name = "verifyevent")]
     async fn verify_event(
         &self,
-        space_or_sptr: SpaceOrPtr,
+        subject: Subject,
         event: NostrEvent,
     ) -> Result<NostrEvent, ErrorObjectOwned>;
 
@@ -337,7 +338,7 @@ pub trait Rpc {
     async fn wallet_sign_event(
         &self,
         wallet: &str,
-        space_or_sptr: SpaceOrPtr,
+        subject: Subject,
         event: NostrEvent,
     ) -> Result<NostrEvent, ErrorObjectOwned>;
 
@@ -345,7 +346,7 @@ pub trait Rpc {
     async fn wallet_sign_schnorr(
         &self,
         wallet: &str,
-        space_or_sptr: SpaceOrPtr,
+        subject: Subject,
         message: Bytes,
     ) -> Result<Bytes, ErrorObjectOwned>;
 
@@ -359,7 +360,7 @@ pub trait Rpc {
     #[method(name = "verifyschnorr")]
     async fn verify_schnorr(
         &self,
-        space_or_sptr: SpaceOrPtr,
+        subject: Subject,
         message: Bytes,
         signature: Bytes,
     ) -> Result<bool, ErrorObjectOwned>;
@@ -443,7 +444,7 @@ pub trait Rpc {
     #[method(name = "proveptroutpoint")]
     async fn prove_ptr_outpoint(
         &self,
-        sptr: Sptr,
+        subject: Subject,
         prefer_recent: Option<bool>,
     ) -> Result<ProofResult, ErrorObjectOwned>;
 
@@ -466,7 +467,7 @@ pub trait Rpc {
     #[method(name = "proveptrcertificate")]
     async fn prove_ptr_certificate(
         &self,
-        sptr: Sptr,
+        subject: Subject,
         target_block_height: u32,
     ) -> Result<PtrCertificateResult, ErrorObjectOwned>;
 
@@ -554,50 +555,10 @@ pub enum RpcWalletRequest {
     SendCoins(SendCoinsParams),
 }
 
-/// Either a space name or a PTR
-#[derive(Clone, Debug)]
-pub enum SpaceOrPtr {
-    Space(SLabel),
-    Ptr(Sptr),
-}
-
-impl Serialize for SpaceOrPtr {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        match self {
-            SpaceOrPtr::Space(label) => serializer.serialize_str(&label.to_string()),
-            SpaceOrPtr::Ptr(sptr) => serializer.serialize_str(&sptr.to_string()),
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for SpaceOrPtr {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-
-        // Try to parse as SPTR first (starts with "sptr1")
-        if s.starts_with("sptr1") {
-            Sptr::from_str(&s)
-                .map(SpaceOrPtr::Ptr)
-                .map_err(serde::de::Error::custom)
-        } else {
-            // Otherwise parse as space name
-            SLabel::from_str(&s)
-                .map(SpaceOrPtr::Space)
-                .map_err(serde::de::Error::custom)
-        }
-    }
-}
-
 #[derive(Clone, Serialize, Deserialize)]
 pub struct TransferSpacesParams {
     /// List of spaces and/or PTRs to transfer
-    pub spaces: Vec<SpaceOrPtr>,
+    pub spaces: Vec<Subject>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub to: Option<String>,
@@ -624,7 +585,7 @@ pub struct CommitParams {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SetPtrDataParams {
-    pub sptr: Sptr,
+    pub subject: Subject,
     pub data: Vec<u8>,
 }
 
@@ -1108,19 +1069,19 @@ impl RpcServer for RpcServerImpl {
         Ok(spaceout)
     }
 
-    async fn get_ptr(&self, sptr: Sptr) -> Result<Option<FullPtrOut>, ErrorObjectOwned> {
+    async fn get_ptr(&self, subject: Subject) -> Result<Option<FullPtrOut>, ErrorObjectOwned> {
         let info = self
             .store
-            .get_ptr(sptr)
+            .get_ptr(subject)
             .await
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))?;
         Ok(info)
     }
 
-    async fn get_ptr_owner(&self, sptr: Sptr) -> Result<Option<OutPoint>, ErrorObjectOwned> {
+    async fn get_ptr_owner(&self, subject: Subject) -> Result<Option<OutPoint>, ErrorObjectOwned> {
         let info = self
             .store
-            .get_ptr_outpoint(sptr)
+            .get_ptr_outpoint(subject)
             .await
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))?;
         Ok(info)
@@ -1153,10 +1114,10 @@ impl RpcServer for RpcServerImpl {
         Ok(delegation)
     }
 
-    async fn get_delegator(&self, sptr: Sptr) -> Result<Option<SLabel>, ErrorObjectOwned> {
+    async fn get_delegator(&self, subject: Subject) -> Result<Option<SLabel>, ErrorObjectOwned> {
         let delegator = self
             .store
-            .get_delegator(sptr)
+            .get_delegator(subject)
             .await
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))?;
         Ok(delegator)
@@ -1255,11 +1216,11 @@ impl RpcServer for RpcServerImpl {
 
     async fn verify_event(
         &self,
-        space_or_sptr: SpaceOrPtr,
+        subject: Subject,
         event: NostrEvent,
     ) -> Result<NostrEvent, ErrorObjectOwned> {
         self.store
-            .verify_event(space_or_sptr, event)
+            .verify_event(subject, event)
             .await
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
     }
@@ -1267,12 +1228,12 @@ impl RpcServer for RpcServerImpl {
     async fn wallet_sign_event(
         &self,
         wallet: &str,
-        space_or_sptr: SpaceOrPtr,
+        subject: Subject,
         event: NostrEvent,
     ) -> Result<NostrEvent, ErrorObjectOwned> {
         self.wallet(&wallet)
             .await?
-            .send_sign_event(space_or_sptr, event)
+            .send_sign_event(subject, event)
             .await
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
     }
@@ -1280,12 +1241,12 @@ impl RpcServer for RpcServerImpl {
     async fn wallet_sign_schnorr(
         &self,
         wallet: &str,
-        space_or_sptr: SpaceOrPtr,
+        subject: Subject,
         message: Bytes,
     ) -> Result<Bytes, ErrorObjectOwned> {
         self.wallet(&wallet)
             .await?
-            .send_sign_schnorr(space_or_sptr, message.to_vec())
+            .send_sign_schnorr(subject, message.to_vec())
             .await
             .map(|sig| Bytes::new(sig.as_ref().to_vec()))
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
@@ -1305,12 +1266,12 @@ impl RpcServer for RpcServerImpl {
 
     async fn verify_schnorr(
         &self,
-        space_or_sptr: SpaceOrPtr,
+        subject: Subject,
         message: Bytes,
         signature: Bytes,
     ) -> Result<bool, ErrorObjectOwned> {
         self.store
-            .verify_schnorr(space_or_sptr, message.to_vec(), signature.to_vec())
+            .verify_schnorr(subject, message.to_vec(), signature.to_vec())
             .await
             .map(|_| true)
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
@@ -1461,11 +1422,11 @@ impl RpcServer for RpcServerImpl {
 
     async fn prove_ptr_outpoint(
         &self,
-        sptr: Sptr,
+        subject: Subject,
         prefer_recent: Option<bool>,
     ) -> Result<ProofResult, ErrorObjectOwned> {
         self.store
-            .prove_ptr_outpoint(sptr, prefer_recent.unwrap_or(false))
+            .prove_ptr_outpoint(subject, prefer_recent.unwrap_or(false))
             .await
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
     }
@@ -1500,11 +1461,11 @@ impl RpcServer for RpcServerImpl {
 
     async fn prove_ptr_certificate(
         &self,
-        sptr: Sptr,
+        subject: Subject,
         target_block_height: u32,
     ) -> Result<PtrCertificateResult, ErrorObjectOwned> {
         self.store
-            .prove_ptr_certificate(sptr, target_block_height)
+            .prove_ptr_certificate(subject, target_block_height)
             .await
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
     }
@@ -1783,14 +1744,14 @@ impl AsyncChainState {
                     .context("could not fetch spaceout");
                 let _ = resp.send(result);
             }
-            ChainStateCommand::GetPtr { hash, resp } => {
-                let result = state.get_ptr_info(&hash);
+            ChainStateCommand::GetPtr { subject, resp } => {
+                let result = resolve_sptr(state, &subject)
+                    .and_then(|sptr| state.get_ptr_info(&sptr));
                 let _ = resp.send(result);
             }
-            ChainStateCommand::GetPtrOutpoint { hash, resp } => {
-                let result = state
-                    .get_ptr_outpoint(&hash)
-                    .context("could not fetch ptrout");
+            ChainStateCommand::GetPtrOutpoint { subject, resp } => {
+                let result = resolve_sptr(state, &subject)
+                    .and_then(|sptr| state.get_ptr_outpoint(&sptr).context("could not fetch ptrout"));
                 let _ = resp.send(result);
             }
             ChainStateCommand::GetCommitment { space, root, resp } => {
@@ -1801,9 +1762,10 @@ impl AsyncChainState {
                 let result = get_delegation(state, space);
                 let _ = resp.send(result);
             }
-            ChainStateCommand::GetDelegator { sptr, resp } => {
-                let result = state
-                    .get_delegator(&RegistrySptrKey::from_sptr::<Sha256>(sptr)).map_err(|e| anyhow!("could not get delegator: {}", e));
+            ChainStateCommand::GetDelegator { subject, resp } => {
+                let result = resolve_sptr(state, &subject)
+                    .and_then(|sptr| state.get_delegator(&RegistrySptrKey::from_sptr::<Sha256>(sptr))
+                        .map_err(|e| anyhow!("could not get delegator: {}", e)));
                 let _ = resp.send(result);
             }
             ChainStateCommand::GetPtrOut { outpoint, resp } => {
@@ -1847,26 +1809,15 @@ impl AsyncChainState {
                     SpacesWallet::verify_listing::<Sha256>(state, &listing).map(|_| ()),
                 );
             }
-            ChainStateCommand::VerifyEvent { space_or_sptr, event, resp } => {
-                let space_or_sptr = match space_or_sptr {
-                    SpaceOrPtr::Space(label) => spaces_wallet::SpaceOrSptr::Space(label),
-                    SpaceOrPtr::Ptr(sptr) => spaces_wallet::SpaceOrSptr::Sptr(sptr),
-                };
-                _ = resp.send(SpacesWallet::verify_event::<Sha256, _>(
-                    state,
-                    space_or_sptr,
-                    event,
-                ));
+            ChainStateCommand::VerifyEvent { subject, event, resp } => {
+                let result = SpacesWallet::verify_event::<Sha256, _>(state, subject, event);
+                _ = resp.send(result);
             }
-            ChainStateCommand::VerifySchnorr { space_or_sptr, message, signature, resp } => {
+            ChainStateCommand::VerifySchnorr { subject, message, signature, resp } => {
                 let result = (|| {
-                    let space_or_sptr = match space_or_sptr {
-                        SpaceOrPtr::Space(label) => spaces_wallet::SpaceOrSptr::Space(label),
-                        SpaceOrPtr::Ptr(sptr) => spaces_wallet::SpaceOrSptr::Sptr(sptr),
-                    };
                     let sig = schnorr::Signature::from_slice(&signature)
                         .map_err(|_| anyhow!("Invalid signature format"))?;
-                    SpacesWallet::verify_schnorr::<Sha256, _>(state, space_or_sptr, &message, &sig)
+                    SpacesWallet::verify_schnorr::<Sha256, _>(state, subject, &message, &sig)
                 })();
                 _ = resp.send(result);
             }
@@ -1902,15 +1853,13 @@ impl AsyncChainState {
                 ));
             }
             ChainStateCommand::ProvePtrOutpoint {
-                sptr,
+                subject,
                 prefer_recent,
                 resp,
             } => {
-                _ = resp.send(Self::handle_prove_ptr_outpoint(
-                    state,
-                    sptr,
-                    prefer_recent,
-                ));
+                let result = resolve_sptr(state, &subject)
+                    .and_then(|sptr| Self::handle_prove_ptr_outpoint(state, sptr, prefer_recent));
+                _ = resp.send(result);
             }
             ChainStateCommand::ProveCommitment {
                 space,
@@ -1939,15 +1888,13 @@ impl AsyncChainState {
                 ));
             }
             ChainStateCommand::ProvePtrCertificate {
-                sptr,
+                subject,
                 target_block_height,
                 resp,
             } => {
-                _ = resp.send(Self::handle_prove_ptr_certificate(
-                    state,
-                    sptr,
-                    target_block_height,
-                ));
+                let result = resolve_sptr(state, &subject)
+                    .and_then(|sptr| Self::handle_prove_ptr_certificate(state, sptr, target_block_height));
+                _ = resp.send(result);
             }
             ChainStateCommand::BuildChainProof {
                 request,
@@ -2142,10 +2089,7 @@ impl AsyncChainState {
                     ))
                 }
             };
-            let last_update = ptr_info.ptrout.sptr
-                .as_ref()
-                .map(|p| p.last_update)
-                .unwrap_or(0);
+            let last_update = ptr_info.ptrout.sptr.last_update;
             let tip = state.ptrs_tip();
             let target_snapshot = Self::compute_target_snapshot(last_update, tip.height);
             state.prove_ptrs_with_snapshot(&[key], target_snapshot)?.1
@@ -2180,18 +2124,8 @@ impl AsyncChainState {
                     ))
                 }
             };
-            // Use the last_update height from the PTR to find an appropriate snapshot
-            let target_snapshot = match &ptrout.sptr {
-                Some(ptr) => {
-                    let tip = state.ptrs_tip();
-                    Self::compute_target_snapshot(ptr.last_update, tip.height)
-                }
-                None => {
-                    return Err(anyhow!(
-                        "Cannot find older proofs for a UTXO without PTR data (try with prefer_recent: true)"
-                    ))
-                }
-            };
+            let tip = state.ptrs_tip();
+            let target_snapshot = Self::compute_target_snapshot(ptrout.sptr.last_update, tip.height);
             state.prove_ptrs_with_snapshot(&[key.into()], target_snapshot)?.1
         } else {
             let snapshot = state.ptrs_mut().state.inner()?;
@@ -2251,15 +2185,20 @@ impl AsyncChainState {
         prefer_recent: bool,
     ) -> anyhow::Result<ChainProofResult> {
         let mut most_recent_update = 0u32;
-        let mut space_tree_keys: Vec<Hash> = Vec::new();
-        let mut ptr_tree_keys: Vec<Hash> = Vec::new();
+        let mut space_tree_keys: HashSet<Hash> = HashSet::new();
+        let mut ptr_tree_keys: HashSet<Hash> = HashSet::new();
 
         for space in request.spaces {
+            if space.is_numeric() {
+                request.ptrs_keys.push(PtrKeyKind::Numeric(space.try_into()?));
+                continue;
+            }
+
             let space_key = SpaceKey::from(Sha256::hash(space.as_ref()));
             let fso = state.get_space_info(&space_key)?
                 .ok_or_else(|| anyhow!("Space not found: {}", space))?;
 
-            space_tree_keys.push(space_key.into());
+            space_tree_keys.insert(space_key.into());
             if let Some(space) = &fso.spaceout.space {
                 if let Covenant::Transfer { expire_height, .. } = &space.covenant {
                     let last_update = expire_height
@@ -2274,26 +2213,40 @@ impl AsyncChainState {
 
         for key in request.ptrs_keys {
             match key {
-                PtrKeyKind::Sptr(sptr) => {
-                    let fpt = state.get_ptr_info(&sptr)?;
-                    if let Some(fpt) = fpt {
-                        if let Some(ptr) = &fpt.ptrout.sptr {
-                            ptr_tree_keys.push(
-                                PtrOutpointKey::from_outpoint::<Sha256>(fpt.outpoint()).into()
-                            );
-                            most_recent_update = std::cmp::max(most_recent_update, ptr.last_update);
-                        } else {
-                            ptr_tree_keys.push(sptr.into());
-                        }
+                PtrKeyKind::Numeric(numeric) => {
+                    let key = NumericKey::from_numeric::<Sha256>(&numeric);
+                    let sptr = state.get_numeric(&key)?;
+                    if let Some(sptr) = sptr {
+                        let fpt = state.get_ptr_info(&sptr)?
+                            .expect("sptr must exist if numeric exists");
+                        ptr_tree_keys.insert(
+                            PtrOutpointKey::from_outpoint::<Sha256>(fpt.outpoint()).into()
+                        );
+                        most_recent_update = std::cmp::max(most_recent_update, fpt.ptrout.sptr.last_update);
                     } else {
                         // non-existence proof
-                        ptr_tree_keys.push(sptr.into());
+                        ptr_tree_keys.insert(key.into());
                     }
                 }
-                PtrKeyKind::Commitment(k) => ptr_tree_keys.push(k.into()),
-                PtrKeyKind::Registry(k) => ptr_tree_keys.push(k.into()),
+                PtrKeyKind::Sptr(sptr) => {
+                    let fpt = state.get_ptr_info(&sptr)?
+                        .expect("sptr must exist if referenced");
+                    ptr_tree_keys.insert(
+                        PtrOutpointKey::from_outpoint::<Sha256>(fpt.outpoint()).into()
+                    );
+                    most_recent_update = std::cmp::max(most_recent_update, fpt.ptrout.sptr.last_update);
+                }
+                PtrKeyKind::Commitment(k) => {
+                    ptr_tree_keys.insert(k.into());
+                },
+                PtrKeyKind::Registry(k) => {
+                    ptr_tree_keys.insert(k.into());
+                },
             }
         }
+
+        let ptr_tree_keys : Vec<_> = ptr_tree_keys.into_iter().collect();
+        let space_tree_keys : Vec<_> = space_tree_keys.into_iter().collect();
 
         let (spaces_proof, spaces_root, block_anchor, ptrs_proof, ptrs_root) = if prefer_recent {
             let spaces_snapshot = state.spaces_inner()?;
@@ -2446,9 +2399,7 @@ impl AsyncChainState {
 
             // Check ptrout last update if present
             if let Some(ref ptr) = ptrout {
-                if let Some(ref ptr_data) = ptr.sptr {
-                    most_recent_update = std::cmp::max(most_recent_update, ptr_data.last_update);
-                }
+                most_recent_update = std::cmp::max(most_recent_update, ptr.sptr.last_update);
             }
 
             // Check commitment block height if present
@@ -2590,11 +2541,11 @@ impl AsyncChainState {
         resp_rx.await?
     }
 
-    pub async fn verify_event(&self, space_or_sptr: SpaceOrPtr, event: NostrEvent) -> anyhow::Result<NostrEvent> {
+    pub async fn verify_event(&self, subject: Subject, event: NostrEvent) -> anyhow::Result<NostrEvent> {
         let (resp, resp_rx) = oneshot::channel();
         self.sender
             .send(ChainStateCommand::VerifyEvent {
-                space_or_sptr,
+                subject,
                 event,
                 resp,
             })
@@ -2604,14 +2555,14 @@ impl AsyncChainState {
 
     pub async fn verify_schnorr(
         &self,
-        space_or_sptr: SpaceOrPtr,
+        subject: Subject,
         message: Vec<u8>,
         signature: Vec<u8>,
     ) -> anyhow::Result<()> {
         let (resp, resp_rx) = oneshot::channel();
         self.sender
             .send(ChainStateCommand::VerifySchnorr {
-                space_or_sptr,
+                subject,
                 message,
                 signature,
                 resp,
@@ -2663,11 +2614,11 @@ impl AsyncChainState {
         resp_rx.await?
     }
 
-    pub async fn prove_ptr_outpoint(&self, sptr: Sptr, prefer_recent: bool) -> anyhow::Result<ProofResult> {
+    pub async fn prove_ptr_outpoint(&self, subject: Subject, prefer_recent: bool) -> anyhow::Result<ProofResult> {
         let (resp, resp_rx) = oneshot::channel();
         self.sender
             .send(ChainStateCommand::ProvePtrOutpoint {
-                sptr,
+                subject,
                 prefer_recent,
                 resp,
             })
@@ -2713,13 +2664,13 @@ impl AsyncChainState {
 
     pub async fn prove_ptr_certificate(
         &self,
-        sptr: Sptr,
+        subject: Subject,
         target_block_height: u32,
     ) -> anyhow::Result<PtrCertificateResult> {
         let (resp, resp_rx) = oneshot::channel();
         self.sender
             .send(ChainStateCommand::ProvePtrCertificate {
-                sptr,
+                subject,
                 target_block_height,
                 resp,
             })
@@ -2775,10 +2726,10 @@ impl AsyncChainState {
         resp_rx.await?
     }
 
-    pub async fn get_ptr(&self, hash: Sptr) -> anyhow::Result<Option<FullPtrOut>> {
+    pub async fn get_ptr(&self, subject: Subject) -> anyhow::Result<Option<FullPtrOut>> {
         let (resp, resp_rx) = oneshot::channel();
         self.sender
-            .send(ChainStateCommand::GetPtr { hash, resp })
+            .send(ChainStateCommand::GetPtr { subject, resp })
             .await?;
         resp_rx.await?
     }
@@ -2791,10 +2742,10 @@ impl AsyncChainState {
         resp_rx.await?
     }
 
-    pub async fn get_ptr_outpoint(&self, hash: Sptr) -> anyhow::Result<Option<OutPoint>> {
+    pub async fn get_ptr_outpoint(&self, subject: Subject) -> anyhow::Result<Option<OutPoint>> {
         let (resp, resp_rx) = oneshot::channel();
         self.sender
-            .send(ChainStateCommand::GetPtrOutpoint { hash, resp })
+            .send(ChainStateCommand::GetPtrOutpoint { subject, resp })
             .await?;
         resp_rx.await?
     }
@@ -2850,10 +2801,10 @@ impl AsyncChainState {
         resp_rx.await?
     }
 
-    pub async fn get_delegator(&self, sptr: Sptr) -> anyhow::Result<Option<SLabel>> {
+    pub async fn get_delegator(&self, subject: Subject) -> anyhow::Result<Option<SLabel>> {
         let (resp, resp_rx) = oneshot::channel();
         self.sender
-            .send(ChainStateCommand::GetDelegator { sptr, resp })
+            .send(ChainStateCommand::GetDelegator { subject, resp })
             .await?;
         resp_rx.await?
     }
@@ -2892,6 +2843,18 @@ impl AsyncChainState {
             .send(ChainStateCommand::GetTxMeta { txid, resp })
             .await?;
         resp_rx.await?
+    }
+}
+
+fn resolve_sptr(state: &mut Chain, subject: &Subject) -> anyhow::Result<Sptr> {
+    match subject {
+        Subject::Ptr(sptr) => Ok(*sptr),
+        Subject::Numeric(numeric) => {
+            let key = NumericKey::from_numeric::<Sha256>(numeric);
+            state.get_numeric(&key)?
+                .ok_or_else(|| anyhow!("numeric '{}' not found", numeric))
+        }
+        Subject::Space(_) => Err(anyhow!("expected a ptr or numeric, not a space")),
     }
 }
 

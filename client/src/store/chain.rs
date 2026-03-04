@@ -10,7 +10,7 @@ use spaces_protocol::hasher::{BaseHash, BidKey, OutpointKey, SpaceKey};
 use spaces_protocol::prepare::SpacesSource;
 use spaces_protocol::{FullSpaceOut, SpaceOut};
 use spaces_protocol::slabel::SLabel;
-use spaces_ptr::{Commitment, CommitmentKey, FullPtrOut, PtrOut, PtrSource, RegistryKey, RegistrySptrKey, PtrOutpointKey, RootAnchor};
+use spaces_ptr::{Commitment, CommitmentKey, FullPtrOut, NumericKey, PtrOut, PtrSource, RegistryKey, RegistrySptrKey, PtrOutpointKey, RootAnchor};
 use spaces_ptr::sptr::Sptr;
 use spaces_wallet::bitcoin::Network;
 use crate::client::{BlockMeta, PtrBlockMeta};
@@ -83,6 +83,10 @@ impl PtrSource for Chain {
 
     fn get_ptrout(&mut self, outpoint: &OutPoint) -> spaces_protocol::errors::Result<Option<PtrOut>> {
         self.db.pt.state.get_ptrout(outpoint)
+    }
+
+    fn get_numeric(&mut self, key: &NumericKey) -> spaces_protocol::errors::Result<Option<Sptr>> {
+        self.db.pt.state.get_numeric(key)
     }
 }
 
@@ -282,6 +286,10 @@ impl Chain {
 
     pub(crate) fn insert_ptr(&self, key: Sptr, outpoint: EncodableOutpoint) {
         self.db.pt.state.insert(key, outpoint)
+    }
+
+    pub(crate) fn insert_numeric(&self, key: NumericKey, sptr: Sptr) {
+        self.db.pt.state.insert_numeric(key, sptr)
     }
 
     pub(crate) fn insert_delegation(&self, key: RegistrySptrKey, space: SLabel) {
