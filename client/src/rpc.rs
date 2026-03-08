@@ -2229,12 +2229,15 @@ impl AsyncChainState {
                     }
                 }
                 PtrKeyKind::Sptr(sptr) => {
-                    let fpt = state.get_ptr_info(&sptr)?
-                        .expect("sptr must exist if referenced");
-                    ptr_tree_keys.insert(
-                        PtrOutpointKey::from_outpoint::<Sha256>(fpt.outpoint()).into()
-                    );
-                    most_recent_update = std::cmp::max(most_recent_update, fpt.ptrout.sptr.last_update);
+                    if let Some(fpt) = state.get_ptr_info(&sptr)? {
+                        ptr_tree_keys.insert(
+                            PtrOutpointKey::from_outpoint::<Sha256>(fpt.outpoint()).into()
+                        );
+                        most_recent_update = std::cmp::max(most_recent_update, fpt.ptrout.sptr.last_update);
+                    } else {
+                        // non-existence proof
+                        ptr_tree_keys.insert(sptr.into());
+                    }
                 }
                 PtrKeyKind::Commitment(k) => {
                     ptr_tree_keys.insert(k.into());
