@@ -222,6 +222,7 @@ pub struct RootAnchor {
     ))]
     pub spaces_root: Hash,
     #[cfg_attr(feature = "serde", serde(
+        default,
         skip_serializing_if = "Option::is_none",
         serialize_with = "serialize_optional_hash_serde",
         deserialize_with = "deserialize_optional_hash_serde"
