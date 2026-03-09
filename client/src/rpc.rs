@@ -2198,7 +2198,8 @@ impl AsyncChainState {
             let fso = state.get_space_info(&space_key)?
                 .ok_or_else(|| anyhow!("Space not found: {}", space))?;
 
-            space_tree_keys.insert(space_key.into());
+            let outpoint_key = OutpointKey::from_outpoint::<Sha256>(fso.outpoint());
+            space_tree_keys.insert(outpoint_key.into());
             if let Some(space) = &fso.spaceout.space {
                 if let Covenant::Transfer { expire_height, .. } = &space.covenant {
                     let last_update = expire_height
