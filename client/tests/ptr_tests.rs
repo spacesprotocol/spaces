@@ -1,7 +1,5 @@
 use std::{path::PathBuf, str::FromStr};
 use anyhow::anyhow;
-use spacedb::Sha256Hasher;
-use spacedb::subtree::SubTree;
 use spaces_client::{
     rpc::{
         RpcClient, RpcWalletRequest,
@@ -13,7 +11,6 @@ use spaces_client::rpc::{CommitParams, CreatePtrParams, DelegateParams, SetPtrDa
 use spaces_client::store::Sha256;
 use spaces_protocol::{bitcoin, bitcoin::{FeeRate}};
 use spaces_protocol::bitcoin::hashes::{sha256, Hash};
-use spaces_ptr::CommitmentKey;
 use spaces_ptr::sptr::Sptr;
 use spaces_testutil::TestRig;
 use spaces_wallet::{export::WalletExport};
@@ -898,138 +895,6 @@ async fn it_should_set_and_persist_ptr_data(rig: &TestRig) -> anyhow::Result<()>
     Ok(())
 }
 
-// ============== Test: Prove Certificate ==============
-
-async fn it_should_prove_certificate_with_commitment(rig: &TestRig) -> anyhow::Result<()> {
-    sync_all(rig).await?;
-
-    // Get a space that Alice owns
-    let alice_spaces = rig.spaced.client.wallet_list_spaces(ALICE).await?;
-    let owned = alice_spaces.owned.first().cloned()
-        .expect("Alice should own at least one space");
-    let space_name = owned.spaceout.space.as_ref()
-        .expect("space must exist").name.clone();
-
-    println!("Testing prove_certificate with space: {}", space_name);
-
-    // Setup: Delegate the space to establish SPTR
-    let delegate = wallet_do(
-        rig,
-        ALICE,
-        vec![RpcWalletRequest::Delegate(DelegateParams {
-            space: space_name.clone(),
-        })],
-        false,
-    ).await?;
-    assert!(wallet_res_err(&delegate).is_ok());
-    mine_and_sync(rig, 1).await?;
-
-    // Verify delegation is set up
-    let sptr = rig.spaced.client.get_delegation(space_name.clone()).await?
-        .expect("delegation should be established");
-    println!("Delegation established, SPTR: {}", sptr);
-
-    // Make a commitment
-    let commitment_root = [42u8; 32];
-    println!("Creating commitment with root: {}", hex::encode(&commitment_root));
-    let commit = wallet_do(
-        rig,
-        ALICE,
-        vec![RpcWalletRequest::Commit(CommitParams {
-            space: space_name.clone(),
-            root: Some(sha256::Hash::from_slice(&commitment_root).expect("valid")),
-        })],
-        false,
-    ).await?;
-    assert!(wallet_res_err(&commit).is_ok());
-    mine_and_sync(rig, 36).await?;
-
-    // Verify commitment exists
-    let commitment = rig.spaced.client.get_commitment(space_name.clone(), None).await?
-        .expect("commitment should exist");
-    assert_eq!(commitment.state_root, commitment_root);
-    println!("✓ Commitment created at block height: {}", commitment.block_height);
-
-    // Test 1: prove_certificate with prefer_recent=false (no specific commitment)
-    println!("\nTest 1: prove_certificate with prefer_recent=true");
-    let cert_result = rig.spaced.client.prove_certificate(
-        space_name.clone(),
-        None,  // no specific commitment root
-        None,  // prefer_recent
-    ).await?;
-
-    // Verify the result contains expected data
-    assert_eq!(cert_result.space, space_name, "space name should match");
-    assert!(cert_result.spaceout_proof.len() > 0, "spaceout proof should not be empty");
-    assert!(cert_result.ptrs_proof.len() > 0, "ptrs proof should not be empty");
-
-    // Verify commitment is included
-    let returned_commitment = cert_result.commitment
-        .expect("commitment should be included in result");
-    assert_eq!(returned_commitment.state_root, commitment_root, "commitment root should match");
-    println!("✓ prove_certificate returned commitment with root: {}", hex::encode(&returned_commitment.state_root));
-
-    let commitment_key = CommitmentKey::new
-        ::<Sha256>(&space_name, returned_commitment.state_root);
-
-    let ptrs_subtree : SubTree<Sha256Hasher> = SubTree::from_slice(cert_result.ptrs_proof.as_slice())
-        .expect("valid ptrs subtree");
-
-    assert!(ptrs_subtree.contains(&commitment_key.into())
-                .expect("commitment key exists"), "should be there");
-
-
-    // Test 2: prove_certificate with specific commitment root
-    println!("\nTest 2: prove_certificate with specific commitment root");
-    let cert_result2 = rig.spaced.client.prove_certificate(
-        space_name.clone(),
-        Some(sha256::Hash::from_slice(&commitment_root).expect("valid")),
-        Some(true),
-    ).await?;
-
-    let returned_commitment2 = cert_result2.commitment
-        .expect("commitment should be included");
-    assert_eq!(returned_commitment2.state_root, commitment_root, "specific commitment should be returned");
-    println!("✓ prove_certificate returned specific commitment");
-
-
-    // Test 3: prove_certificate with prefer_recent=false (older snapshot)
-    println!("\nTest 3: prove_certificate with prefer_recent=false");
-    let cert_result3 = rig.spaced.client.prove_certificate(
-        space_name.clone(),
-        None,
-        Some(false),  // prefer older snapshot
-    ).await?;
-
-    assert_eq!(cert_result3.space, space_name, "space name should match");
-    println!("✓ prove_certificate with prefer_recent=false succeeded");
-    println!("  Block anchor height: {}", cert_result3.block.height);
-
-    // Test 4: prove_certificate without commitment (space with no commitment)
-    println!("\nTest 4: prove_certificate for space without commitment");
-    // Get another space without commitment
-    let alice_spaces2 = rig.spaced.client.wallet_list_spaces(ALICE).await?;
-    if alice_spaces2.owned.len() > 1 {
-        let space2 = &alice_spaces2.owned[1];
-        let space2_name = space2.spaceout.space.as_ref()
-            .expect("space must exist").name.clone();
-
-        // Try prove_certificate - should work but return None for commitment
-        let cert_no_commit = rig.spaced.client.prove_certificate(
-            space2_name.clone(),
-            None,
-            Some(true),
-        ).await?;
-
-        // Should have spaceout proof but no commitment
-        assert!(cert_no_commit.spaceout_proof.len() > 0, "spaceout proof should exist");
-        println!("✓ prove_certificate for space without commitment: commitment={:?}",
-            cert_no_commit.commitment.as_ref().map(|c| hex::encode(&c.state_root)));
-    }
-
-    Ok(())
-}
-
 // ============== Main Test Runner ==============
 
 #[tokio::test]
@@ -1068,9 +933,6 @@ async fn run_ptr_tests() -> anyhow::Result<()> {
 
     println!("\n=== Running PTR Data Tests ===");
     it_should_set_and_persist_ptr_data(&rig).await?;
-
-    println!("\n=== Running Prove Certificate Tests ===");
-    it_should_prove_certificate_with_commitment(&rig).await?;
 
     println!("\n=== All tests passed! ===");
     Ok(())

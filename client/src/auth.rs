@@ -110,5 +110,8 @@ pub fn http_client_with_auth(url: &str, auth_token: &str) -> Result<HttpClient, 
         "Authorization",
         HeaderValue::from_str(&format!("Basic {auth_token}")).unwrap(),
     );
-    HttpClientBuilder::default().set_headers(headers).build(url)
+    HttpClientBuilder::default()
+        .set_headers(headers)
+        .request_timeout(std::time::Duration::from_secs(600))
+        .build(url)
 }
