@@ -991,6 +991,9 @@ impl RpcWallet {
             let Some(fpo) = chain.get_ptr_info(&sptr)? else {
                 continue;
             };
+            if fpo.outpoint() != unspent.outpoint {
+                continue;
+            }
             let rsk = RegistrySptrKey::from_sptr::<Sha256>(sptr);
             let delegating_for = chain.get_delegator(&rsk)?;
             ptrs.push(PtrEntry {
