@@ -215,17 +215,6 @@ pub enum ChainStateCommand {
         prefer_recent: bool,
         resp: Responder<anyhow::Result<ProofResult>>,
     },
-    ProveCertificate {
-        space: SLabel,
-        commitment_root: Option<Hash>,
-        prefer_recent: bool,
-        resp: Responder<anyhow::Result<CertificateProofResult>>,
-    },
-    ProvePtrCertificate {
-        subject: Subject,
-        target_block_height: u32,
-        resp: Responder<anyhow::Result<PtrCertificateResult>>,
-    },
     BuildChainProof {
         request: ChainProofRequest,
         prefer_recent: bool,
@@ -456,21 +445,6 @@ pub trait Rpc {
         prefer_recent: Option<bool>,
     ) -> Result<ProofResult, ErrorObjectOwned>;
 
-    #[method(name = "provecertificate")]
-    async fn prove_certificate(
-        &self,
-        space: SLabel,
-        commitment_root: Option<sha256::Hash>,
-        prefer_recent: Option<bool>,
-    ) -> Result<CertificateProofResult, ErrorObjectOwned>;
-
-    #[method(name = "proveptrcertificate")]
-    async fn prove_ptr_certificate(
-        &self,
-        subject: Subject,
-        target_block_height: u32,
-    ) -> Result<PtrCertificateResult, ErrorObjectOwned>;
-
     #[method(name = "buildchainproof")]
     async fn build_chain_proof(
         &self,
@@ -643,59 +617,7 @@ pub struct ProofResult {
     pub proof: Vec<u8>,
 }
 
-/// Combined proof result for certificate generation containing proofs from both
-/// spaces and ptrs trees at the same snapshot height.
-#[derive(Clone, Serialize, Deserialize)]
-pub struct CertificateProofResult {
-    /// The block anchor these proofs are generated against
-    pub block: ChainAnchor,
 
-    /// Spaces tree root
-    pub spaces_root: Bytes,
-    /// Proof for the spaceout (outpoint -> spaceout)
-    #[serde(
-        serialize_with = "serialize_base64",
-        deserialize_with = "deserialize_base64"
-    )]
-    pub spaceout_proof: Vec<u8>,
-    /// The spaceout data
-    pub spaceout: SpaceOut,
-    /// The space name extracted from the spaceout
-    pub space: SLabel,
-
-    /// PTRs tree root
-    pub ptrs_root: Bytes,
-    /// Combined proof for ptrout and commitment (or their non-existence)
-    #[serde(
-        serialize_with = "serialize_base64",
-        deserialize_with = "deserialize_base64"
-    )]
-    pub ptrs_proof: Vec<u8>,
-    /// The ptrout data (None if non-existence proof)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ptrout: Option<PtrOut>,
-    /// The commitment data (None if non-existence proof)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub commitment: Option<Commitment>,
-}
-
-/// Proof result for PTR certificate - proves either existence or non-existence of a PTR
-#[derive(Clone, Serialize, Deserialize)]
-pub struct PtrCertificateResult {
-    /// The block anchor this proof is generated against
-    pub block: ChainAnchor,
-    /// PTRs tree root
-    pub root: Bytes,
-    /// Proof for ptrout (if exists) or sptr exclusion proof (if not)
-    #[serde(
-        serialize_with = "serialize_base64",
-        deserialize_with = "deserialize_base64"
-    )]
-    pub proof: Vec<u8>,
-    /// The ptrout data (None if ptr doesn't exist)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ptrout: Option<PtrOut>,
-}
 
 /// Combined proof result for a chain proof request containing subtrees from both
 /// spaces and ptrs trees at the same snapshot height.
@@ -1449,33 +1371,6 @@ impl RpcServer for RpcServerImpl {
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
     }
 
-    async fn prove_certificate(
-        &self,
-        space: SLabel,
-        commitment_root: Option<sha256::Hash>,
-        prefer_recent: Option<bool>,
-    ) -> Result<CertificateProofResult, ErrorObjectOwned> {
-        self.store
-            .prove_certificate(
-                space,
-                commitment_root.map(|h| *h.as_ref()),
-                prefer_recent.unwrap_or(false),
-            )
-            .await
-            .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
-    }
-
-    async fn prove_ptr_certificate(
-        &self,
-        subject: Subject,
-        target_block_height: u32,
-    ) -> Result<PtrCertificateResult, ErrorObjectOwned> {
-        self.store
-            .prove_ptr_certificate(subject, target_block_height)
-            .await
-            .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
-    }
-
     async fn build_chain_proof(
         &self,
         request: ChainProofRequest,
@@ -1890,28 +1785,6 @@ impl AsyncChainState {
                     root,
                     prefer_recent,
                 ));
-            }
-            ChainStateCommand::ProveCertificate {
-                space,
-                commitment_root,
-                prefer_recent,
-                resp,
-            } => {
-                _ = resp.send(Self::handle_prove_certificate(
-                    state,
-                    space,
-                    commitment_root,
-                    prefer_recent,
-                ));
-            }
-            ChainStateCommand::ProvePtrCertificate {
-                subject,
-                target_block_height,
-                resp,
-            } => {
-                let result = resolve_sptr(state, &subject)
-                    .and_then(|sptr| Self::handle_prove_ptr_certificate(state, sptr, target_block_height));
-                _ = resp.send(result);
             }
             ChainStateCommand::BuildChainProof {
                 request,
@@ -2332,209 +2205,6 @@ impl AsyncChainState {
         })
     }
 
-    fn handle_prove_certificate(
-        state: &mut Chain,
-        space: SLabel,
-        commitment_root: Option<Hash>,
-        prefer_recent: bool,
-    ) -> anyhow::Result<CertificateProofResult> {
-        // Look up the spaceout by space name
-        let space_key = SpaceKey::from(Sha256::hash(space.as_ref()));
-        let full_spaceout = state.get_space_info(&space_key)?
-            .ok_or_else(|| anyhow!("Space not found: {}", space))?;
-
-        let spaceout = &full_spaceout.spaceout;
-        let space_data = spaceout.space.as_ref()
-            .ok_or_else(|| anyhow!("Spaceout has no associated space data"))?;
-
-        // Look up the ptrout by Sptr (derived from the spaceout's script_pubkey)
-        let sptr = Sptr::from_spk::<Sha256>(spaceout.script_pubkey.clone());
-        let full_ptrout = state.get_ptr_info(&sptr)?;
-        let ptrout = full_ptrout.as_ref().map(|f| f.ptrout.clone());
-
-        let registry_key = RegistryKey::from_slabel::<Sha256>(&space_data.name);
-        // Get commitment if not set pick the latest or prove non-existence of a tip
-        let commitment = if let Some(root) = commitment_root {
-            let ck = CommitmentKey::new::<Sha256>(&space, root);
-            Some(state.get_commitment(&ck)?
-                .ok_or_else(|| anyhow!("Commitment not found for space {} with root {}", space, hex::encode(root)))?)
-        } else {
-            let tip = state.get_commitments_tip(&registry_key)?;
-            if let Some(root) = tip {
-                let ck = CommitmentKey::new::<Sha256>(&space, root);
-                Some(state.get_commitment(&ck)?
-                    .ok_or_else(|| anyhow!("Commitment not found for space {} with root {}", space, hex::encode(root)))?)
-            } else {
-                None
-            }
-        };
-
-        // Generate spaceout proof using OutpointKey
-        let spaceout_key = OutpointKey::from_outpoint::<Sha256>(full_spaceout.outpoint());
-
-        // Collect ptrs keys to prove
-        let mut ptrs_keys: Vec<Hash> = Vec::new();
-
-        // Add ptrout key if we have one
-        if let Some(ref fpo) = full_ptrout {
-            let ptr_outpoint = OutPoint::new(fpo.txid, fpo.ptrout.n as u32);
-            let key = PtrOutpointKey::from_outpoint::<Sha256>(ptr_outpoint);
-            ptrs_keys.push(key.into());
-        } else {
-            // non-existence proof
-            ptrs_keys.push(sptr.into());
-        }
-
-        // Add commitment key if requested
-        if let Some(c) = commitment.as_ref() {
-            let key = CommitmentKey::new::<Sha256>(&space, c.state_root);
-            ptrs_keys.push(key.into());
-        }
-
-        // In all cases, prove the commitments tip
-        // Needed to prove space has no commitments (exclusion) OR
-        // whether the proven commitment is the most recent (needed for temporary certificates)
-        ptrs_keys.push(registry_key.into());
-
-        let (spaces_proof, spaces_root, block_anchor, ptrs_proof, ptrs_root) = if prefer_recent {
-            // Use current snapshot directly
-            let spaces_snapshot = state.spaces_inner()?;
-            let spaces_root = spaces_snapshot.compute_root()?;
-            let spaces_anchor: ChainAnchor = spaces_snapshot.metadata().try_into()?;
-            let spaces_proof = spaces_snapshot.prove(&[spaceout_key.into()], ProofType::Standard)?;
-
-            let ptrs_snapshot = state.ptrs_mut().state.inner()?;
-            let ptrs_anchor: ChainAnchor = ptrs_snapshot.metadata().try_into()?;
-            if spaces_anchor != ptrs_anchor {
-                return Err(anyhow!(
-                    "Spaces and PTRs snapshots have mismatched anchors (spaces: {}, ptrs: {})",
-                    spaces_anchor.height,
-                    ptrs_anchor.height
-                ));
-            }
-            let ptrs_proof = ptrs_snapshot.prove(&ptrs_keys, ProofType::Standard)?;
-            let ptrs_root = ptrs_proof.compute_root()?;
-
-            (spaces_proof, spaces_root, spaces_anchor, ptrs_proof, ptrs_root)
-        } else {
-            // Determine target snapshot based on the most recent last_update across all items
-            let mut most_recent_update: u32 = 0;
-
-            // Check spaceout last update
-            match &space_data.covenant {
-                Covenant::Transfer { expire_height, .. } => {
-                    let last_update = expire_height.saturating_sub(spaces_protocol::constants::RENEWAL_INTERVAL);
-                    most_recent_update = std::cmp::max(most_recent_update, last_update);
-                }
-                _ => return Err(anyhow!("Cannot find older proofs for a non-registered space (try with prefer_recent: true)")),
-            }
-
-            // Check ptrout last update if present
-            if let Some(ref ptr) = ptrout {
-                most_recent_update = std::cmp::max(most_recent_update, ptr.sptr.last_update);
-            }
-
-            // Check commitment block height if present
-            if let Some(ref c) = commitment {
-                most_recent_update = std::cmp::max(most_recent_update, c.block_height);
-            }
-
-            let tip = state.tip();
-            let target_snapshot = Self::compute_target_snapshot(most_recent_update, tip.height);
-
-            let (spaces_anchor, spaces_proof) = state.prove_spaces_with_snapshot(&[spaceout_key.into()], target_snapshot)?;
-            let spaces_root = spaces_proof.compute_root()?;
-
-            let (ptrs_anchor, ptrs_proof) = state.prove_ptrs_with_snapshot(&ptrs_keys, target_snapshot)?;
-            let ptrs_root = ptrs_proof.compute_root()?;
-
-            if spaces_anchor != ptrs_anchor {
-                return Err(anyhow!(
-                    "Spaces and PTRs snapshots at height {} have mismatched anchors",
-                    target_snapshot
-                ));
-            }
-
-            (spaces_proof, spaces_root, spaces_anchor, ptrs_proof, ptrs_root)
-        };
-
-        let spaceout_buf = spaces_proof.to_vec()?;
-
-        info!("Proving certificate with spaces root {}", hex::encode(spaces_root));
-        info!("Proving certificate with ptrs root {}", hex::encode(ptrs_root));
-
-        let ptrs_buf = ptrs_proof.to_vec()?;
-
-        Ok(CertificateProofResult {
-            block: block_anchor,
-            spaces_root: Bytes::new(spaces_root.to_vec()),
-            spaceout_proof: spaceout_buf,
-            spaceout: spaceout.clone(),
-            space,
-            ptrs_root: Bytes::new(ptrs_root.to_vec()),
-            ptrs_proof: ptrs_buf,
-            ptrout,
-            commitment,
-        })
-    }
-
-    fn handle_prove_ptr_certificate(
-        state: &mut Chain,
-        sptr: Sptr,
-        target_block_height: u32,
-    ) -> anyhow::Result<PtrCertificateResult> {
-        let sptr_key: Hash = sptr.into();
-
-        // Check if ptr exists
-        let ptr_info = state.get_ptr_info(&sptr)?;
-
-        let (block, proof, ptrout) = match ptr_info {
-            Some(info) => {
-                // PTR exists - prove the ptrout key
-                let outpoint = OutPoint {
-                    txid: info.txid,
-                    vout: info.ptrout.n as u32,
-                };
-                let ptrout_key = PtrOutpointKey::from_outpoint::<Sha256>(outpoint);
-
-                let (anchor, proof) = state.prove_ptrs_with_snapshot(
-                    &[ptrout_key.into()],
-                    target_block_height,
-                )?;
-
-                (anchor, proof, Some(info.ptrout))
-            }
-            None => {
-                // PTR doesn't exist - prove sptr exclusion
-                let (anchor, proof) = state.prove_ptrs_with_snapshot(
-                    &[sptr_key],
-                    target_block_height,
-                )?;
-
-                (anchor, proof, None)
-            }
-        };
-
-        let root = proof.compute_root()?;
-
-        // Serialize the proof
-        let buf = proof.to_vec()?;
-
-        info!(
-            "Proving PTR certificate for sptr {} at block {}, exists: {}",
-            sptr,
-            target_block_height,
-            ptrout.is_some()
-        );
-
-        Ok(PtrCertificateResult {
-            block,
-            root: Bytes::new(root.to_vec()),
-            proof: buf,
-            ptrout,
-        })
-    }
-
     pub async fn handler(
         client: &reqwest::Client,
         rpc: BitcoinRpc,
@@ -2670,40 +2340,6 @@ impl AsyncChainState {
                 space,
                 root,
                 prefer_recent,
-                resp,
-            })
-            .await?;
-        resp_rx.await?
-    }
-
-    pub async fn prove_certificate(
-        &self,
-        space: SLabel,
-        commitment_root: Option<Hash>,
-        prefer_recent: bool,
-    ) -> anyhow::Result<CertificateProofResult> {
-        let (resp, resp_rx) = oneshot::channel();
-        self.sender
-            .send(ChainStateCommand::ProveCertificate {
-                space,
-                commitment_root,
-                prefer_recent,
-                resp,
-            })
-            .await?;
-        resp_rx.await?
-    }
-
-    pub async fn prove_ptr_certificate(
-        &self,
-        subject: Subject,
-        target_block_height: u32,
-    ) -> anyhow::Result<PtrCertificateResult> {
-        let (resp, resp_rx) = oneshot::channel();
-        self.sender
-            .send(ChainStateCommand::ProvePtrCertificate {
-                subject,
-                target_block_height,
                 resp,
             })
             .await?;

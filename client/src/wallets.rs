@@ -1019,9 +1019,8 @@ impl RpcWallet {
             }
         }
 
-        let txs = wallet.transactions();
         let mut recent_events_with_txs = Vec::new();
-        for tx in txs {
+        for tx in wallet.transactions() {
             let Some(events) = recent_events.remove(&tx.tx_node.txid) else {
                 continue;
             };
