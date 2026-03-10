@@ -20,7 +20,6 @@ directories = "5.0"
 threadpool = "1.8"
 tabled = "0.17"
 colored = "3.0"
-domain = { version = "0.10", default-features = false, features = ["zonefile"] }
 tower = "0.4"
 hyper = "0.14"
 secp256k1 = "0.29"

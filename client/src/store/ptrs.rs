@@ -13,8 +13,7 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use spacedb::{
     db::{Database, SnapshotIterator},
     fs::FileBackend,
-    subtree::SubTree,
-    tx::{ProofType, ReadTransaction, WriteTransaction},
+    tx::{ReadTransaction, WriteTransaction},
     Configuration, Hash, Sha256Hasher,
 };
 use spaces_protocol::{
@@ -188,30 +187,14 @@ impl PtrLiveSnapshot {
         };
     }
 
-    pub fn prove_with_snapshot(
-        &self,
-        keys: &[Hash],
-        snapshot_block_height: u32,
-    ) -> Result<(ChainAnchor, SubTree<Sha256Hasher>)> {
-        let snapshot = self.db.iter().filter_map(|s| s.ok()).find(|s| {
-            let anchor: ChainAnchor = match s.metadata().try_into() {
-                Ok(a) => a,
-                _ => return false,
-            };
-            anchor.height == snapshot_block_height
-        });
-        if let Some(mut snapshot) = snapshot {
-            let anchor: ChainAnchor = snapshot.metadata().try_into()
-                .map_err(|_| anyhow!("Could not parse metadata"))?;
-            let proof = snapshot
-                .prove(keys, ProofType::Standard)
-                .or_else(|err| Err(anyhow!("Could not prove: {}", err)))?;
-            return Ok((anchor, proof));
-        }
-        Err(anyhow!(
-            "Older snapshot targeting block {} could not be found",
-            snapshot_block_height
-        ))
+    pub fn read_at(&self, block_height: u32) -> anyhow::Result<ReadTx> {
+        self.db.iter()
+            .filter_map(|s| s.ok())
+            .find(|s| {
+                s.metadata().try_into()
+                    .map_or(false, |a: ChainAnchor| a.height == block_height)
+            })
+            .ok_or_else(|| anyhow!("Snapshot at block {} not found", block_height))
     }
 
     pub fn inner(&mut self) -> anyhow::Result<&mut ReadTx> {

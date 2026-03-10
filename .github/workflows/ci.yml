@@ -4,9 +4,11 @@ on:
   push:
     branches:
       - main
+      - subspaces
   pull_request:
     branches:
       - main
+      - subspaces
 
 jobs:
   run-tests:

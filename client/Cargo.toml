@@ -39,7 +39,6 @@ reqwest = { workspace = true }
 threadpool = { workspace = true }
 tabled = { workspace = true }
 colored = { workspace = true }
-domain = { workspace = true }
 tower = { workspace = true }
 hyper = { workspace = true }
 

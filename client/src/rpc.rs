@@ -40,7 +40,7 @@ use spaces_protocol::{
 use spaces_wallet::{
     bdk_wallet as bdk, bdk_wallet::template::Bip86, bitcoin::hashes::Hash as BitcoinHash,
     bitcoin::secp256k1::schnorr,
-    export::WalletExport, nostr::NostrEvent, Balance, DoubleUtxo, Listing, SpacesWallet,
+    export::WalletExport, Balance, DoubleUtxo, Listing, SpacesWallet,
     WalletConfig, WalletDescriptors, WalletOutput,
 };
 pub use spaces_wallet::Subject;
@@ -67,7 +67,7 @@ use crate::{
         WalletCommand, WalletResponse,
     },
 };
-use crate::store::chain::{Chain, COMMIT_BLOCK_INTERVAL, ROOT_ANCHORS_COUNT};
+use crate::store::chain::{Chain, COMMIT_BLOCK_INTERVAL, CACHED_SNAPSHOT_LOOKBACK};
 use crate::store::Sha256;
 use crate::store::spaces::RolloutEntry;
 
@@ -179,41 +179,11 @@ pub enum ChainStateCommand {
         listing: Listing,
         resp: Responder<anyhow::Result<()>>,
     },
-    VerifyEvent {
-        subject: Subject,
-        event: NostrEvent,
-        resp: Responder<anyhow::Result<NostrEvent>>,
-    },
     VerifySchnorr {
         subject: Subject,
         message: Vec<u8>,
         signature: Vec<u8>,
         resp: Responder<anyhow::Result<()>>,
-    },
-    ProveSpaceout {
-        outpoint: OutPoint,
-        prefer_recent: bool,
-        resp: Responder<anyhow::Result<ProofResult>>,
-    },
-    ProveSpaceOutpoint {
-        space_or_hash: String,
-        resp: Responder<anyhow::Result<ProofResult>>,
-    },
-    ProvePtrout {
-        outpoint: OutPoint,
-        prefer_recent: bool,
-        resp: Responder<anyhow::Result<ProofResult>>,
-    },
-    ProvePtrOutpoint {
-        subject: Subject,
-        prefer_recent: bool,
-        resp: Responder<anyhow::Result<ProofResult>>,
-    },
-    ProveCommitment {
-        space: SLabel,
-        root: Hash,
-        prefer_recent: bool,
-        resp: Responder<anyhow::Result<ProofResult>>,
     },
     BuildChainProof {
         request: ChainProofRequest,
@@ -316,20 +286,13 @@ pub trait Rpc {
     #[method(name = "walletimport")]
     async fn wallet_import(&self, wallet: WalletExport) -> Result<(), ErrorObjectOwned>;
 
-    #[method(name = "verifyevent")]
-    async fn verify_event(
-        &self,
-        subject: Subject,
-        event: NostrEvent,
-    ) -> Result<NostrEvent, ErrorObjectOwned>;
 
-    #[method(name = "walletsignevent")]
-    async fn wallet_sign_event(
+    #[method(name = "walletcanoperate")]
+    async fn wallet_can_operate(
         &self,
         wallet: &str,
-        subject: Subject,
-        event: NostrEvent,
-    ) -> Result<NostrEvent, ErrorObjectOwned>;
+        space: SLabel,
+    ) -> Result<bool, ErrorObjectOwned>;
 
     #[method(name = "walletsignschnorr")]
     async fn wallet_sign_schnorr(
@@ -338,13 +301,6 @@ pub trait Rpc {
         subject: Subject,
         message: Bytes,
     ) -> Result<Bytes, ErrorObjectOwned>;
-
-    #[method(name = "walletcanoperate")]
-    async fn wallet_can_operate(
-        &self,
-        wallet: &str,
-        space: SLabel,
-    ) -> Result<bool, ErrorObjectOwned>;
 
     #[method(name = "verifyschnorr")]
     async fn verify_schnorr(
@@ -409,41 +365,6 @@ pub trait Rpc {
 
     #[method(name = "verifylisting")]
     async fn verify_listing(&self, listing: Listing) -> Result<(), ErrorObjectOwned>;
-
-    #[method(name = "provespaceout")]
-    async fn prove_spaceout(
-        &self,
-        outpoint: OutPoint,
-        prefer_recent: Option<bool>,
-    ) -> Result<ProofResult, ErrorObjectOwned>;
-
-    #[method(name = "provespaceoutpoint")]
-    async fn prove_space_outpoint(
-        &self,
-        space_or_hash: &str,
-    ) -> Result<ProofResult, ErrorObjectOwned>;
-
-    #[method(name = "proveptrout")]
-    async fn prove_ptrout(
-        &self,
-        outpoint: OutPoint,
-        prefer_recent: Option<bool>,
-    ) -> Result<ProofResult, ErrorObjectOwned>;
-
-    #[method(name = "proveptroutpoint")]
-    async fn prove_ptr_outpoint(
-        &self,
-        subject: Subject,
-        prefer_recent: Option<bool>,
-    ) -> Result<ProofResult, ErrorObjectOwned>;
-
-    #[method(name = "provecommitment")]
-    async fn prove_commitment(
-        &self,
-        space: SLabel,
-        root: sha256::Hash,
-        prefer_recent: Option<bool>,
-    ) -> Result<ProofResult, ErrorObjectOwned>;
 
     #[method(name = "buildchainproof")]
     async fn build_chain_proof(
@@ -606,17 +527,6 @@ pub struct RpcServerImpl {
     store: AsyncChainState,
     client: reqwest::Client,
 }
-
-#[derive(Clone, Serialize, Deserialize)]
-pub struct ProofResult {
-    pub root: Bytes,
-    #[serde(
-        serialize_with = "serialize_base64",
-        deserialize_with = "deserialize_base64"
-    )]
-    pub proof: Vec<u8>,
-}
-
 
 
 /// Combined proof result for a chain proof request containing subtrees from both
@@ -1142,30 +1052,6 @@ impl RpcServer for RpcServerImpl {
             })
     }
 
-    async fn verify_event(
-        &self,
-        subject: Subject,
-        event: NostrEvent,
-    ) -> Result<NostrEvent, ErrorObjectOwned> {
-        self.store
-            .verify_event(subject, event)
-            .await
-            .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
-    }
-
-    async fn wallet_sign_event(
-        &self,
-        wallet: &str,
-        subject: Subject,
-        event: NostrEvent,
-    ) -> Result<NostrEvent, ErrorObjectOwned> {
-        self.wallet(&wallet)
-            .await?
-            .send_sign_event(subject, event)
-            .await
-            .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
-    }
-
     async fn wallet_sign_schnorr(
         &self,
         wallet: &str,
@@ -1312,61 +1198,6 @@ impl RpcServer for RpcServerImpl {
     async fn verify_listing(&self, listing: Listing) -> Result<(), ErrorObjectOwned> {
         self.store
             .verify_listing(listing)
-            .await
-            .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
-    }
-
-    async fn prove_spaceout(
-        &self,
-        outpoint: OutPoint,
-        prefer_recent: Option<bool>,
-    ) -> Result<ProofResult, ErrorObjectOwned> {
-        self.store
-            .prove_spaceout(outpoint, prefer_recent.unwrap_or(false))
-            .await
-            .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
-    }
-
-    async fn prove_space_outpoint(
-        &self,
-        space_or_hash: &str,
-    ) -> Result<ProofResult, ErrorObjectOwned> {
-        self.store
-            .prove_space_outpoint(space_or_hash)
-            .await
-            .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
-    }
-
-    async fn prove_ptrout(
-        &self,
-        outpoint: OutPoint,
-        prefer_recent: Option<bool>,
-    ) -> Result<ProofResult, ErrorObjectOwned> {
-        self.store
-            .prove_ptrout(outpoint, prefer_recent.unwrap_or(false))
-            .await
-            .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
-    }
-
-    async fn prove_ptr_outpoint(
-        &self,
-        subject: Subject,
-        prefer_recent: Option<bool>,
-    ) -> Result<ProofResult, ErrorObjectOwned> {
-        self.store
-            .prove_ptr_outpoint(subject, prefer_recent.unwrap_or(false))
-            .await
-            .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
-    }
-
-    async fn prove_commitment(
-        &self,
-        space: SLabel,
-        root: sha256::Hash,
-        prefer_recent: Option<bool>,
-    ) -> Result<ProofResult, ErrorObjectOwned> {
-        self.store
-            .prove_commitment(space, *root.as_ref(), prefer_recent.unwrap_or(false))
             .await
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
     }
@@ -1721,10 +1552,6 @@ impl AsyncChainState {
                     SpacesWallet::verify_listing::<Sha256>(state, &listing).map(|_| ()),
                 );
             }
-            ChainStateCommand::VerifyEvent { subject, event, resp } => {
-                let result = SpacesWallet::verify_event::<Sha256, _>(state, subject, event);
-                _ = resp.send(result);
-            }
             ChainStateCommand::VerifySchnorr { subject, message, signature, resp } => {
                 let result = (|| {
                     let sig = schnorr::Signature::from_slice(&signature)
@@ -1732,59 +1559,6 @@ impl AsyncChainState {
                     SpacesWallet::verify_schnorr::<Sha256, _>(state, subject, &message, &sig)
                 })();
                 _ = resp.send(result);
-            }
-            ChainStateCommand::ProveSpaceout {
-                prefer_recent,
-                outpoint,
-                resp,
-            } => {
-                _ = resp.send(Self::handle_prove_spaceout(
-                    state,
-                    outpoint,
-                    prefer_recent,
-                ));
-            }
-            ChainStateCommand::ProveSpaceOutpoint {
-                space_or_hash,
-                resp,
-            } => {
-                _ = resp.send(Self::handle_prove_space_outpoint(
-                    state,
-                    &space_or_hash,
-                ));
-            }
-            ChainStateCommand::ProvePtrout {
-                outpoint,
-                prefer_recent,
-                resp,
-            } => {
-                _ = resp.send(Self::handle_prove_ptrout(
-                    state,
-                    outpoint,
-                    prefer_recent,
-                ));
-            }
-            ChainStateCommand::ProvePtrOutpoint {
-                subject,
-                prefer_recent,
-                resp,
-            } => {
-                let result = resolve_sptr(state, &subject)
-                    .and_then(|sptr| Self::handle_prove_ptr_outpoint(state, sptr, prefer_recent));
-                _ = resp.send(result);
-            }
-            ChainStateCommand::ProveCommitment {
-                space,
-                root,
-                prefer_recent,
-                resp,
-            } => {
-                _ = resp.send(Self::handle_prove_commitment(
-                    state,
-                    space,
-                    root,
-                    prefer_recent,
-                ));
             }
             ChainStateCommand::BuildChainProof {
                 request,
@@ -1871,202 +1645,11 @@ impl AsyncChainState {
         }])
     }
 
-    fn handle_prove_space_outpoint(
-        state: &mut Chain,
-        space_or_hash: &str,
-    ) -> anyhow::Result<ProofResult> {
-        let key = get_space_key(space_or_hash)?;
-        let snapshot = state.spaces_inner()?;
-
-        // warm up hash cache
-        let root = snapshot.compute_root()?;
-        let proof = snapshot.prove(&[key.into()], ProofType::Standard)?;
-
-        let buf = proof.to_vec()?;
-
-        Ok(ProofResult {
-            proof: buf,
-            root: Bytes::new(root.to_vec()),
-        })
-    }
-
-    /// Determines the optimal snapshot block height for creating a Merkle proof.
-    ///
-    /// This function finds a suitable historical snapshot that:
-    /// 1. Is not older than when the space was last updated.
-    /// 2. Falls within [ROOT_ANCHORS_COUNT] range
-    /// 3. Skips the oldest trust anchors to prevent the proof from becoming stale too quickly.
-    ///
-    /// Parameters:
-    /// - last_update: Block height when the space was last updated
-    /// - tip: Current blockchain tip height
-    ///
-    /// Returns: Target block height aligned to [COMMIT_BLOCK_INTERVAL]
-    fn compute_target_snapshot(last_update: u32, tip: u32) -> u32 {
-        const SAFETY_MARGIN: u32 = 8; // Skip oldest trust anchors to prevent proof staleness
-        const USABLE_ANCHORS: u32 = ROOT_ANCHORS_COUNT - SAFETY_MARGIN;
-
-        // Align block heights to commit intervals
-        let last_update_aligned =
-            last_update.div_ceil(COMMIT_BLOCK_INTERVAL) * COMMIT_BLOCK_INTERVAL;
-        let current_tip_aligned = (tip / COMMIT_BLOCK_INTERVAL) * COMMIT_BLOCK_INTERVAL;
-
-        // Calculate the oldest allowed snapshot while maintaining safety margin
-        let lookback_window = (USABLE_ANCHORS - 1) * COMMIT_BLOCK_INTERVAL;
-        let oldest_allowed_snapshot = current_tip_aligned.saturating_sub(lookback_window);
-
-        // Choose the most recent of last update or oldest allowed snapshot
-        // to ensure both data freshness and proof verifiability
-        std::cmp::max(last_update_aligned, oldest_allowed_snapshot)
-    }
-
-    fn handle_prove_spaceout(
-        state: &mut Chain,
-        outpoint: OutPoint,
-        prefer_recent: bool,
-    ) -> anyhow::Result<ProofResult> {
-        let key = OutpointKey::from_outpoint::<Sha256>(outpoint);
-
-        let proof = if !prefer_recent {
-            let spaceout = match state.get_spaceout(&outpoint)? {
-                Some(spaceot) => spaceot,
-                None => {
-                    return Err(anyhow!(
-                        "Cannot find older proofs for a non-existent utxo (try with oldest: false)"
-                    ))
-                }
-            };
-            let target_snapshot = match spaceout.space.as_ref() {
-                None => return Ok(ProofResult { proof: vec![], root: Bytes::new(vec![]) }),
-                Some(space) => match space.covenant {
-                    Covenant::Transfer { expire_height, .. } => {
-                        let tip = state.tip();
-                        let last_update = expire_height.saturating_sub(spaces_protocol::constants::RENEWAL_INTERVAL);
-                        Self::compute_target_snapshot(last_update, tip.height)
-                    }
-                    _ => return Err(anyhow!("Cannot find older proofs for a non-registered space (try with oldest: false)")),
-                }
-            };
-            state.prove_spaces_with_snapshot(&[key.into()], target_snapshot)?.1
-        } else {
-            let snapshot = state.spaces_inner()?;
-            snapshot.prove(&[key.into()], ProofType::Standard)?
-        };
-
-        let root = proof.compute_root()?.to_vec();
-        info!("Proving with root anchor {}", hex::encode(root.as_slice()));
-        let buf = proof.to_vec()?;
-
-        Ok(ProofResult {
-            proof: buf,
-            root: Bytes::new(root),
-        })
-    }
-
-    fn handle_prove_ptr_outpoint(
-        state: &mut Chain,
-        sptr: Sptr,
-        prefer_recent: bool,
-    ) -> anyhow::Result<ProofResult> {
-        let key: Hash = sptr.into();
-
-        let proof = if !prefer_recent {
-            let ptr_info = match state.get_ptr_info(&sptr)? {
-                Some(info) => info,
-                None => {
-                    return Err(anyhow!(
-                        "Cannot find older proofs for a non-existent sptr (try with prefer_recent: true)"
-                    ))
-                }
-            };
-            let last_update = ptr_info.ptrout.sptr.last_update;
-            let tip = state.ptrs_tip();
-            let target_snapshot = Self::compute_target_snapshot(last_update, tip.height);
-            state.prove_ptrs_with_snapshot(&[key], target_snapshot)?.1
-        } else {
-            let snapshot = state.ptrs_mut().state.inner()?;
-            snapshot.prove(&[key], ProofType::Standard)?
-        };
-
-        let root = proof.compute_root()?.to_vec();
-        info!("Proving SPTR with root anchor {}", hex::encode(root.as_slice()));
-        let buf = proof.to_vec()?;
-
-        Ok(ProofResult {
-            proof: buf,
-            root: Bytes::new(root),
-        })
-    }
-
-    fn handle_prove_ptrout(
-        state: &mut Chain,
-        outpoint: OutPoint,
-        prefer_recent: bool,
-    ) -> anyhow::Result<ProofResult> {
-        let key = PtrOutpointKey::from_outpoint::<Sha256>(outpoint);
-
-        let proof = if !prefer_recent {
-            let ptrout = match state.get_ptrout(&outpoint)? {
-                Some(ptrout) => ptrout,
-                None => {
-                    return Err(anyhow!(
-                        "Cannot find older proofs for a non-existent utxo (try with prefer_recent: true)"
-                    ))
-                }
-            };
-            let tip = state.ptrs_tip();
-            let target_snapshot = Self::compute_target_snapshot(ptrout.sptr.last_update, tip.height);
-            state.prove_ptrs_with_snapshot(&[key.into()], target_snapshot)?.1
-        } else {
-            let snapshot = state.ptrs_mut().state.inner()?;
-            snapshot.prove(&[key.into()], ProofType::Standard)?
-        };
-
-        let root = proof.compute_root()?.to_vec();
-        info!("Proving PTR with root anchor {}", hex::encode(root.as_slice()));
-        let buf = proof.to_vec()?;
-
-        Ok(ProofResult {
-            proof: buf,
-            root: Bytes::new(root),
-        })
-    }
-
-    fn handle_prove_commitment(
-        state: &mut Chain,
-        space: SLabel,
-        root: Hash,
-        prefer_recent: bool,
-    ) -> anyhow::Result<ProofResult> {
-        let key = CommitmentKey::new::<Sha256>(&space, root);
-
-        let proof = if !prefer_recent {
-            let commitment = match state.get_commitment(&key)? {
-                Some(commitment) => commitment,
-                None => {
-                    return Err(anyhow!(
-                        "Cannot find older proofs for a non-existent commitment (try with prefer_recent: true)"
-                    ))
-                }
-            };
-
-            // Use the block_height from the commitment to find an appropriate snapshot
-            let tip = state.ptrs_tip();
-            let target_snapshot = Self::compute_target_snapshot(commitment.block_height, tip.height);
-            state.prove_ptrs_with_snapshot(&[key.into()], target_snapshot)?.1
-        } else {
-            let snapshot = state.ptrs_mut().state.inner()?;
-            snapshot.prove(&[key.into()], ProofType::Standard)?
-        };
-
-        let root = proof.compute_root()?.to_vec();
-        info!("Proving commitment with root anchor {}", hex::encode(root.as_slice()));
-        let buf = proof.to_vec()?;
-
-        Ok(ProofResult {
-            proof: buf,
-            root: Bytes::new(root),
-        })
+    /// Returns the height for a fixed cached snapshot (~1 week behind tip),
+    /// aligned to COMMIT_BLOCK_INTERVAL. Returns None if the chain is too young.
+    fn cached_snapshot_height(tip_height: u32) -> Option<u32> {
+        let tip_aligned = tip_height - (tip_height % COMMIT_BLOCK_INTERVAL);
+        tip_aligned.checked_sub(CACHED_SNAPSHOT_LOOKBACK)
     }
 
     fn handle_build_chain_proof(
@@ -2153,8 +1736,30 @@ impl AsyncChainState {
         let ptr_tree_keys : Vec<_> = ptr_tree_keys.into_iter().collect();
         let space_tree_keys : Vec<_> = space_tree_keys.into_iter().collect();
 
+        let cached_height = Self::cached_snapshot_height(tip.height);
+        let use_cached = !prefer_recent
+            && cached_height.is_some_and(|h| most_recent_update <= h);
 
-        let (spaces_proof, spaces_root, block_anchor, ptrs_proof, ptrs_root) = if prefer_recent {
+        let (spaces_proof, spaces_root, block_anchor, ptrs_proof, ptrs_root) = if use_cached {
+            let height = cached_height.unwrap();
+            let snapshot = state.snapshot_at(height)?;
+
+            let spaces_anchor: ChainAnchor = snapshot.spaces.metadata().try_into()?;
+            let spaces_proof = snapshot.spaces.prove(&space_tree_keys, ProofType::Standard)?;
+            let spaces_root = spaces_proof.compute_root()?;
+
+            let ptrs_anchor: ChainAnchor = snapshot.ptrs.metadata().try_into()?;
+            if spaces_anchor != ptrs_anchor {
+                return Err(anyhow!(
+                    "Spaces and PTRs snapshots at height {} have mismatched anchors",
+                    height
+                ));
+            }
+            let ptrs_proof = snapshot.ptrs.prove(&ptr_tree_keys, ProofType::Standard)?;
+            let ptrs_root = ptrs_proof.compute_root()?;
+
+            (spaces_proof, spaces_root, spaces_anchor, ptrs_proof, ptrs_root)
+        } else {
             let spaces_snapshot = state.spaces_inner()?;
             let spaces_root = spaces_snapshot.compute_root()?;
             let spaces_anchor: ChainAnchor = spaces_snapshot.metadata().try_into()?;
@@ -2171,23 +1776,6 @@ impl AsyncChainState {
             }
             let ptrs_proof = ptrs_snapshot.prove(&ptr_tree_keys, ProofType::Standard)?;
             let ptrs_root = ptrs_proof.compute_root()?;
-
-            (spaces_proof, spaces_root, spaces_anchor, ptrs_proof, ptrs_root)
-        } else {
-            let target_snapshot = Self::compute_target_snapshot(most_recent_update, tip.height);
-
-            let (spaces_anchor, spaces_proof) = state.prove_spaces_with_snapshot(&space_tree_keys, target_snapshot)?;
-            let spaces_root = spaces_proof.compute_root()?;
-
-            let (ptrs_anchor, ptrs_proof) = state.prove_ptrs_with_snapshot(&ptr_tree_keys, target_snapshot)?;
-            let ptrs_root = ptrs_proof.compute_root()?;
-
-            if spaces_anchor != ptrs_anchor {
-                return Err(anyhow!(
-                    "Spaces and PTRs snapshots at height {} have mismatched anchors",
-                    target_snapshot
-                ));
-            }
 
             (spaces_proof, spaces_root, spaces_anchor, ptrs_proof, ptrs_root)
         };
@@ -2243,18 +1831,6 @@ impl AsyncChainState {
         resp_rx.await?
     }
 
-    pub async fn verify_event(&self, subject: Subject, event: NostrEvent) -> anyhow::Result<NostrEvent> {
-        let (resp, resp_rx) = oneshot::channel();
-        self.sender
-            .send(ChainStateCommand::VerifyEvent {
-                subject,
-                event,
-                resp,
-            })
-            .await?;
-        resp_rx.await?
-    }
-
     pub async fn verify_schnorr(
         &self,
         subject: Subject,
@@ -2267,79 +1843,6 @@ impl AsyncChainState {
                 subject,
                 message,
                 signature,
-                resp,
-            })
-            .await?;
-        resp_rx.await?
-    }
-
-    pub async fn prove_spaceout(
-        &self,
-        outpoint: OutPoint,
-        prefer_recent: bool,
-    ) -> anyhow::Result<ProofResult> {
-        let (resp, resp_rx) = oneshot::channel();
-        self.sender
-            .send(ChainStateCommand::ProveSpaceout {
-                outpoint,
-                prefer_recent: prefer_recent,
-                resp,
-            })
-            .await?;
-        resp_rx.await?
-    }
-
-    pub async fn prove_space_outpoint(&self, space_or_hash: &str) -> anyhow::Result<ProofResult> {
-        let (resp, resp_rx) = oneshot::channel();
-        self.sender
-            .send(ChainStateCommand::ProveSpaceOutpoint {
-                space_or_hash: space_or_hash.to_string(),
-                resp,
-            })
-            .await?;
-        resp_rx.await?
-    }
-
-    pub async fn prove_ptrout(
-        &self,
-        outpoint: OutPoint,
-        prefer_recent: bool,
-    ) -> anyhow::Result<ProofResult> {
-        let (resp, resp_rx) = oneshot::channel();
-        self.sender
-            .send(ChainStateCommand::ProvePtrout {
-                outpoint,
-                prefer_recent,
-                resp,
-            })
-            .await?;
-        resp_rx.await?
-    }
-
-    pub async fn prove_ptr_outpoint(&self, subject: Subject, prefer_recent: bool) -> anyhow::Result<ProofResult> {
-        let (resp, resp_rx) = oneshot::channel();
-        self.sender
-            .send(ChainStateCommand::ProvePtrOutpoint {
-                subject,
-                prefer_recent,
-                resp,
-            })
-            .await?;
-        resp_rx.await?
-    }
-
-    pub async fn prove_commitment(
-        &self,
-        space: SLabel,
-        root: Hash,
-        prefer_recent: bool,
-    ) -> anyhow::Result<ProofResult> {
-        let (resp, resp_rx) = oneshot::channel();
-        self.sender
-            .send(ChainStateCommand::ProveCommitment {
-                space,
-                root,
-                prefer_recent,
                 resp,
             })
             .await?;

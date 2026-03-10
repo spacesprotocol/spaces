@@ -24,7 +24,6 @@ use spaces_wallet::{
     bitcoin,
     bitcoin::{secp256k1::schnorr, Address, Amount, FeeRate, OutPoint},
     builder::{CoinTransfer, SpaceTransfer, SpacesAwareCoinSelection},
-    nostr::NostrEvent,
     tx_event::{TxEvent, TxEventKind, TxRecord},
     Balance, DoubleUtxo, Listing, SpacesWallet, Subject, WalletInfo, WalletOutput,
 };
@@ -314,11 +313,6 @@ pub enum WalletCommand {
         resp: crate::rpc::Responder<anyhow::Result<Balance>>,
     },
     UnloadWallet,
-    SignEvent {
-        subject: Subject,
-        event: NostrEvent,
-        resp: crate::rpc::Responder<anyhow::Result<NostrEvent>>,
-    },
     SignSchnorr {
         subject: Subject,
         message: Vec<u8>,
@@ -644,13 +638,6 @@ impl RpcWallet {
             }
             WalletCommand::Sell { space, price, resp } => {
                 _ = resp.send(wallet.sell::<Sha256>(chain, &space, Amount::from_sat(price)));
-            }
-            WalletCommand::SignEvent {
-                subject,
-                event,
-                resp,
-            } => {
-                _ = resp.send(wallet.sign_event::<Sha256, _>(chain, subject, event));
             }
             WalletCommand::SignSchnorr {
                 subject,
@@ -1816,22 +1803,6 @@ impl RpcWallet {
         let (resp, resp_rx) = oneshot::channel();
         self.sender
             .send(WalletCommand::Sell { space, resp, price })
-            .await?;
-        resp_rx.await?
-    }
-
-    pub async fn send_sign_event(
-        &self,
-        subject: Subject,
-        event: NostrEvent,
-    ) -> anyhow::Result<NostrEvent> {
-        let (resp, resp_rx) = oneshot::channel();
-        self.sender
-            .send(WalletCommand::SignEvent {
-                subject,
-                event,
-                resp,
-            })
             .await?;
         resp_rx.await?
     }
