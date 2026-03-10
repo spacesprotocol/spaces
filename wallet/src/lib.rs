@@ -466,8 +466,12 @@ impl SpacesWallet {
             }
         };
 
-        let utxo = self.get_utxo(outpoint)
-            .ok_or_else(|| anyhow::anyhow!("Not owned by wallet"))?;
+        // We use list_output instead of get_utxo because the output might
+        // be spent in a pending tx, so signatures are still valid until confirmed.
+        // Mainly useful if subs is trying to sign a temporary certificate, but it already
+        // broadcasted a commitment spending the ptr.
+        let utxo = self.internal.list_output().find(|o| o.outpoint == outpoint)
+            .clone().ok_or_else(|| anyhow::anyhow!("Not owned by wallet"))?;
 
         let keypair = self
             .get_taproot_keypair(utxo.keychain, utxo.derivation_index)
@@ -568,8 +572,12 @@ impl SpacesWallet {
             }
         };
 
-        let utxo = self.get_utxo(outpoint)
-            .ok_or_else(|| anyhow::anyhow!("Not owned by wallet"))?;
+        // We use list_output instead of get_utxo because the output might
+        // be spent in a pending tx, so signatures are still valid until confirmed.
+        // Mainly useful if subs is trying to sign a temporary certificate, but it already
+        // broadcasted a commitment spending the ptr.
+        let utxo = self.internal.list_output().find(|o| o.outpoint == outpoint)
+            .clone().ok_or_else(|| anyhow::anyhow!("Not owned by wallet"))?;
 
         let keypair = self
             .get_taproot_keypair(utxo.keychain, utxo.derivation_index)
