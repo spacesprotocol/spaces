@@ -1,8 +1,7 @@
 use std::path::Path;
 use anyhow::{anyhow, Context};
 use log::info;
-use spacedb::{Hash, Sha256Hasher};
-use spacedb::subtree::SubTree;
+use spacedb::Hash;
 use spaces_protocol::bitcoin::{BlockHash, OutPoint};
 use spaces_protocol::bitcoin::hashes::Hash as HashUtil;
 use spaces_protocol::constants::ChainAnchor;
@@ -21,6 +20,8 @@ use crate::store::spaces::{RolloutEntry, RolloutIterator, SpLiveStore, SpStore, 
 
 pub const ROOT_ANCHORS_COUNT: u32 = 120;
 pub const COMMIT_BLOCK_INTERVAL: u32 = 36;
+/// ~1 week lookback for cached snapshot (7 * 144 = 1008 blocks)
+pub const CACHED_SNAPSHOT_LOOKBACK: u32 = 1008;
 
 // https://internals.rust-lang.org/t/nicer-static-assertions/15986
 macro_rules! const_assert {
@@ -35,11 +36,28 @@ const_assert!(
 );
 
 
-#[derive(Clone)]
+pub struct CachedSnapshot {
+    pub height: u32,
+    pub spaces: ReadTx,
+    pub ptrs: ReadTx,
+}
+
 pub struct Chain {
     db: LiveStore,
     idx: LiveIndex,
     ptrs_genesis: ChainAnchor,
+    cached_snapshot: Option<CachedSnapshot>,
+}
+
+impl Clone for Chain {
+    fn clone(&self) -> Self {
+        Self {
+            db: self.db.clone(),
+            idx: self.idx.clone(),
+            ptrs_genesis: self.ptrs_genesis,
+            cached_snapshot: None,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -99,6 +117,22 @@ impl Chain {
         self.db.pt.state.get_ptr_info(key)
     }
 
+    pub fn snapshot_at(&mut self, target_height: u32) -> anyhow::Result<&mut CachedSnapshot> {
+        if self.cached_snapshot.as_ref()
+            .is_some_and(|c| c.height > self.tip().height)
+        {
+            self.cached_snapshot = None;
+        }
+
+        if !self.cached_snapshot.as_ref().is_some_and(|c| c.height == target_height) {
+            let spaces = self.db.sp.state.read_at(target_height)?;
+            let ptrs = self.db.pt.state.read_at(target_height)?;
+            self.cached_snapshot = Some(CachedSnapshot { height: target_height, spaces, ptrs });
+        }
+
+        Ok(self.cached_snapshot.as_mut().unwrap())
+    }
+
     pub fn load(_network: Network, genesis: ChainAnchor, ptrs_genesis: ChainAnchor, dir: &Path, index_spaces: bool, index_ptrs: bool) -> anyhow::Result<Self> {
         let proto_db_path = dir.join("root.sdb");
         let ptrs_db_path = dir.join("refs.sdb");
@@ -134,7 +168,8 @@ impl Chain {
         let chain = Chain {
             db: LiveStore { sp, pt },
             idx: LiveIndex { sp: sp_idx, pt: pt_idx },
-            ptrs_genesis
+            ptrs_genesis,
+            cached_snapshot: None,
         };
 
         // If spaces synced past the ptrs point, reset the tip
@@ -338,22 +373,6 @@ impl Chain {
 
     pub fn remove_space(&self, key: SpaceKey) {
         self.db.sp.state.remove(key)
-    }
-
-    pub fn prove_spaces_with_snapshot(
-        &self,
-        keys: &[Hash],
-        snapshot_block_height: u32,
-    ) -> anyhow::Result<(ChainAnchor, SubTree<Sha256Hasher>)> {
-        self.db.sp.state.prove_with_snapshot(keys, snapshot_block_height)
-    }
-
-    pub fn prove_ptrs_with_snapshot(
-        &self,
-        keys: &[Hash],
-        snapshot_block_height: u32,
-    ) -> anyhow::Result<(ChainAnchor, SubTree<Sha256Hasher>)> {
-        self.db.pt.state.prove_with_snapshot(keys, snapshot_block_height)
     }
 
     pub fn get_spaces_block(&mut self, hash: BlockHash) -> anyhow::Result<Option<BlockMetaWithHash>> {

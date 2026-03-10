@@ -2,18 +2,13 @@ extern crate core;
 
 use std::{
     fs, io,
-    io::{Cursor, IsTerminal, Write},
+    io::Write,
     path::PathBuf,
 };
 use std::str::FromStr;
 use anyhow::anyhow;
-use base64::Engine;
 use clap::{Parser, Subcommand};
 use colored::{Color, Colorize};
-use domain::{
-    base::{iana::Opcode, MessageBuilder, TreeCompressor},
-    zonefile::inplace::{Entry, Zonefile},
-};
 use jsonrpsee::{
     core::{client::Error, ClientError},
     http_client::HttpClient,
@@ -39,7 +34,7 @@ use spaces_protocol::bitcoin::{Amount, FeeRate, OutPoint, Txid};
 use spaces_protocol::slabel::SLabel;
 use spaces_ptr::snumeric::SNumeric;
 use spaces_ptr::sptr::Sptr;
-use spaces_wallet::{bitcoin::secp256k1::schnorr::Signature, export::WalletExport, nostr::{NostrEvent, NostrTag}, Listing};
+use spaces_wallet::{bitcoin::secp256k1::schnorr::Signature, export::WalletExport, Listing};
 use spaces_wallet::bitcoin::hashes::sha256;
 use spaces_wallet::bitcoin::ScriptBuf;
 
@@ -337,50 +332,6 @@ enum Commands {
         #[arg(long)]
         seller: String,
     },
-    /// Sign any Nostr event using the space's private key
-    #[command(name = "signevent")]
-    SignEvent {
-        /// Space name (e.g., @example)
-        space: String,
-
-        /// Path to a Nostr event json file (omit for stdin)
-        #[arg(short, long)]
-        input: Option<PathBuf>,
-
-        /// Include a space-tag and trust path data
-        #[arg(short, long)]
-        anchor: bool,
-    },
-    /// Verify a signed Nostr event against the space's public key
-    #[command(name = "verifyevent")]
-    VerifyEvent {
-        /// Space name (e.g., @example)
-        space: String,
-
-        /// Path to a signed Nostr event json file (omit for stdin)
-        #[arg(short, long)]
-        input: Option<PathBuf>,
-    },
-    /// Sign a zone file turning it into a space-anchored Nostr event
-    #[command(name = "signzone")]
-    SignZone {
-        /// The space to use for signing the DNS file
-        space: String,
-        /// The DNS zone file path (omit for stdin)
-        input: Option<PathBuf>,
-        /// Skip including bundled Merkle proof in the event.
-        #[arg(long)]
-        skip_anchor: bool,
-    },
-    /// Updates the Merkle trust path for space-anchored Nostr events
-    #[command(name = "refreshanchor")]
-    RefreshAnchor {
-        /// Path to a Nostr event file (omit for stdin)
-        input: Option<PathBuf>,
-        /// Prefer the most recent trust path (not recommended)
-        #[arg(long)]
-        prefer_recent: bool,
-    },
     /// Get a spaceout - a Bitcoin output relevant to the Spaces protocol.
     #[command(name = "getspaceout")]
     GetSpaceOut {
@@ -499,68 +450,6 @@ impl SpaceCli {
         ))
     }
 
-    async fn sign_event(
-        &self,
-        space: String,
-        event: NostrEvent,
-        anchor: bool,
-        most_recent: bool,
-    ) -> Result<NostrEvent, ClientError> {
-        let subject = parse_subject(&space)
-            .map_err(|e| ClientError::Custom(format!("Invalid subject: {}", e)))?;
-        let mut result = self
-            .client
-            .wallet_sign_event(&self.wallet, subject, event)
-            .await?;
-
-        if anchor {
-            result = self.add_anchor(result, most_recent).await?
-        }
-
-        Ok(result)
-    }
-    async fn add_anchor(
-        &self,
-        mut event: NostrEvent,
-        most_recent: bool,
-    ) -> Result<NostrEvent, ClientError> {
-        let space = match event.space() {
-            None => {
-                return Err(ClientError::Custom(
-                    "A space tag is required to add an anchor".to_string(),
-                ))
-            }
-            Some(space) => space,
-        };
-
-        let spaceout = self
-            .client
-            .get_space(&space)
-            .await
-            .map_err(|e| ClientError::Custom(e.to_string()))?
-            .ok_or(ClientError::Custom(format!(
-                "Space not found \"{}\"",
-                space
-            )))?;
-
-        event.proof = Some(
-            base64::prelude::BASE64_STANDARD.encode(
-                self.client
-                    .prove_spaceout(
-                        OutPoint {
-                            txid: spaceout.txid,
-                            vout: spaceout.spaceout.n as _,
-                        },
-                        Some(most_recent),
-                    )
-                    .await
-                    .map_err(|e| ClientError::Custom(e.to_string()))?
-                    .proof,
-            ),
-        );
-
-        Ok(event)
-    }
     async fn send_request(
         &self,
         req: Option<RpcWalletRequest>,
@@ -1014,84 +903,6 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
             cli.client.verify_listing(listing).await?;
             println!("{} Listing verified", "✓".color(Color::Green));
         }
-        Commands::SignEvent {
-            mut space,
-            input,
-            anchor,
-        } => {
-            let mut event = read_event(input)
-                .map_err(|e| ClientError::Custom(format!("input error: {}", e.to_string())))?;
-
-            space = normalize_space(&space);
-            match event.space() {
-                None if anchor => event
-                    .tags
-                    .insert(0, NostrTag(vec!["space".to_string(), space.clone()])),
-                Some(tag) => {
-                    if tag != space {
-                        return Err(ClientError::Custom(format!(
-                            "Expected a space tag with value '{}', got '{}'",
-                            space, tag
-                        )));
-                    }
-                }
-                _ => {}
-            };
-
-            let result = cli.sign_event(space, event, anchor, false).await?;
-            println!("{}", serde_json::to_string(&result).expect("result"));
-        }
-        Commands::SignZone {
-            space,
-            input,
-            skip_anchor,
-        } => {
-            let update = encode_dns_update(&space, input)
-                .map_err(|e| ClientError::Custom(format!("Parse error: {}", e)))?;
-            let result = cli.sign_event(space, update, !skip_anchor, false).await?;
-
-            println!("{}", serde_json::to_string(&result).expect("result"));
-        }
-        Commands::RefreshAnchor {
-            input,
-            prefer_recent,
-        } => {
-            let event = read_event(input)
-                .map_err(|e| ClientError::Custom(format!("input error: {}", e.to_string())))?;
-            let space = match event.space() {
-                None => {
-                    return Err(ClientError::Custom(
-                        "Not a space-anchored event (no space tag)".to_string(),
-                    ))
-                }
-                Some(space) => space,
-            };
-
-            let subject = parse_subject(&space)
-                .map_err(|e| ClientError::Custom(format!("Invalid subject: {}", e)))?;
-            let mut event = cli
-                .client
-                .verify_event(subject, event)
-                .await
-                .map_err(|e| ClientError::Custom(e.to_string()))?;
-            event.proof = None;
-            event = cli.add_anchor(event, prefer_recent).await?;
-
-            println!("{}", serde_json::to_string(&event).expect("result"));
-        }
-        Commands::VerifyEvent { space, input } => {
-            let event = read_event(input)
-                .map_err(|e| ClientError::Custom(format!("input error: {}", e.to_string())))?;
-            let subject = parse_subject(&space)
-                .map_err(|e| ClientError::Custom(format!("Invalid subject: {}", e)))?;
-            let event = cli
-                .client
-                .verify_event(subject, event)
-                .await
-                .map_err(|e| ClientError::Custom(e.to_string()))?;
-
-            println!("{}", serde_json::to_string(&event).expect("result"));
-        }
         Commands::CreatePtr { spk, fee_rate } => {
             let spk = ScriptBuf::from(hex::decode(spk)
                 .map_err(|_| ClientError::Custom("Invalid spk hex".to_string()))?);
@@ -1257,50 +1068,3 @@ fn default_rpc_url(chain: &ExtendedNetwork) -> String {
     format!("http://127.0.0.1:{}", default_spaces_rpc_port(chain))
 }
 
-fn encode_dns_update(space: &str, zone_file: Option<PathBuf>) -> anyhow::Result<NostrEvent> {
-    // domain crate panics if zone doesn't end in a new line
-    let zone = get_input(zone_file)? + "\n";
-
-    let mut builder = MessageBuilder::from_target(TreeCompressor::new(Vec::new()))?.authority();
-
-    builder.header_mut().set_opcode(Opcode::UPDATE);
-
-    let mut cursor = Cursor::new(zone);
-    let mut reader = Zonefile::load(&mut cursor)?;
-
-    while let Some(entry) = reader
-        .next_entry()
-        .or_else(|e| Err(anyhow!("Error reading zone entry: {}", e)))?
-    {
-        if let Entry::Record(record) = &entry {
-            builder.push(record)?;
-        }
-    }
-
-    let msg = builder.finish();
-    Ok(NostrEvent::new(
-        871_222,
-        &base64::prelude::BASE64_STANDARD.encode(msg.as_slice()),
-        vec![NostrTag(vec!["space".to_string(), space.to_string()])],
-    ))
-}
-
-fn read_event(file: Option<PathBuf>) -> anyhow::Result<NostrEvent> {
-    let content = get_input(file)?;
-    let event: NostrEvent = serde_json::from_str(&content)?;
-    Ok(event)
-}
-
-// Helper to handle file or stdin input
-fn get_input(input: Option<PathBuf>) -> anyhow::Result<String> {
-    Ok(match input {
-        Some(file) => fs::read_to_string(file)?,
-        None => {
-            let input = io::stdin();
-            match input.is_terminal() {
-                true => return Err(anyhow!("no input provided: specify file path or stdin")),
-                false => input.lines().collect::<Result<String, _>>()?,
-            }
-        }
-    })
-}

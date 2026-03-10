@@ -5,16 +5,18 @@ use spaces_client::{
         BidParams, OpenParams, RegisterParams, RpcClient, RpcWalletRequest,
         RpcWalletTxBuilder, Subject, TransferSpacesParams,
     },
+    store::chain::{CACHED_SNAPSHOT_LOOKBACK, COMMIT_BLOCK_INTERVAL},
     wallets::{AddressKind, WalletResponse},
 };
 use spaces_protocol::{
     bitcoin::{Amount, FeeRate},
     constants::RENEWAL_INTERVAL,
     slabel::SLabel,
-    Covenant,
+    Bytes, Covenant,
 };
+use spaces_ptr::ChainProofRequest;
 use spaces_testutil::TestRig;
-use spaces_wallet::{export::WalletExport, nostr::NostrEvent, tx_event::TxEventKind};
+use spaces_wallet::{export::WalletExport, tx_event::TxEventKind};
 
 const ALICE: &str = "wallet_99";
 const BOB: &str = "wallet_98";
@@ -1214,43 +1216,6 @@ async fn it_should_allow_buy_sell(rig: &TestRig) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn it_should_allow_sign_verify_messages(rig: &TestRig) -> anyhow::Result<()> {
-    rig.wait_until_wallet_synced(BOB).await.expect("synced");
-
-    let alice_spaces = rig
-        .spaced
-        .client
-        .wallet_list_spaces(BOB)
-        .await
-        .expect("bob spaces");
-    let space = alice_spaces
-        .owned
-        .first()
-        .expect("bob should have at least 1 space");
-
-    let space_name = space.spaceout.space.as_ref().unwrap().name.to_string();
-
-    let msg = NostrEvent::new(1, "hello world", vec![]);
-    let space_or_ptr = Subject::Space(SLabel::from_str(&space_name).unwrap());
-    let signed = rig
-        .spaced
-        .client
-        .wallet_sign_event(BOB, space_or_ptr.clone(), msg.clone())
-        .await
-        .expect("sign");
-
-    println!("signed\n{}", serde_json::to_string_pretty(&signed).unwrap());
-    assert_eq!(signed.content, msg.content, "msg content must match");
-
-    rig.spaced
-        .client
-        .verify_event(space_or_ptr, signed.clone())
-        .await
-        .expect("verify");
-
-    Ok(())
-}
-
 async fn it_should_handle_expired_spaces(rig: &TestRig) -> anyhow::Result<()> {
     rig.wait_until_wallet_synced(ALICE).await?;
     rig.wait_until_synced().await?;
@@ -1419,6 +1384,123 @@ async fn it_should_handle_expired_spaces(rig: &TestRig) -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn it_should_sign_and_verify_schnorr(rig: &TestRig) -> anyhow::Result<()> {
+    rig.wait_until_wallet_synced(BOB).await?;
+
+    let spaces = rig.spaced.client.wallet_list_spaces(BOB).await?;
+    let space = spaces.owned.first().expect("bob should have at least 1 space");
+    let space_name = space.spaceout.space.as_ref().unwrap().name.to_string();
+    let subject = Subject::Space(SLabel::from_str(&space_name).unwrap());
+
+    let message = Bytes::new(b"hello world".to_vec());
+    let signature = rig
+        .spaced
+        .client
+        .wallet_sign_schnorr(BOB, subject.clone(), message.clone())
+        .await?;
+
+    assert!(!signature.is_empty(), "signature should not be empty");
+
+    let valid = rig
+        .spaced
+        .client
+        .verify_schnorr(subject, message, signature)
+        .await?;
+    assert!(valid, "signature must be valid");
+
+    Ok(())
+}
+
+async fn it_should_build_chain_proof_with_snapshot_caching(rig: &TestRig) -> anyhow::Result<()> {
+    rig.wait_until_wallet_synced(ALICE).await?;
+    rig.wait_until_synced().await?;
+
+    let spaces = rig.spaced.client.wallet_list_spaces(ALICE).await?;
+    let space = spaces.owned.first().expect("alice should have spaces");
+    let space_name = space.spaceout.space.as_ref().unwrap().name.to_string();
+    let label = SLabel::from_str(&space_name).unwrap();
+
+    // Use debug RPC to set expire_height far in the future so last_update is old
+    // last_update = expire_height - RENEWAL_INTERVAL, so setting expire_height
+    // to RENEWAL_INTERVAL + 1 makes last_update = 1 (very old)
+    let old_expire_height = RENEWAL_INTERVAL + 1;
+    rig.spaced.client.debug_set_expire_height(&space_name, old_expire_height).await?;
+
+    // Mine to next commit boundary so the change is committed
+    let tip = rig.get_block_count().await? as u32;
+    let remaining = tip % COMMIT_BLOCK_INTERVAL;
+    if remaining > 0 {
+        rig.mine_blocks((COMMIT_BLOCK_INTERVAL - remaining) as usize, None).await?;
+    }
+    rig.wait_until_synced().await?;
+
+    let tip = rig.get_block_count().await? as u32;
+    let cached_height = (tip - tip % COMMIT_BLOCK_INTERVAL)
+        .saturating_sub(CACHED_SNAPSHOT_LOOKBACK);
+    let last_update = old_expire_height.saturating_sub(RENEWAL_INTERVAL);
+    assert!(
+        last_update <= cached_height,
+        "last_update ({}) should be <= cached_height ({})",
+        last_update, cached_height
+    );
+
+    // Prove the space - last_update=1 <= cached_height, should use cached snapshot
+    let proof1 = rig
+        .spaced
+        .client
+        .build_chain_proof(
+            ChainProofRequest {
+                spaces: vec![label.clone()],
+                ptrs_keys: vec![],
+            },
+            Some(false),
+        )
+        .await?;
+
+    assert!(!proof1.spaces_proof.is_empty(), "proof should not be empty");
+    assert_eq!(
+        proof1.block.height, cached_height,
+        "old space should use cached snapshot (last_update={}, cached_height={})",
+        last_update, cached_height
+    );
+
+    // Now set expire_height so last_update is recent (above cached_height)
+    let recent_expire_height = tip + RENEWAL_INTERVAL;
+    rig.spaced.client.debug_set_expire_height(&space_name, recent_expire_height).await?;
+
+    // Mine to next commit boundary
+    let tip2 = rig.get_block_count().await? as u32;
+    let remaining = tip2 % COMMIT_BLOCK_INTERVAL;
+    if remaining > 0 {
+        rig.mine_blocks((COMMIT_BLOCK_INTERVAL - remaining) as usize, None).await?;
+    }
+    rig.wait_until_synced().await?;
+
+    // Prove again - last_update is now recent, should use live state
+    let proof2 = rig
+        .spaced
+        .client
+        .build_chain_proof(
+            ChainProofRequest {
+                spaces: vec![label.clone()],
+                ptrs_keys: vec![],
+            },
+            Some(false),
+        )
+        .await?;
+
+    let tip3 = rig.get_block_count().await? as u32;
+    let cached_height2 = (tip3 - tip3 % COMMIT_BLOCK_INTERVAL)
+        .saturating_sub(CACHED_SNAPSHOT_LOOKBACK);
+    assert!(!proof2.spaces_proof.is_empty(), "proof should not be empty");
+    assert!(
+        proof2.block.height > cached_height2,
+        "updated space should use live state, not cached snapshot"
+    );
+
+    Ok(())
+}
+
 async fn it_should_handle_reorgs(rig: &TestRig) -> anyhow::Result<()> {
     rig.wait_until_wallet_synced(ALICE).await.expect("synced");
     const NAME: &str = "hello_world";
@@ -1481,14 +1563,15 @@ async fn run_auction_tests() -> anyhow::Result<()> {
     it_should_allow_buy_sell(&rig)
         .await
         .expect("should allow buy sell");
-    it_should_allow_sign_verify_messages(&rig)
+    it_should_sign_and_verify_schnorr(&rig)
         .await
-        .expect("should sign verify");
-
+        .expect("should sign and verify schnorr");
+    it_should_build_chain_proof_with_snapshot_caching(&rig)
+        .await
+        .expect("should build chain proof with snapshot caching");
     it_should_handle_expired_spaces(&rig)
         .await
         .expect("should handle expired spaces");
-
 
     // keep reorgs last as it can drop some txs from mempool and mess up wallet state
     it_should_handle_reorgs(&rig)

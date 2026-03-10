@@ -60,6 +60,7 @@ impl SpaceD {
                 }
             };
 
+            #[allow(deprecated)]
             let child = std::process::Command::cargo_bin("spaced")?
                 .args(args)
                 .arg("--rpc-port")
