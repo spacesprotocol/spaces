@@ -22,9 +22,10 @@ use spaces_client::{
     auth::{auth_token_from_cookie, auth_token_from_creds, http_client_with_auth},
     config::{default_cookie_path, default_spaces_rpc_port, ExtendedNetwork},
     format::{
-        print_error_rpc_response, print_list_bidouts, print_list_spaces_response,
-        print_list_transactions, print_list_unspent, print_list_wallets, print_server_info,
-        print_wallet_balance_response, print_wallet_info, print_wallet_response, Format,
+        print_error_rpc_response, print_list_bidouts, print_list_ptrs_response,
+        print_list_spaces_response, print_list_transactions, print_list_unspent,
+        print_list_wallets, print_server_info, print_wallet_balance_response,
+        print_wallet_info, print_wallet_response, Format,
     },
     rpc::{
         BidParams, OpenParams, RegisterParams, RpcClient, RpcWalletRequest,
@@ -424,6 +425,9 @@ enum Commands {
     /// still in auction with a winning bid
     #[command(name = "listspaces")]
     ListSpaces,
+    /// List PTRs owned by wallet
+    #[command(name = "listptrs")]
+    ListPtrs,
     /// List unspent auction outputs i.e. outputs that can be
     /// auctioned off in the bidding process
     #[command(name = "listbidouts")]
@@ -910,6 +914,10 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
             let tip = cli.client.get_server_info().await?;
             let spaces = cli.client.wallet_list_spaces(&cli.wallet).await?;
             print_list_spaces_response(tip.tip.height, spaces, cli.format);
+        }
+        Commands::ListPtrs => {
+            let ptrs = cli.client.wallet_list_ptrs(&cli.wallet).await?;
+            print_list_ptrs_response(ptrs, cli.format);
         }
         Commands::Balance => {
             let balance = cli.client.wallet_get_balance(&cli.wallet).await?;

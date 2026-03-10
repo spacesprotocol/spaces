@@ -36,7 +36,7 @@ use tokio::{
 };
 use spaces_protocol::bitcoin::address::ParseError;
 use spaces_protocol::bitcoin::{Network, ScriptBuf};
-use spaces_ptr::{PtrSource, RegistrySptrKey};
+use spaces_ptr::{PtrOut, PtrSource, RegistrySptrKey};
 use spaces_ptr::sptr::{Sptr, SptrParseError, SPTR_HRP};
 use spaces_wallet::builder::{CommitmentRequest, PtrRequest, PtrTransfer};
 use crate::{calc_progress, checker::TxChecker, client::BlockSource, config::ExtendedNetwork, rpc::{RpcWalletRequest, RpcWalletTxBuilder, WalletLoadRequest}, source::{
@@ -189,6 +189,19 @@ pub struct ListSpacesResponse {
     pub owned: Vec<FullSpaceOut>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PtrEntry {
+    pub txid: Txid,
+    #[serde(flatten)]
+    pub ptrout: PtrOut,
+    pub delegating_for: Option<SLabel>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListPtrsResponse {
+    pub ptrs: Vec<PtrEntry>,
+}
+
 #[derive(Tabled, Debug, Clone, Serialize, Deserialize)]
 #[tabled(rename_all = "UPPERCASE")]
 pub struct TxInfo {
@@ -264,6 +277,9 @@ pub enum WalletCommand {
     },
     ListSpaces {
         resp: crate::rpc::Responder<anyhow::Result<ListSpacesResponse>>,
+    },
+    ListPtrs {
+        resp: crate::rpc::Responder<anyhow::Result<ListPtrsResponse>>,
     },
     Buy {
         listing: Listing,
@@ -573,6 +589,10 @@ impl RpcWallet {
             }
             WalletCommand::ListSpaces { resp } => {
                 let result = Self::list_spaces(wallet, chain);
+                _ = resp.send(result);
+            }
+            WalletCommand::ListPtrs { resp } => {
+                let result = Self::list_ptrs(wallet, chain);
                 _ = resp.send(result);
             }
             WalletCommand::ListBidouts { resp } => {
@@ -929,6 +949,28 @@ impl RpcWallet {
 
         fetcher.stop();
         Ok(())
+    }
+
+    fn list_ptrs(
+        wallet: &mut SpacesWallet,
+        chain: &mut Chain,
+    ) -> anyhow::Result<ListPtrsResponse> {
+        let mut ptrs: Vec<PtrEntry> = Vec::new();
+        for unspent in wallet.list_unspent() {
+            let sptr = Sptr::from_spk::<Sha256>(unspent.txout.script_pubkey);
+            let Some(fpo) = chain.get_ptr_info(&sptr)? else {
+                continue;
+            };
+            let rsk = RegistrySptrKey::from_sptr::<Sha256>(sptr);
+            let delegating_for = chain.get_delegator(&rsk)?;
+            ptrs.push(PtrEntry {
+                txid: fpo.txid,
+                ptrout: fpo.ptrout,
+                delegating_for,
+            })
+        }
+
+        Ok(ListPtrsResponse { ptrs })
     }
 
     fn list_spaces(
@@ -1761,6 +1803,14 @@ impl RpcWallet {
     pub async fn send_list_spaces(&self) -> anyhow::Result<ListSpacesResponse> {
         let (resp, resp_rx) = oneshot::channel();
         self.sender.send(WalletCommand::ListSpaces { resp }).await?;
+        resp_rx.await?
+    }
+
+    pub async fn send_list_ptrs(&self) -> anyhow::Result<ListPtrsResponse> {
+        let (resp, resp_rx) = oneshot::channel();
+        self.sender
+            .send(WalletCommand::ListPtrs { resp })
+            .await?;
         resp_rx.await?
     }
 

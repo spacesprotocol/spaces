@@ -63,8 +63,8 @@ use crate::{
     deserialize_base64, serialize_base64,
     source::BitcoinRpc,
     wallets::{
-        AddressKind, ListSpacesResponse, RpcWallet, TxInfo, TxResponse, WalletCommand,
-        WalletResponse,
+        AddressKind, ListPtrsResponse, ListSpacesResponse, RpcWallet, TxInfo, TxResponse,
+        WalletCommand, WalletResponse,
     },
 };
 use crate::store::chain::{Chain, COMMIT_BLOCK_INTERVAL, ROOT_ANCHORS_COUNT};
@@ -502,6 +502,12 @@ pub trait Rpc {
         &self,
         wallet: &str,
     ) -> Result<ListSpacesResponse, ErrorObjectOwned>;
+
+    #[method(name = "walletlistptrs")]
+    async fn wallet_list_ptrs(
+        &self,
+        wallet: &str,
+    ) -> Result<ListPtrsResponse, ErrorObjectOwned>;
 
     #[method(name = "walletlistunspent")]
     async fn wallet_list_unspent(
@@ -1525,6 +1531,17 @@ impl RpcServer for RpcServerImpl {
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
     }
 
+    async fn wallet_list_ptrs(
+        &self,
+        wallet: &str,
+    ) -> Result<ListPtrsResponse, ErrorObjectOwned> {
+        self.wallet(&wallet)
+            .await?
+            .send_list_ptrs()
+            .await
+            .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
+    }
+
     async fn wallet_list_unspent(
         &self,
         wallet: &str,
@@ -2249,8 +2266,20 @@ impl AsyncChainState {
             }
         }
 
+        let tip = state.tip();
+        let last_committed = tip.height - (tip.height % COMMIT_BLOCK_INTERVAL);
+        if most_recent_update > last_committed {
+            let next_commit = last_committed + COMMIT_BLOCK_INTERVAL;
+            let blocks_remaining = next_commit - tip.height;
+            return Err(anyhow!(
+                "Cannot prove: data updated at block {} is not yet committed. Try again in {} block(s)",
+                most_recent_update, blocks_remaining
+            ));
+        }
+
         let ptr_tree_keys : Vec<_> = ptr_tree_keys.into_iter().collect();
         let space_tree_keys : Vec<_> = space_tree_keys.into_iter().collect();
+
 
         let (spaces_proof, spaces_root, block_anchor, ptrs_proof, ptrs_root) = if prefer_recent {
             let spaces_snapshot = state.spaces_inner()?;
@@ -2272,7 +2301,6 @@ impl AsyncChainState {
 
             (spaces_proof, spaces_root, spaces_anchor, ptrs_proof, ptrs_root)
         } else {
-            let tip = state.tip();
             let target_snapshot = Self::compute_target_snapshot(most_recent_update, tip.height);
 
             let (spaces_anchor, spaces_proof) = state.prove_spaces_with_snapshot(&space_tree_keys, target_snapshot)?;
