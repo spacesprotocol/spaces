@@ -1,5 +1,5 @@
 use std::{collections::BTreeMap, str::FromStr, time::Duration};
-
+use std::collections::{HashMap, HashSet};
 use anyhow::anyhow;
 use clap::ValueEnum;
 use futures::{stream::FuturesUnordered, StreamExt};
@@ -181,6 +181,7 @@ pub enum WalletCommand {
         resp: crate::rpc::Responder<anyhow::Result<Vec<TxInfo>>>,
     },
     ListSpaces {
+        v2: bool,
         resp: crate::rpc::Responder<anyhow::Result<ListSpacesResponse>>,
     },
     Buy {
@@ -477,8 +478,12 @@ impl RpcWallet {
                 let transactions = Self::list_transactions(wallet, count, skip);
                 _ = resp.send(transactions);
             }
-            WalletCommand::ListSpaces { resp } => {
-                let result = Self::list_spaces(wallet, state);
+            WalletCommand::ListSpaces { v2, resp } => {
+                let result = if v2 {
+                    Self::list_spaces_v2(wallet, state)
+                } else {
+                    Self::list_spaces(wallet, state)
+                };
                 _ = resp.send(result);
             }
             WalletCommand::ListBidouts { resp } => {
@@ -808,6 +813,112 @@ impl RpcWallet {
 
         fetcher.stop();
         Ok(())
+    }
+
+    fn list_spaces_v2(
+        wallet: &mut SpacesWallet,
+        chain: &mut LiveSnapshot,
+    ) -> anyhow::Result<ListSpacesResponse> {
+        let fn_start = std::time::Instant::now();
+
+        let unspent = wallet.list_unspent_with_details(chain)?;
+        log::info!("list_spaces: list_unspent_with_details took {:?} ({} results)", fn_start.elapsed(), unspent.len());
+
+        let t = std::time::Instant::now();
+        let owned_spaces: HashSet<_> = unspent
+            .iter()
+            .filter_map(|out| out.space.as_ref().map(|s| s.name.to_string()))
+            .collect();
+        log::info!("list_spaces: owned_spaces collect took {:?} ({} spaces)", t.elapsed(), owned_spaces.len());
+
+        let t = std::time::Instant::now();
+        let mut recent_events: HashMap<Txid, Vec<TxEvent>> = HashMap::new();
+        for (txid, event) in wallet.list_recent_events()? {
+            if !event.space.as_ref().is_some_and(|s| owned_spaces.contains(s)) {
+                recent_events.entry(txid).or_default().push(event);
+            }
+        }
+        let event_count: usize = recent_events.values().map(|v| v.len()).sum();
+        log::info!("list_spaces: list_recent_events + filter took {:?} ({} txids, {} events)", t.elapsed(), recent_events.len(), event_count);
+
+        let t = std::time::Instant::now();
+        let mut recent_events_with_txs = Vec::new();
+        for tx in wallet.transactions() {
+            let Some(events) = recent_events.remove(&tx.tx_node.txid) else {
+                continue;
+            };
+            for event in events {
+                recent_events_with_txs.push((Some(tx.clone()), event));
+            }
+            if recent_events.is_empty() {
+                break;
+            }
+        }
+        recent_events_with_txs
+            .extend(recent_events.into_values().flatten().map(|e| (None, e)));
+        log::info!("list_spaces: transactions join took {:?} ({} matched events)", t.elapsed(), recent_events_with_txs.len());
+
+        let t = std::time::Instant::now();
+        let mut pending = vec![];
+        let mut outbid = vec![];
+        let mut chain_lookups = 0u32;
+        for (tx, event) in recent_events_with_txs {
+            let name = SLabel::from_str(event.space.as_ref().unwrap()).expect("valid space name");
+            if tx.as_ref()
+                .is_some_and(|tx| !tx.chain_position.is_confirmed()) {
+                pending.push(name);
+                continue;
+            }
+            let spacehash = SpaceKey::from(Sha256::hash(name.as_ref()));
+            chain_lookups += 1;
+            let space = chain.get_space_info(&spacehash)?;
+            if let Some(space) = space {
+                if space.spaceout.space.as_ref().unwrap().is_owned() {
+                    continue;
+                }
+                if tx.is_none() {
+                    outbid.push(space);
+                    continue;
+                }
+                if event.previous_spaceout
+                    .is_some_and(|input| input == space.outpoint()) {
+                    continue;
+                }
+                outbid.push(space);
+            }
+        }
+        log::info!("list_spaces: outbid/pending classification took {:?} ({} chain lookups, {} pending, {} outbid)", t.elapsed(), chain_lookups, pending.len(), outbid.len());
+
+        let t = std::time::Instant::now();
+        let mut owned = vec![];
+        let mut winning = vec![];
+        for wallet_output in unspent.into_iter().filter(|output| output.space.is_some()) {
+            let entry = FullSpaceOut {
+                txid: wallet_output.output.outpoint.txid,
+                spaceout: SpaceOut {
+                    n: wallet_output.output.outpoint.vout as _,
+                    space: wallet_output.space,
+                    script_pubkey: wallet_output.output.txout.script_pubkey,
+                    value: wallet_output.output.txout.value,
+                },
+            };
+
+            if entry.spaceout.space.as_ref().expect("space").is_owned() {
+                owned.push(entry);
+            } else {
+                winning.push(entry);
+            }
+        }
+        log::info!("list_spaces: owned/winning split took {:?} ({} owned, {} winning)", t.elapsed(), owned.len(), winning.len());
+
+        log::info!("list_spaces: total elapsed {:?}", fn_start.elapsed());
+
+        Ok(ListSpacesResponse {
+            pending,
+            winning,
+            outbid,
+            owned,
+        })
     }
 
     fn list_spaces(
@@ -1503,9 +1614,9 @@ impl RpcWallet {
         resp_rx.await?
     }
 
-    pub async fn send_list_spaces(&self) -> anyhow::Result<ListSpacesResponse> {
+    pub async fn send_list_spaces(&self, v2: bool) -> anyhow::Result<ListSpacesResponse> {
         let (resp, resp_rx) = oneshot::channel();
-        self.sender.send(WalletCommand::ListSpaces { resp }).await?;
+        self.sender.send(WalletCommand::ListSpaces { v2, resp }).await?;
         resp_rx.await?
     }
 
