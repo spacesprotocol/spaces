@@ -44,12 +44,12 @@ async fn it_should_open_a_space_for_auction(rig: &TestRig) -> anyhow::Result<()>
         assert!(tx_res.error.is_none(), "expect no errors for simple open");
     }
     assert_eq!(response.result.len(), 2, "must be 2 transactions");
-    let alices_spaces = rig.spaced.client.wallet_list_spaces(ALICE).await?;
+    let alices_spaces = rig.spaced.client.wallet_list_spaces(ALICE, None).await?;
     assert!(alices_spaces.pending.first().is_some_and(|s| s.to_string() == TEST_SPACE), "must be a pending space");
 
     rig.mine_blocks(1, None).await?;
     rig.wait_until_synced().await?;
-    let alices_spaces = rig.spaced.client.wallet_list_spaces(ALICE).await?;
+    let alices_spaces = rig.spaced.client.wallet_list_spaces(ALICE, None).await?;
     assert!(alices_spaces.pending.is_empty(), "must have no pending spaces");
 
     let fullspaceout = rig.spaced.client.get_space(TEST_SPACE).await?;
@@ -83,8 +83,8 @@ async fn it_should_allow_outbidding(rig: &TestRig) -> anyhow::Result<()> {
     rig.wait_until_synced().await?;
     rig.wait_until_wallet_synced(BOB).await?;
     rig.wait_until_wallet_synced(ALICE).await?;
-    let bobs_spaces = rig.spaced.client.wallet_list_spaces(BOB).await?;
-    let alices_spaces = rig.spaced.client.wallet_list_spaces(ALICE).await?;
+    let bobs_spaces = rig.spaced.client.wallet_list_spaces(BOB, None).await?;
+    let alices_spaces = rig.spaced.client.wallet_list_spaces(ALICE, None).await?;
     let alices_balance = rig.spaced.client.wallet_get_balance(ALICE).await?;
 
     let result = wallet_do(
@@ -101,15 +101,15 @@ async fn it_should_allow_outbidding(rig: &TestRig) -> anyhow::Result<()> {
 
     println!("{}", serde_json::to_string_pretty(&result).unwrap());
 
-    let bob_spaces_updated = rig.spaced.client.wallet_list_spaces(BOB).await?;
+    let bob_spaces_updated = rig.spaced.client.wallet_list_spaces(BOB, None).await?;
     assert!(bob_spaces_updated.pending.first().is_some_and(|s| s.to_string() == TEST_SPACE), "must be a pending space");
 
     rig.mine_blocks(1, None).await?;
     rig.wait_until_synced().await?;
     rig.wait_until_wallet_synced(BOB).await?;
     rig.wait_until_wallet_synced(ALICE).await?;
-    let bob_spaces_updated = rig.spaced.client.wallet_list_spaces(BOB).await?;
-    let alice_spaces_updated = rig.spaced.client.wallet_list_spaces(ALICE).await?;
+    let bob_spaces_updated = rig.spaced.client.wallet_list_spaces(BOB, None).await?;
+    let alice_spaces_updated = rig.spaced.client.wallet_list_spaces(ALICE, None).await?;
     let alices_balance_updated = rig.spaced.client.wallet_get_balance(ALICE).await?;
 
     assert_eq!(
@@ -189,8 +189,8 @@ async fn it_should_only_accept_forced_zero_value_bid_increments_and_revoke(
     // Bob outbids alice
     rig.wait_until_wallet_synced(BOB).await?;
     rig.wait_until_wallet_synced(EVE).await?;
-    let eve_spaces = rig.spaced.client.wallet_list_spaces(EVE).await?;
-    let bob_spaces = rig.spaced.client.wallet_list_spaces(BOB).await?;
+    let eve_spaces = rig.spaced.client.wallet_list_spaces(EVE, None).await?;
+    let bob_spaces = rig.spaced.client.wallet_list_spaces(BOB, None).await?;
     let bob_balance = rig.spaced.client.wallet_get_balance(BOB).await?;
 
     let fullspaceout = rig
@@ -271,9 +271,9 @@ async fn it_should_only_accept_forced_zero_value_bid_increments_and_revoke(
     rig.wait_until_synced().await?;
     rig.wait_until_wallet_synced(BOB).await?;
     rig.wait_until_wallet_synced(ALICE).await?;
-    let bob_spaces_updated = rig.spaced.client.wallet_list_spaces(BOB).await?;
+    let bob_spaces_updated = rig.spaced.client.wallet_list_spaces(BOB, None).await?;
     let bob_balance_updated = rig.spaced.client.wallet_get_balance(BOB).await?;
-    let eve_spaces_updated = rig.spaced.client.wallet_list_spaces(EVE).await?;
+    let eve_spaces_updated = rig.spaced.client.wallet_list_spaces(EVE, None).await?;
 
     assert_eq!(
         bob_spaces.winning.len() - 1,
@@ -320,7 +320,7 @@ async fn it_should_allow_claim_on_or_after_claim_height(rig: &TestRig) -> anyhow
 
     rig.wait_until_synced().await?;
     rig.wait_until_wallet_synced(wallet).await?;
-    let all_spaces = rig.spaced.client.wallet_list_spaces(wallet).await?;
+    let all_spaces = rig.spaced.client.wallet_list_spaces(wallet, None).await?;
 
     let result = wallet_do(
         rig,
@@ -339,7 +339,7 @@ async fn it_should_allow_claim_on_or_after_claim_height(rig: &TestRig) -> anyhow
 
     rig.wait_until_synced().await?;
     rig.wait_until_wallet_synced(wallet).await?;
-    let all_spaces_2 = rig.spaced.client.wallet_list_spaces(wallet).await?;
+    let all_spaces_2 = rig.spaced.client.wallet_list_spaces(wallet, None).await?;
 
     assert_eq!(
         all_spaces.owned.len() + 1,
@@ -367,7 +367,7 @@ async fn it_should_allow_batch_transfers_refreshing_expire_height(
 ) -> anyhow::Result<()> {
     rig.wait_until_wallet_synced(ALICE).await?;
     rig.wait_until_synced().await?;
-    let all_spaces = rig.spaced.client.wallet_list_spaces(ALICE).await?;
+    let all_spaces = rig.spaced.client.wallet_list_spaces(ALICE, None).await?;
     let registered_spaces: Vec<_> = all_spaces
         .owned
         .iter()
@@ -399,7 +399,7 @@ async fn it_should_allow_batch_transfers_refreshing_expire_height(
 
     rig.wait_until_synced().await?;
     rig.wait_until_wallet_synced(ALICE).await?;
-    let all_spaces_2 = rig.spaced.client.wallet_list_spaces(ALICE).await?;
+    let all_spaces_2 = rig.spaced.client.wallet_list_spaces(ALICE, None).await?;
 
     assert_eq!(
         all_spaces.owned.len(),
@@ -432,7 +432,7 @@ async fn it_should_allow_batch_transfers_refreshing_expire_height(
 async fn it_should_allow_applying_script_in_batch(rig: &TestRig) -> anyhow::Result<()> {
     rig.wait_until_wallet_synced(ALICE).await?;
     rig.wait_until_synced().await?;
-    let all_spaces = rig.spaced.client.wallet_list_spaces(ALICE).await?;
+    let all_spaces = rig.spaced.client.wallet_list_spaces(ALICE, None).await?;
     let registered_spaces: Vec<_> = all_spaces
         .owned
         .iter()
@@ -465,7 +465,7 @@ async fn it_should_allow_applying_script_in_batch(rig: &TestRig) -> anyhow::Resu
 
     rig.wait_until_synced().await?;
     rig.wait_until_wallet_synced(ALICE).await?;
-    let all_spaces_2 = rig.spaced.client.wallet_list_spaces(ALICE).await?;
+    let all_spaces_2 = rig.spaced.client.wallet_list_spaces(ALICE, None).await?;
 
     assert_eq!(
         all_spaces.owned.len(),
@@ -998,7 +998,7 @@ async fn it_can_batch_txs(rig: &TestRig) -> anyhow::Result<()> {
     let bob_spaces = rig
         .spaced
         .client
-        .wallet_list_spaces(BOB)
+        .wallet_list_spaces(BOB, None)
         .await
         .expect("bob spaces");
     assert!(
@@ -1017,7 +1017,7 @@ async fn it_can_batch_txs(rig: &TestRig) -> anyhow::Result<()> {
     let alice_spaces = rig
         .spaced
         .client
-        .wallet_list_spaces(ALICE)
+        .wallet_list_spaces(ALICE, None)
         .await
         .expect("alice spaces");
     let batch1 = alice_spaces
@@ -1166,7 +1166,7 @@ async fn it_should_allow_buy_sell(rig: &TestRig) -> anyhow::Result<()> {
     let alice_spaces = rig
         .spaced
         .client
-        .wallet_list_spaces(ALICE)
+        .wallet_list_spaces(ALICE, None)
         .await
         .expect("alice spaces");
     let space = alice_spaces
@@ -1227,7 +1227,7 @@ async fn it_should_allow_buy_sell(rig: &TestRig) -> anyhow::Result<()> {
     let bob_spaces = rig
         .spaced
         .client
-        .wallet_list_spaces(BOB)
+        .wallet_list_spaces(BOB, None)
         .await
         .expect("bob spaces");
 
@@ -1260,7 +1260,7 @@ async fn it_should_allow_sign_verify_messages(rig: &TestRig) -> anyhow::Result<(
     let alice_spaces = rig
         .spaced
         .client
-        .wallet_list_spaces(BOB)
+        .wallet_list_spaces(BOB, None)
         .await
         .expect("bob spaces");
     let space = alice_spaces

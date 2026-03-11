@@ -337,7 +337,11 @@ enum Commands {
     /// List won spaces including ones
     /// still in auction with a winning bid
     #[command(name = "listspaces")]
-    ListSpaces,
+    ListSpaces {
+        /// Use v2 implementation
+        #[arg(long)]
+        v2: bool,
+    },
     /// List unspent auction outputs i.e. outputs that can be
     /// auctioned off in the bidding process
     #[command(name = "listbidouts")]
@@ -768,9 +772,9 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
                 .await?;
             print_list_transactions(txs, cli.format);
         }
-        Commands::ListSpaces => {
+        Commands::ListSpaces { v2 } => {
             let tip = cli.client.get_server_info().await?;
-            let spaces = cli.client.wallet_list_spaces(&cli.wallet).await?;
+            let spaces = cli.client.wallet_list_spaces(&cli.wallet, Some(v2)).await?;
             print_list_spaces_response(tip.tip.height, spaces, cli.format);
         }
         Commands::Balance => {

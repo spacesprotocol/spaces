@@ -327,6 +327,7 @@ pub trait Rpc {
     async fn wallet_list_spaces(
         &self,
         wallet: &str,
+        v2: Option<bool>,
     ) -> Result<ListSpacesResponse, ErrorObjectOwned>;
 
     #[method(name = "walletlistunspent")]
@@ -1089,10 +1090,11 @@ impl RpcServer for RpcServerImpl {
     async fn wallet_list_spaces(
         &self,
         wallet: &str,
+        v2: Option<bool>,
     ) -> Result<ListSpacesResponse, ErrorObjectOwned> {
         self.wallet(&wallet)
             .await?
-            .send_list_spaces()
+            .send_list_spaces(v2.unwrap_or(false))
             .await
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
     }
