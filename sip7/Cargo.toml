@@ -1,0 +1,16 @@
+[package]
+name = "sip7"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive", "alloc"], default-features = false, optional = true }
+base64 = { workspace = true, optional = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
+[features]
+default = []
+serde = ["dep:serde", "dep:base64"]
+std = ["serde"]

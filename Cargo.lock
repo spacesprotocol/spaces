@@ -2514,6 +2514,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e320a6c5ad31d271ad523dcf3ad13e2767ad8b1cb8f047f75a8aeaf8da139da2"
 
 [[package]]
+name = "sip7"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2596,6 +2605,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sip7",
  "spacedb",
  "spaces_protocol",
  "spaces_ptr",
