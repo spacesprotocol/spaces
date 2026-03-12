@@ -7,7 +7,7 @@ use spaces_client::{
     },
     wallets::{AddressKind, WalletResponse},
 };
-use spaces_client::rpc::{CommitParams, CreatePtrParams, DelegateParams, SetPtrDataParams, Subject, TransferSpacesParams};
+use spaces_client::rpc::{CommitParams, CreatePtrParams, DelegateParams, SetFallbackParams, Subject, TransferSpacesParams};
 use spaces_client::store::Sha256;
 use spaces_protocol::{bitcoin, bitcoin::{FeeRate}};
 use spaces_protocol::bitcoin::hashes::{sha256, Hash};
@@ -814,13 +814,13 @@ async fn it_should_set_and_persist_ptr_data(rig: &TestRig) -> anyhow::Result<()>
     let set_data = wallet_do(
         rig,
         ALICE,
-        vec![RpcWalletRequest::SetPtrData(SetPtrDataParams {
+        vec![RpcWalletRequest::SetFallback(SetFallbackParams {
             subject: Subject::Ptr(sptr),
             data: test_data.clone(),
         })],
         false,
     ).await?;
-    assert!(wallet_res_err(&set_data).is_ok(), "SetPtrData should succeed");
+    assert!(wallet_res_err(&set_data).is_ok(), "SetFallback should succeed");
     mine_and_sync(rig, 1).await?;
 
     use spaces_protocol::Bytes;
@@ -858,13 +858,13 @@ async fn it_should_set_and_persist_ptr_data(rig: &TestRig) -> anyhow::Result<()>
     let update_data = wallet_do(
         rig,
         BOB,
-        vec![RpcWalletRequest::SetPtrData(SetPtrDataParams {
+        vec![RpcWalletRequest::SetFallback(SetFallbackParams {
             subject: Subject::Ptr(sptr),
             data: new_data.clone(),
         })],
         false,
     ).await?;
-    assert!(wallet_res_err(&update_data).is_ok(), "SetPtrData should succeed");
+    assert!(wallet_res_err(&update_data).is_ok(), "SetFallback should succeed");
     mine_and_sync(rig, 1).await?;
 
     let ptr_updated = rig.spaced.client.get_ptr(Subject::Ptr(sptr)).await?
@@ -878,19 +878,137 @@ async fn it_should_set_and_persist_ptr_data(rig: &TestRig) -> anyhow::Result<()>
     let set_empty = wallet_do(
         rig,
         BOB,
-        vec![RpcWalletRequest::SetPtrData(SetPtrDataParams {
+        vec![RpcWalletRequest::SetFallback(SetFallbackParams {
             subject: Subject::Ptr(sptr),
             data: empty_data.clone(),
         })],
         false,
     ).await?;
-    assert!(wallet_res_err(&set_empty).is_ok(), "SetPtrData with empty data should succeed");
+    assert!(wallet_res_err(&set_empty).is_ok(), "SetFallback with empty data should succeed");
     mine_and_sync(rig, 1).await?;
 
     let ptr_empty = rig.spaced.client.get_ptr(Subject::Ptr(sptr)).await?
         .expect("ptr should exist");
     assert_eq!(ptr_empty.ptrout.sptr.data, Some(Bytes::new(empty_data)), "PTR data should be set to empty");
     println!("✓ PTR data set to empty successfully");
+
+    Ok(())
+}
+
+// ============== Test: Space Fallback Data ==============
+
+async fn it_should_set_and_get_space_fallback(rig: &TestRig) -> anyhow::Result<()> {
+    sync_all(rig).await?;
+
+    let alice_spaces = rig.spaced.client.wallet_list_spaces(ALICE).await?;
+    let owned = alice_spaces.owned.first().cloned()
+        .expect("Alice should own at least one space");
+    let space_name = owned.spaceout.space.as_ref()
+        .expect("space must exist").name.clone();
+    let space_str = space_name.to_string();
+
+    // Record the outpoint and script_pubkey before setfallback
+    let space_before = rig.spaced.client.get_space(&space_str).await?
+        .expect("space should exist");
+    let spk_before = space_before.spaceout.script_pubkey.clone();
+
+    // Verify no fallback data initially via getfallback
+    let subject = Subject::Space(space_name.clone());
+    let fallback_before = rig.spaced.client.get_fallback(subject.clone()).await?;
+    assert!(fallback_before.is_none(), "space should have no fallback data initially");
+    println!("✓ No fallback data initially");
+
+    // Test 1: Set SIP-7 fallback data on the space
+    println!("\nTest 1: Set SIP-7 fallback data on space");
+    let mut records = sip7::RecordSet::new();
+    records.push_txt("btc", "bc1qtest").unwrap();
+    records.push_txt("nostr", "npub1abc").unwrap();
+    let wire_data = records.encode();
+
+    let set_result = wallet_do(
+        rig,
+        ALICE,
+        vec![RpcWalletRequest::SetFallback(SetFallbackParams {
+            subject: subject.clone(),
+            data: wire_data.clone(),
+        })],
+        false,
+    ).await?;
+    assert!(wallet_res_err(&set_result).is_ok(), "SetFallback on space should succeed");
+    mine_and_sync(rig, 1).await?;
+
+    // Verify space still exists and is still owned by Alice
+    let space_after = rig.spaced.client.get_space(&space_str).await?
+        .expect("space should still exist after setfallback");
+    assert!(space_after.spaceout.space.as_ref().unwrap().is_owned(),
+        "space should still be owned after setfallback");
+    assert_eq!(space_after.spaceout.script_pubkey, spk_before,
+        "space script_pubkey should not change after setfallback");
+    println!("✓ Space still owned by Alice at same address");
+
+    // Verify data was set on the covenant
+    use spaces_protocol::Covenant;
+    match &space_after.spaceout.space.as_ref().unwrap().covenant {
+        Covenant::Transfer { data, .. } => {
+            assert_eq!(data.as_ref().map(|b| b.clone().to_vec()), Some(wire_data.clone()),
+                "covenant data should match");
+        }
+        _ => panic!("space should be in Transfer covenant"),
+    }
+    println!("✓ Covenant data matches wire-encoded SIP-7 records");
+
+    // Verify via getfallback RPC
+    let fallback = rig.spaced.client.get_fallback(subject.clone()).await?
+        .expect("getfallback should return data");
+    let parsed = fallback.records.expect("should parse as SIP-7 records");
+    assert_eq!(parsed.records().len(), 2, "should have 2 records");
+    println!("✓ getfallback returns parsed SIP-7 records");
+
+    // Test 2: Alice can still transfer the space after setfallback
+    println!("\nTest 2: Transfer space after setfallback");
+    let bob_addr = rig.spaced.client.wallet_get_new_address(BOB, AddressKind::Space).await?;
+    let transfer = wallet_do(
+        rig,
+        ALICE,
+        vec![RpcWalletRequest::Transfer(TransferSpacesParams {
+            spaces: vec![Subject::Space(space_name.clone())],
+            to: Some(bob_addr),
+            data: None,
+        })],
+        false,
+    ).await?;
+    assert!(wallet_res_err(&transfer).is_ok(), "should be able to transfer space after setfallback");
+    mine_and_sync(rig, 1).await?;
+
+    // Data should persist after transfer
+    let fallback_after_transfer = rig.spaced.client.get_fallback(subject.clone()).await?
+        .expect("fallback data should persist after transfer");
+    assert!(fallback_after_transfer.records.is_some(), "SIP-7 records should still parse");
+    println!("✓ Fallback data persists after transfer");
+
+    // Test 3: Bob can overwrite the fallback data
+    println!("\nTest 3: Bob overwrites fallback data");
+    let mut new_records = sip7::RecordSet::new();
+    new_records.push_txt("eth", "0xdeadbeef").unwrap();
+    let new_wire = new_records.encode();
+
+    let bob_set = wallet_do(
+        rig,
+        BOB,
+        vec![RpcWalletRequest::SetFallback(SetFallbackParams {
+            subject: subject.clone(),
+            data: new_wire.clone(),
+        })],
+        false,
+    ).await?;
+    assert!(wallet_res_err(&bob_set).is_ok(), "Bob should be able to setfallback on his space");
+    mine_and_sync(rig, 1).await?;
+
+    let fallback_bob = rig.spaced.client.get_fallback(subject).await?
+        .expect("should have fallback data");
+    let bob_parsed = fallback_bob.records.expect("should parse as SIP-7");
+    assert_eq!(bob_parsed.records().len(), 1, "should have 1 record now");
+    println!("✓ Bob successfully overwrote fallback data");
 
     Ok(())
 }
@@ -933,6 +1051,9 @@ async fn run_ptr_tests() -> anyhow::Result<()> {
 
     println!("\n=== Running PTR Data Tests ===");
     it_should_set_and_persist_ptr_data(&rig).await?;
+
+    println!("\n=== Running Space Fallback Data Tests ===");
+    it_should_set_and_get_space_fallback(&rig).await?;
 
     println!("\n=== All tests passed! ===");
     Ok(())

@@ -1517,48 +1517,71 @@ impl RpcWallet {
                         create_ptr: true,
                     });
                 }
-                RpcWalletRequest::SetPtrData(params) => {
-                    let sptr = match &params.subject {
-                        Subject::Ptr(s) => *s,
-                        Subject::Numeric(numeric) => {
-                            let key = NumericKey::from_numeric::<Sha256>(numeric);
-                            chain.get_numeric(&key)?.ok_or_else(|| {
-                                anyhow!("setptrdata: numeric '{}' not found", numeric)
-                            })?
+                RpcWalletRequest::SetFallback(params) => {
+                    match params.subject {
+                        Subject::Space(ref space) => {
+                            let spacehash = SpaceKey::from(Sha256::hash(space.as_ref()));
+                            let full = chain.get_space_info(&spacehash)?
+                                .ok_or_else(|| anyhow!("setfallback: space '{}' not found", space))?;
+                            if !wallet.is_mine(full.spaceout.script_pubkey.clone()) {
+                                return Err(anyhow!("setfallback: you don't own '{}'", space));
+                            }
+                            let recipient = SpaceAddress(
+                                Address::from_script(
+                                    full.spaceout.script_pubkey.as_script(),
+                                    wallet.config.network,
+                                ).expect("valid script"),
+                            );
+                            builder = builder
+                                .add_transfer(SpaceTransfer {
+                                    space: full,
+                                    recipient,
+                                    create_ptr: false,
+                                })
+                                .add_data(params.data);
                         }
-                        Subject::Space(_) => {
-                            return Err(anyhow!(
-                                "setptrdata: expected a ptr or numeric, not a space"
-                            ))
+                        Subject::Ptr(_) | Subject::Numeric(_) => {
+                            let sptr = match &params.subject {
+                                Subject::Ptr(s) => *s,
+                                Subject::Numeric(numeric) => {
+                                    let key = NumericKey::from_numeric::<Sha256>(numeric);
+                                    chain.get_numeric(&key)?.ok_or_else(|| {
+                                        anyhow!("setfallback: numeric '{}' not found", numeric)
+                                    })?
+                                }
+                                _ => unreachable!(),
+                            };
+                            let ptr_info = match chain.get_ptr_info(&sptr)? {
+                                None => return Err(anyhow!("setfallback: PTR '{}' not found", sptr)),
+                                Some(ptr) if !wallet.is_mine(ptr.ptrout.script_pubkey.clone()) => {
+                                    return Err(anyhow!("setfallback: you don't own '{}'", sptr))
+                                }
+                                Some(ptr)
+                                    if wallet
+                                        .get_utxo(OutPoint::new(ptr.txid, ptr.ptrout.n as u32))
+                                        .is_none() =>
+                                {
+                                    return Err(anyhow!(
+                                        "setfallback '{}': wallet already has a pending tx for this PTR",
+                                        sptr
+                                    ))
+                                }
+                                Some(ptr) => ptr,
+                            };
+                            let recipient = SpaceAddress(
+                                Address::from_script(
+                                    ptr_info.ptrout.script_pubkey.as_script(),
+                                    wallet.config.network,
+                                ).expect("valid script"),
+                            );
+                            builder = builder
+                                .add_ptr_transfer(PtrTransfer {
+                                    ptr: ptr_info,
+                                    recipient,
+                                })
+                                .add_data(params.data);
                         }
-                    };
-                    // Find the PTR UTXO
-                    let ptr_info = match chain.get_ptr_info(&sptr)? {
-                        None => return Err(anyhow!("setptrdata: PTR '{}' not found", sptr)),
-                        Some(ptr) if !wallet.is_mine(ptr.ptrout.script_pubkey.clone()) => {
-                            return Err(anyhow!("setptrdata: you don't own '{}'", sptr))
-                        }
-                        Some(ptr)
-                            if wallet
-                                .get_utxo(OutPoint::new(ptr.txid, ptr.ptrout.n as u32))
-                                .is_none() =>
-                        {
-                            return Err(anyhow!(
-                                "setptrdata '{}': wallet already has a pending tx for this PTR",
-                                sptr
-                            ))
-                        }
-                        Some(ptr) => ptr,
-                    };
-
-                    // Transfer PTR to self with data
-                    let recipient = wallet.reveal_next_space_address();
-                    builder = builder
-                        .add_ptr_transfer(PtrTransfer {
-                            ptr: ptr_info,
-                            recipient,
-                        })
-                        .add_data(params.data);
+                    }
                 }
             }
         }

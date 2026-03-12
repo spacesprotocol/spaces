@@ -28,7 +28,7 @@ use spaces_client::{
     },
     wallets::{AddressKind, WalletResponse},
 };
-use spaces_client::rpc::{CommitParams, CreatePtrParams, DelegateParams, SetPtrDataParams};
+use spaces_client::rpc::{CommitParams, CreatePtrParams, DelegateParams, SetFallbackParams};
 use spaces_client::store::Sha256;
 use spaces_protocol::bitcoin::{Amount, FeeRate, OutPoint, Txid};
 use spaces_protocol::slabel::SLabel;
@@ -163,7 +163,7 @@ enum Commands {
     /// Transfer ownership of spaces and/or PTRs to the given name or address
     #[command(
         name = "transfer",
-        override_usage = "space-cli transfer [SPACES-OR-PTRS]... --to <SPACE-OR-ADDRESS> [--data <DATA>]"
+        override_usage = "space-cli transfer [SPACES-OR-PTRS]... --to <SPACE-OR-ADDRESS>"
     )]
     Transfer {
         /// Spaces (e.g., @bitcoin) and/or PTRs (e.g., sptr1...) to send
@@ -172,9 +172,6 @@ enum Commands {
         /// Recipient space name or address
         #[arg(long, display_order = 1)]
         to: String,
-        /// Optional data to set on all transferred spaces/PTRs (hex-encoded)
-        #[arg(long, display_order = 2)]
-        data: Option<String>,
         /// Fee rate to use in sat/vB
         #[arg(long, short)]
         fee_rate: Option<u64>,
@@ -353,16 +350,39 @@ enum Commands {
         #[arg(default_value = "0")]
         target_interval: usize,
     },
-    /// Associate on-chain record data with a space/sptr as a fallback to P2P options like Fabric.
-    #[command(name = "setrawfallback")]
-    SetRawFallback {
+    /// Set on-chain fallback record data for a space/sptr/numeric.
+    ///
+    /// Records can be specified as key=value flags, raw base64, or JSON from stdin.
+    ///
+    /// Examples:
+    ///   space-cli setfallback @alice --txt btc=bc1q... --txt nostr=npub1...
+    ///   space-cli setfallback @alice --raw SGVsbG8=
+    ///   echo '[{"type":"txt","key":"btc","value":"bc1q..."}]' | space-cli setfallback @alice --stdin
+    #[command(name = "setfallback")]
+    SetFallback {
         /// Space name, SPTR, or numeric identifier
         subject: String,
-        /// Hex encoded data
-        data: String,
+        /// Add a TXT record (key=value, can be repeated)
+        #[arg(long = "txt", value_name = "KEY=VALUE")]
+        txt_records: Vec<String>,
+        /// Add a BLOB record (key=base64, can be repeated)
+        #[arg(long = "blob", value_name = "KEY=BASE64")]
+        blob_records: Vec<String>,
+        /// Set raw wire-format data as base64
+        #[arg(long, conflicts_with_all = ["txt_records", "blob_records", "stdin"])]
+        raw: Option<String>,
+        /// Read JSON records from stdin
+        #[arg(long, conflicts_with_all = ["txt_records", "blob_records", "raw"])]
+        stdin: bool,
         /// Fee rate to use in sat/vB
         #[arg(long, short)]
         fee_rate: Option<u64>,
+    },
+    /// Get on-chain fallback record data for a space/sptr/numeric.
+    #[command(name = "getfallback")]
+    GetFallback {
+        /// Space name, SPTR, or numeric identifier
+        subject: String,
     },
     /// List last transactions
     #[command(name = "listtransactions")]
@@ -694,7 +714,6 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
         Commands::Transfer {
             spaces,
             to,
-            data,
             fee_rate,
         } => {
             // Parse spaces, PTRs, and numerics into Subject
@@ -713,22 +732,11 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
             }).collect();
             let spaces = spaces?;
 
-            // Parse hex data if present
-            let data = match data {
-                Some(hex_str) => {
-                    let data = hex::decode(hex_str).map_err(|e| {
-                        ClientError::Custom(format!("Invalid hex data: {}", e))
-                    })?;
-                    Some(data)
-                }
-                None => None,
-            };
-
             cli.send_request(
                 Some(RpcWalletRequest::Transfer(TransferSpacesParams {
                     spaces,
                     to: Some(to),
-                    data,
+                    data: None,
                 })),
                 None,
                 fee_rate,
@@ -752,37 +760,68 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
             )
             .await?
         }
-        Commands::SetRawFallback {
+        Commands::SetFallback {
             subject: subject_str,
-            data,
+            txt_records,
+            blob_records,
+            raw,
+            stdin,
             fee_rate,
         } => {
-            let data = match hex::decode(data) {
-                Ok(data) => data,
-                Err(e) => {
-                    return Err(ClientError::Custom(format!(
-                        "Could not hex decode data: {}",
-                        e
-                    )))
+            use base64::Engine;
+            let data = if let Some(raw_b64) = raw {
+                // Raw base64-encoded wire-format bytes
+                base64::engine::general_purpose::STANDARD.decode(&raw_b64)
+                    .map_err(|e| ClientError::Custom(format!("Could not base64 decode data: {}", e)))?
+            } else if stdin {
+                // Read JSON records from stdin
+                let mut input = String::new();
+                io::stdin().read_line(&mut input).map_err(|e|
+                    ClientError::Custom(format!("Failed to read stdin: {}", e)))?;
+                let record_set: sip7::RecordSet = serde_json::from_str(input.trim())
+                    .map_err(|e| ClientError::Custom(format!("Invalid SIP-7 JSON: {}", e)))?;
+                record_set.encode()
+            } else if !txt_records.is_empty() || !blob_records.is_empty() {
+                // Build from --txt and --blob flags
+                let mut record_set = sip7::RecordSet::new();
+                for txt in &txt_records {
+                    let (key, value) = txt.split_once('=').ok_or_else(||
+                        ClientError::Custom(format!("Invalid --txt format '{}': expected key=value", txt)))?;
+                    record_set.push_txt(key, value).map_err(|e|
+                        ClientError::Custom(format!("Invalid TXT record: {}", e)))?;
                 }
+                for blob in &blob_records {
+                    let (key, b64_value) = blob.split_once('=').ok_or_else(||
+                        ClientError::Custom(format!("Invalid --blob format '{}': expected key=base64", blob)))?;
+                    let value = base64::engine::general_purpose::STANDARD.decode(b64_value)
+                        .map_err(|e| ClientError::Custom(format!("Invalid base64 in --blob '{}': {}", key, e)))?;
+                    record_set.push_blob(key, value).map_err(|e|
+                        ClientError::Custom(format!("Invalid BLOB record: {}", e)))?;
+                }
+                record_set.encode()
+            } else {
+                return Err(ClientError::Custom(
+                    "No data specified. Use --txt, --blob, --raw, or --stdin".to_string()
+                ));
             };
 
             let subject = parse_subject(&subject_str)
                 .map_err(|e| ClientError::Custom(format!("Invalid subject: {}", e)))?;
-            match &subject {
-                Subject::Ptr(_) | Subject::Numeric(_) => {
-                    cli.send_request(
-                        Some(RpcWalletRequest::SetPtrData(SetPtrDataParams { subject, data })),
-                        None,
-                        fee_rate,
-                        false,
-                    )
-                    .await?;
-                }
-                Subject::Space(_) => {
-                    // TODO: support set data for spaces
-                }
-            }
+            cli.send_request(
+                Some(RpcWalletRequest::SetFallback(SetFallbackParams { subject, data })),
+                None,
+                fee_rate,
+                false,
+            )
+            .await?;
+        }
+        Commands::GetFallback {
+            subject: subject_str,
+        } => {
+            let subject = parse_subject(&subject_str)
+                .map_err(|e| ClientError::Custom(format!("Invalid subject: {}", e)))?;
+            let response = cli.client.get_fallback(subject).await?;
+            println!("{}", serde_json::to_string_pretty(&response)?);
         }
         Commands::ListUnspent => {
             let utxos = cli.client.wallet_list_unspent(&cli.wallet).await?;

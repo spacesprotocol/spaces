@@ -416,9 +416,24 @@ pub trait Rpc {
     #[method(name = "walletgetbalance")]
     async fn wallet_get_balance(&self, wallet: &str) -> Result<Balance, ErrorObjectOwned>;
 
+    #[method(name = "getfallback")]
+    async fn get_fallback(
+        &self,
+        subject: Subject,
+    ) -> Result<Option<FallbackResponse>, ErrorObjectOwned>;
+
     /// Debug method to set a space's expire height (regtest only)
     #[method(name = "debugsetexpireheight")]
     async fn debug_set_expire_height(&self, space: &str, expire_height: u32) -> Result<(), ErrorObjectOwned>;
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FallbackResponse {
+    /// Raw data encoded as base64
+    pub data: String,
+    /// Parsed SIP-7 records, if data is valid
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub records: Option<sip7::RecordSet>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -450,8 +465,8 @@ pub enum RpcWalletRequest {
     Delegate(DelegateParams),
     #[serde(rename = "commit")]
     Commit(CommitParams),
-    #[serde(rename = "setptrdata")]
-    SetPtrData(SetPtrDataParams),
+    #[serde(rename = "setfallback")]
+    SetFallback(SetFallbackParams),
     #[serde(rename = "send")]
     SendCoins(SendCoinsParams),
 }
@@ -485,7 +500,7 @@ pub struct CommitParams {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-pub struct SetPtrDataParams {
+pub struct SetFallbackParams {
     pub subject: Subject,
     pub data: Vec<u8>,
 }
@@ -1295,6 +1310,42 @@ impl RpcServer for RpcServerImpl {
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
     }
 
+    async fn get_fallback(&self, subject: Subject) -> Result<Option<FallbackResponse>, ErrorObjectOwned> {
+        let data = match &subject {
+            Subject::Space(label) => {
+                let space_hash = SpaceKey::from(Sha256::hash(label.as_ref()));
+                let fso = self.store.get_space(space_hash).await
+                    .map_err(|e| ErrorObjectOwned::owned(-1, e.to_string(), None::<String>))?;
+                fso.and_then(|fso| {
+                    if let Some(space) = &fso.spaceout.space {
+                        if let Covenant::Transfer { data, .. } = &space.covenant {
+                            return data.as_ref().map(|b| b.clone().to_vec());
+                        }
+                    }
+                    None
+                })
+            }
+            Subject::Ptr(_) | Subject::Numeric(_) => {
+                let fpt = self.store.get_ptr(subject).await
+                    .map_err(|e| ErrorObjectOwned::owned(-1, e.to_string(), None::<String>))?;
+                fpt.and_then(|fpt| fpt.ptrout.sptr.data.map(|b| b.to_vec()))
+            }
+        };
+
+        match data {
+            None => Ok(None),
+            Some(raw) => {
+                use base64::Engine;
+                let encoded = base64::engine::general_purpose::STANDARD.encode(&raw);
+                let records = sip7::RecordSet::decode(&raw).ok();
+                Ok(Some(FallbackResponse {
+                    data: encoded,
+                    records,
+                }))
+            }
+        }
+    }
+
     async fn debug_set_expire_height(&self, space: &str, expire_height: u32) -> Result<(), ErrorObjectOwned> {
         // Only allow on regtest
         let info = self.store.get_server_info().await
@@ -1668,8 +1719,11 @@ impl AsyncChainState {
             }
 
             let space_key = SpaceKey::from(Sha256::hash(space.as_ref()));
-            let fso = state.get_space_info(&space_key)?
-                .ok_or_else(|| anyhow!("Space not found: {}", space))?;
+            let Some(fso) = state.get_space_info(&space_key)? else {
+                // non-existence proof
+                space_tree_keys.insert(space_key.into());
+                continue;
+            };
 
             let outpoint_key = OutpointKey::from_outpoint::<Sha256>(fso.outpoint());
             space_tree_keys.insert(outpoint_key.into());

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["borsh_utils", "client", "protocol", "testutil", "wallet", "ptr"]
+members = ["borsh_utils", "client", "protocol", "testutil", "wallet", "ptr", "sip7"]
 
 [workspace.dependencies]
 anyhow = "1.0"
