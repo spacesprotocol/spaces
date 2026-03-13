@@ -920,10 +920,11 @@ async fn it_should_set_and_get_space_fallback(rig: &TestRig) -> anyhow::Result<(
 
     // Test 1: Set SIP-7 fallback data on the space
     println!("\nTest 1: Set SIP-7 fallback data on space");
-    let mut records = sip7::RecordSet::new();
-    records.push_txt("btc", "bc1qtest").unwrap();
-    records.push_txt("nostr", "npub1abc").unwrap();
-    let wire_data = records.encode();
+    let records = sip7::RecordSet::pack(vec![
+        sip7::Record::txt("btc", "bc1qtest"),
+        sip7::Record::txt("nostr", "npub1abc"),
+    ]).unwrap();
+    let wire_data = records.as_slice().to_vec();
 
     let set_result = wallet_do(
         rig,
@@ -961,7 +962,7 @@ async fn it_should_set_and_get_space_fallback(rig: &TestRig) -> anyhow::Result<(
     let fallback = rig.spaced.client.get_fallback(subject.clone()).await?
         .expect("getfallback should return data");
     let parsed = fallback.records.expect("should parse as SIP-7 records");
-    assert_eq!(parsed.records().len(), 2, "should have 2 records");
+    assert_eq!(parsed.unpack().unwrap().len(), 2, "should have 2 records");
     println!("✓ getfallback returns parsed SIP-7 records");
 
     // Test 2: Alice can still transfer the space after setfallback
@@ -988,9 +989,10 @@ async fn it_should_set_and_get_space_fallback(rig: &TestRig) -> anyhow::Result<(
 
     // Test 3: Bob can overwrite the fallback data
     println!("\nTest 3: Bob overwrites fallback data");
-    let mut new_records = sip7::RecordSet::new();
-    new_records.push_txt("eth", "0xdeadbeef").unwrap();
-    let new_wire = new_records.encode();
+    let new_records = sip7::RecordSet::pack(vec![
+        sip7::Record::txt("eth", "0xdeadbeef"),
+    ]).unwrap();
+    let new_wire = new_records.as_slice().to_vec();
 
     let bob_set = wallet_do(
         rig,
@@ -1007,7 +1009,7 @@ async fn it_should_set_and_get_space_fallback(rig: &TestRig) -> anyhow::Result<(
     let fallback_bob = rig.spaced.client.get_fallback(subject).await?
         .expect("should have fallback data");
     let bob_parsed = fallback_bob.records.expect("should parse as SIP-7");
-    assert_eq!(bob_parsed.records().len(), 1, "should have 1 record now");
+    assert_eq!(bob_parsed.unpack().unwrap().len(), 1, "should have 1 record now");
     println!("✓ Bob successfully overwrote fallback data");
 
     Ok(())

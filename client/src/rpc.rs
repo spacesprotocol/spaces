@@ -1337,7 +1337,8 @@ impl RpcServer for RpcServerImpl {
             Some(raw) => {
                 use base64::Engine;
                 let encoded = base64::engine::general_purpose::STANDARD.encode(&raw);
-                let records = sip7::RecordSet::decode(&raw).ok();
+                let rs = sip7::RecordSet::new(raw);
+                let records = if rs.unpack().is_ok() { Some(rs) } else { None };
                 Ok(Some(FallbackResponse {
                     data: encoded,
                     records,
