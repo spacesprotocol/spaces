@@ -780,25 +780,25 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
                     ClientError::Custom(format!("Failed to read stdin: {}", e)))?;
                 let record_set: sip7::RecordSet = serde_json::from_str(input.trim())
                     .map_err(|e| ClientError::Custom(format!("Invalid SIP-7 JSON: {}", e)))?;
-                record_set.encode()
+                record_set.to_bytes()
             } else if !txt_records.is_empty() || !blob_records.is_empty() {
                 // Build from --txt and --blob flags
-                let mut record_set = sip7::RecordSet::new();
+                let mut records = Vec::new();
                 for txt in &txt_records {
                     let (key, value) = txt.split_once('=').ok_or_else(||
                         ClientError::Custom(format!("Invalid --txt format '{}': expected key=value", txt)))?;
-                    record_set.push_txt(key, value).map_err(|e|
-                        ClientError::Custom(format!("Invalid TXT record: {}", e)))?;
+                    records.push(sip7::Record::txt(key, value));
                 }
                 for blob in &blob_records {
                     let (key, b64_value) = blob.split_once('=').ok_or_else(||
                         ClientError::Custom(format!("Invalid --blob format '{}': expected key=base64", blob)))?;
                     let value = base64::engine::general_purpose::STANDARD.decode(b64_value)
                         .map_err(|e| ClientError::Custom(format!("Invalid base64 in --blob '{}': {}", key, e)))?;
-                    record_set.push_blob(key, value).map_err(|e|
-                        ClientError::Custom(format!("Invalid BLOB record: {}", e)))?;
+                    records.push(sip7::Record::blob(key, value));
                 }
-                record_set.encode()
+                sip7::RecordSet::pack(records)
+                    .map_err(|e| ClientError::Custom(format!("Invalid record: {}", e)))?
+                    .to_bytes()
             } else {
                 return Err(ClientError::Custom(
                     "No data specified. Use --txt, --blob, --raw, or --stdin".to_string()
