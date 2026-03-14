@@ -521,8 +521,9 @@ impl Validator {
 
         let commitment_op = find_op_commit(&tx.output);
         let data_op = find_op_set_data(&tx.output);
+        let has_spaces = !spent_space_utxos.is_empty() || !new_space_utxos.is_empty();
 
-        // Remove sptr -> space mappings if a space is spent
+        // Revoke sptr -> space delegations for spent space UTXOs
         changeset.revoked_delegations = spent_space_utxos
             .into_iter()
             .filter_map(|spent| {
@@ -536,17 +537,34 @@ impl Validator {
             })
             .collect();
 
-        // Allow sptrs to be redelegated
+        // Revoke delegations for spent numeric PTRs that had an active
+        // numeric delegation. Named space delegations are handled above.
+        changeset.revoked_delegations.extend(
+            ctx.inputs.iter()
+                .filter(|s|
+                    s.delegate.as_ref().is_some_and(|d| d.space.is_numeric()))
+                .map(|input| DelegationInfo {
+                    space: input.ptrout.sptr.numeric.to_slabel(),
+                    sptr: input.ptrout.sptr.id,
+                })
+        );
+
+        // Clear revoked sptrs so they can be redelegated in the same tx
         let revoked_keys: Vec<RegistrySptrKey> = changeset.revoked_delegations
             .iter()
             .map(|rd| RegistrySptrKey::from_sptr::<H>(rd.sptr))
             .collect();
         ctx.sptrs_with_delegations.retain(|rsk| !revoked_keys.contains(rsk));
 
-        // Process new delegations from created space UTXOs
+        // Create delegations for owned spaces (Transfer covenant only).
+        // Spaces still in auction (Bid covenant) are not delegatable.
         changeset.new_delegations = new_space_utxos
             .iter()
             .filter_map(|created| {
+                if !created.space.as_ref().is_some_and(|s| s.is_owned()) {
+                    return None;
+                }
+
                 let sptr = Sptr::from_spk::<H>(created.script_pubkey.clone());
                 let rsk = RegistrySptrKey::from_sptr::<H>(sptr);
                 if ctx.sptrs_with_delegations.contains(&rsk) {
@@ -652,6 +670,26 @@ impl Validator {
                 value: output.value,
                 script_pubkey: output.script_pubkey.clone(),
             });
+        }
+
+        // Create delegations for numeric PTRs that opt in via output
+        // value ending in 8. Most numerics don't need commitments, so this
+        // avoids creating a delegation entry for every PTR.
+        // Skipped for txs involving spaces to prevent a numeric delegation
+        // from overwriting a space delegation sharing the same sptr.
+        if !has_spaces {
+            for created in &changeset.creates {
+                if created.value.to_sat() % 10 != 8 {
+                    continue;
+                }
+                let rsk = RegistrySptrKey::from_sptr::<H>(created.sptr.id);
+                if !ctx.sptrs_with_delegations.contains(&rsk) {
+                    changeset.new_delegations.push(DelegationInfo {
+                        space: created.sptr.numeric.to_slabel(),
+                        sptr: created.sptr.id,
+                    });
+                }
+            }
         }
 
         changeset
