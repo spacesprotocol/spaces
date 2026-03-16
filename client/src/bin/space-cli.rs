@@ -880,7 +880,7 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
             match event.space() {
                 None if anchor => event
                     .tags
-                    .insert(0, NostrTag(vec!["space".to_string(), space.clone()])),
+                    .insert(0, NostrTag(vec!["s".to_string(), space.clone()])),
                 Some(tag) => {
                     if tag != space {
                         return Err(ClientError::Custom(format!(
