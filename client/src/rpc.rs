@@ -1783,6 +1783,21 @@ impl AsyncChainState {
                             NumOutpointKey::from_outpoint::<Sha256>(fpt.outpoint()).into()
                         );
                         most_recent_update = std::cmp::max(most_recent_update, fpt.numout.num.last_update);
+
+                        // insert delegate information
+                        let operator_id = NumId::from_spk::<Sha256>(fpt.numout.script_pubkey);
+                        let operator = state.get_num_info(&operator_id)?;
+                        if let Some(operator) = operator {
+                            num_tree_keys.insert(
+                                NumOutpointKey::from_outpoint::<Sha256>(operator.outpoint()).into()
+                            );
+
+                            most_recent_update = std::cmp::max(most_recent_update, operator.numout.num.last_update);
+
+                        } else {
+                            num_tree_keys.insert(operator_id.into());
+                        }
+
                     } else {
                         // non-existence proof
                         num_tree_keys.insert(key.into());
@@ -1794,6 +1809,18 @@ impl AsyncChainState {
                             NumOutpointKey::from_outpoint::<Sha256>(fpt.outpoint()).into()
                         );
                         most_recent_update = std::cmp::max(most_recent_update, fpt.numout.num.last_update);
+
+                        // insert delegate information
+                        let operator_id = NumId::from_spk::<Sha256>(fpt.numout.script_pubkey);
+                        let operator = state.get_num_info(&operator_id)?;
+                        if let Some(operator) = operator {
+                            num_tree_keys.insert(
+                                NumOutpointKey::from_outpoint::<Sha256>(operator.outpoint()).into()
+                            );
+                            most_recent_update = std::cmp::max(most_recent_update, operator.numout.num.last_update);
+                        } else {
+                            num_tree_keys.insert(operator_id.into());
+                        }
                     } else {
                         // non-existence proof
                         num_tree_keys.insert(id.into());
