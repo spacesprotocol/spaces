@@ -29,7 +29,7 @@ use spaces_wallet::{
 };
 
 use crate::cbf::CompactFilterSync;
-use crate::rpc::CommitParams;
+use crate::rpc::{CommitParams};
 use crate::spaces::Spaced;
 use crate::store::chain::Chain;
 use crate::store::Sha256;
@@ -44,13 +44,13 @@ use crate::{
     },
     std_wait,
 };
+use spaces_nums::num_id::{NumId, NumIdParseError, NUM_HRP};
+use spaces_nums::snumeric::SNumeric;
+use spaces_nums::{FullNumOut, NumericKey};
+use spaces_nums::{DelegatorKey, NumOut, NumSource};
 use spaces_protocol::bitcoin::address::ParseError;
 use spaces_protocol::bitcoin::{Network, ScriptBuf};
-use spaces_ptr::snumeric::SNumeric;
-use spaces_ptr::sptr::{Sptr, SptrParseError, SPTR_HRP};
-use spaces_ptr::NumericKey;
-use spaces_ptr::{PtrOut, PtrSource, RegistrySptrKey};
-use spaces_wallet::builder::{CommitmentRequest, PtrRequest, PtrTransfer};
+use spaces_wallet::builder::{CommitmentRequest, NumDelegate, NumRequest, NumTransfer};
 use tabled::Tabled;
 use tokio::{
     select,
@@ -66,7 +66,7 @@ pub enum ResolvableTarget {
     Space(SLabel),
     SpaceAddress(SpaceAddress),
     Address(Address),
-    Sptr(Sptr),
+    Snum(NumId),
     Numeric(SNumeric),
 }
 
@@ -74,8 +74,8 @@ pub enum ResolvableTarget {
 pub enum ResolvableTargetParseError {
     SpaceLabelParseError(spaces_protocol::errors::Error),
     AddressParseError(ParseError),
-    SptrParseError(SptrParseError),
-    NumericParseError(spaces_ptr::snumeric::SNumericParseError),
+    NumParseError(NumIdParseError),
+    NumericParseError(spaces_nums::snumeric::SNumericParseError),
 }
 
 impl Display for ResolvableTargetParseError {
@@ -83,7 +83,7 @@ impl Display for ResolvableTargetParseError {
         match self {
             ResolvableTargetParseError::SpaceLabelParseError(e) => write!(f, "{}", e),
             ResolvableTargetParseError::AddressParseError(e) => write!(f, "{}", e),
-            ResolvableTargetParseError::SptrParseError(e) => write!(f, "{}", e),
+            ResolvableTargetParseError::NumParseError(e) => write!(f, "{}", e),
             ResolvableTargetParseError::NumericParseError(e) => write!(f, "{}", e),
         }
     }
@@ -101,10 +101,10 @@ impl FromStr for ResolvableTarget {
                 .map(ResolvableTarget::Space)
                 .map_err(ResolvableTargetParseError::SpaceLabelParseError);
         }
-        if s.starts_with(SPTR_HRP) {
-            return Sptr::from_str(s)
-                .map(ResolvableTarget::Sptr)
-                .map_err(ResolvableTargetParseError::SptrParseError);
+        if s.starts_with(NUM_HRP) {
+            return NumId::from_str(s)
+                .map(ResolvableTarget::Snum)
+                .map_err(ResolvableTargetParseError::NumParseError);
         }
         if s.starts_with('#') {
             return SNumeric::from_str(s)
@@ -125,7 +125,7 @@ impl fmt::Display for ResolvableTarget {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ResolvableTarget::Space(label) => write!(f, "{}", label),
-            ResolvableTarget::Sptr(sptr) => write!(f, "{}", sptr),
+            ResolvableTarget::Snum(snum) => write!(f, "{}", snum),
             ResolvableTarget::Numeric(num) => write!(f, "{}", num),
             ResolvableTarget::SpaceAddress(addr) => write!(f, "{}", addr),
             ResolvableTarget::Address(addr) => write!(f, "{}", addr),
@@ -196,16 +196,16 @@ pub struct ListSpacesResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PtrEntry {
+pub struct NumEntry {
     pub txid: Txid,
     #[serde(flatten)]
-    pub ptrout: PtrOut,
+    pub numout: NumOut,
     pub delegating_for: Option<SLabel>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ListPtrsResponse {
-    pub ptrs: Vec<PtrEntry>,
+pub struct ListNumsResponse {
+    pub nums: Vec<NumEntry>,
 }
 
 #[derive(Tabled, Debug, Clone, Serialize, Deserialize)]
@@ -270,6 +270,10 @@ pub enum WalletCommand {
         kind: AddressKind,
         resp: crate::rpc::Responder<anyhow::Result<String>>,
     },
+    IncrementAddress {
+        kind: AddressKind,
+        resp: crate::rpc::Responder<anyhow::Result<String>>,
+    },
     BumpFee {
         txid: Txid,
         fee_rate: FeeRate,
@@ -285,7 +289,7 @@ pub enum WalletCommand {
         resp: crate::rpc::Responder<anyhow::Result<ListSpacesResponse>>,
     },
     ListPtrs {
-        resp: crate::rpc::Responder<anyhow::Result<ListPtrsResponse>>,
+        resp: crate::rpc::Responder<anyhow::Result<ListNumsResponse>>,
     },
     Buy {
         listing: Listing,
@@ -319,7 +323,7 @@ pub enum WalletCommand {
         resp: crate::rpc::Responder<anyhow::Result<schnorr::Signature>>,
     },
     CanOperate {
-        space: SLabel,
+        subject: Subject,
         resp: crate::rpc::Responder<anyhow::Result<bool>>,
     },
 }
@@ -343,36 +347,67 @@ impl spaces_wallet::Mempool for MempoolChecker<'_> {
     }
 }
 
+fn resolve_subject_to_num_id<H: KeyHasher>(
+    chain: &mut Chain,
+    subject: &Subject,
+) -> anyhow::Result<NumId> {
+    match subject {
+        Subject::NumId(id) => Ok(*id),
+        Subject::Label(label) if label.is_numeric() => {
+            let numeric: SNumeric = label.clone().try_into().unwrap();
+            let key = NumericKey::from_numeric::<H>(&numeric);
+            chain
+                .get_num_id(&key)?
+                .ok_or_else(|| anyhow!("numeric '{}' not found", numeric))
+        }
+        Subject::Label(label) => Err(anyhow!(
+            "expected a num id or numeric, not a space: '{}'",
+            label
+        )),
+    }
+}
+
 fn commit_params_to_req(
     chain: &mut Chain,
     wallet: &SpacesWallet,
     p: CommitParams,
 ) -> anyhow::Result<CommitmentRequest> {
-    let space_key = SpaceKey::from(Sha256::hash(p.space.as_ref()));
-    let info = match chain.get_space_info(&space_key)? {
-        None => return Err(anyhow!("commit: no such space {}", p.space)),
-        Some(info) => info,
-    };
-    let sptr = Sptr::from_spk::<Sha256>(info.spaceout.script_pubkey.clone());
-    let ptr_info = match chain.get_ptr_info(&sptr)? {
-        None => {
-            return Err(anyhow!(
-                "commit: sptr {} doesn't exist for space {} - have you created it?",
-                sptr,
-                p.space
-            ))
+    // Resolve to the spk-derived NumId (the operator num that holds the delegation)
+    let spk_id = match &p.subject {
+        Subject::Label(label) if label.is_numeric() => {
+            let numeric: SNumeric = label.clone().try_into().unwrap();
+            let key = NumericKey::from_numeric::<Sha256>(&numeric);
+            let num_id = chain
+                .get_num_id(&key)?
+                .ok_or_else(|| anyhow!("commit: numeric '{}' not found", label))?;
+            let num_info = chain
+                .get_num_info(&num_id)?
+                .ok_or_else(|| anyhow!("commit: num '{}' not found", label))?;
+            NumId::from_spk::<Sha256>(num_info.numout.script_pubkey)
         }
-        Some(pt) => pt,
+        Subject::Label(label) => {
+            let info = chain
+                .get_space_info(&SpaceKey::from(Sha256::hash(label.as_ref())))?
+                .ok_or_else(|| anyhow!("commit: space '{}' not found", label))?;
+
+            if info.spaceout.space.is_none() || !info.spaceout.space.as_ref().unwrap().is_owned() {
+                return Err(anyhow!("commit: space '{}' is not owned", label));
+            }
+            NumId::from_spk::<Sha256>(info.spaceout.script_pubkey)
+        }
+        Subject::NumId(id) => *id,
     };
-    if info.spaceout.space.is_none()
-        || !info.spaceout.space.as_ref().unwrap().is_owned()
-        || !wallet.is_mine(ptr_info.ptrout.script_pubkey.clone())
-    {
-        return Err(anyhow!("commit: you don't control `{}`", sptr));
+
+    let num_info = chain
+        .get_num_info(&spk_id)?
+        .ok_or_else(|| anyhow!("commit: num '{}' not found - use delegate first", spk_id))?;
+
+    if !wallet.is_mine(num_info.numout.script_pubkey.clone()) {
+        return Err(anyhow!("commit: you don't control '{}'", spk_id));
     }
 
     Ok(CommitmentRequest {
-        ptrout: ptr_info,
+        numout: num_info,
         root: p.root.map(|p| *p.as_ref()),
     })
 }
@@ -591,6 +626,16 @@ impl RpcWallet {
                 };
                 _ = resp.send(Ok(address));
             }
+            WalletCommand::IncrementAddress { kind, resp } => {
+                let address = match kind {
+                    AddressKind::Coin => wallet
+                        .reveal_next_address(KeychainKind::External)
+                        .address
+                        .to_string(),
+                    AddressKind::Space => wallet.reveal_next_space_address().to_string(),
+                };
+                _ = resp.send(Ok(address));
+            }
             WalletCommand::ListUnspent { resp } => {
                 _ = resp.send(wallet.list_unspent_with_details(chain));
             }
@@ -603,7 +648,7 @@ impl RpcWallet {
                 _ = resp.send(result);
             }
             WalletCommand::ListPtrs { resp } => {
-                let result = Self::list_ptrs(wallet, chain);
+                let result = Self::list_nums(wallet, chain);
                 _ = resp.send(result);
             }
             WalletCommand::ListBidouts { resp } => {
@@ -646,39 +691,65 @@ impl RpcWallet {
             } => {
                 _ = resp.send(wallet.sign_schnorr::<Sha256, _>(chain, subject, &message));
             }
-            WalletCommand::CanOperate { space, resp } => {
-                let result = Self::can_operate(wallet, chain, space);
+            WalletCommand::CanOperate { subject, resp } => {
+                let result = Self::can_operate(wallet, chain, &subject);
                 _ = resp.send(result);
             }
         }
         Ok(())
     }
 
-    /// Check if wallet can operate on a space by verifying it controls the delegated sptr
+    /// Check if wallet can operate on a subject by verifying it controls the delegated num
     fn can_operate(
         wallet: &SpacesWallet,
         chain: &mut Chain,
-        space: SLabel,
+        subject: &Subject,
     ) -> anyhow::Result<bool> {
-        // Use the same delegation lookup logic as get_delegation
-        let space_info = chain
-            .get_space_info(&SpaceKey::from(Sha256::hash(space.as_ref())))?
-            .ok_or_else(|| anyhow::anyhow!("Space not found: {}", space))?;
+        let label = match subject {
+            Subject::Label(label) => label.clone(),
+            Subject::NumId(id) => {
+                let info = chain
+                    .get_num_info(id)?
+                    .ok_or_else(|| anyhow::anyhow!("num id '{}' not found", id))?;
+                info.numout.num.name.to_slabel()
+            }
+        };
 
-        let sptr = Sptr::from_spk::<Sha256>(space_info.spaceout.script_pubkey.clone());
+        let spk_id = if label.is_numeric() {
+            // For numerics, resolve the num via the numeric key then
+            // derive the spk-based id (delegation is on the address, not the num)
+            let numeric: SNumeric = label
+                .clone()
+                .try_into()
+                .map_err(|e| anyhow::anyhow!("invalid numeric label: {}", e))?;
+            let key = NumericKey::from_numeric::<Sha256>(&numeric);
+            let num_id = chain
+                .get_num_id(&key)?
+                .ok_or_else(|| anyhow::anyhow!("Numeric not found: {}", label))?;
+            let num_info = chain
+                .get_num_info(&num_id)?
+                .ok_or_else(|| anyhow::anyhow!("Num not found: {}", label))?;
+            NumId::from_spk::<Sha256>(num_info.numout.script_pubkey)
+        } else {
+            // For spaces, derive the num id from the space's spk
+            let space_info = chain
+                .get_space_info(&SpaceKey::from(Sha256::hash(label.as_ref())))?
+                .ok_or_else(|| anyhow::anyhow!("Space not found: {}", label))?;
+            NumId::from_spk::<Sha256>(space_info.spaceout.script_pubkey.clone())
+        };
 
         // Check reverse mapping to verify delegation is valid
-        let delegator = chain.get_delegator(&RegistrySptrKey::from_sptr::<Sha256>(sptr))?;
-        if delegator.as_ref() != Some(&space) {
+        let delegator = chain.get_delegator(&DelegatorKey::from_id::<Sha256>(spk_id))?;
+        if delegator.as_ref() != Some(&label) {
             return Ok(false);
         }
 
-        // Get ptr info and check if wallet controls it
-        let ptr_info = chain
-            .get_ptr_info(&sptr)?
-            .ok_or_else(|| anyhow::anyhow!("PTR not found for sptr: {}", sptr))?;
+        // Get num info and check if wallet controls it
+        let num_info = chain
+            .get_num_info(&spk_id)?
+            .ok_or_else(|| anyhow::anyhow!("Num not found for id: {}", spk_id))?;
 
-        Ok(wallet.is_mine(ptr_info.ptrout.script_pubkey))
+        Ok(wallet.is_mine(num_info.numout.script_pubkey))
     }
 
     /// Returns true if Bitcoin, protocol, and wallet tips match.
@@ -971,26 +1042,26 @@ impl RpcWallet {
         Ok(())
     }
 
-    fn list_ptrs(wallet: &mut SpacesWallet, chain: &mut Chain) -> anyhow::Result<ListPtrsResponse> {
-        let mut ptrs: Vec<PtrEntry> = Vec::new();
+    fn list_nums(wallet: &mut SpacesWallet, chain: &mut Chain) -> anyhow::Result<ListNumsResponse> {
+        let mut nums: Vec<NumEntry> = Vec::new();
         for unspent in wallet.list_unspent() {
-            let sptr = Sptr::from_spk::<Sha256>(unspent.txout.script_pubkey);
-            let Some(fpo) = chain.get_ptr_info(&sptr)? else {
+            let snum = NumId::from_spk::<Sha256>(unspent.txout.script_pubkey);
+            let Some(fpo) = chain.get_num_info(&snum)? else {
                 continue;
             };
             if fpo.outpoint() != unspent.outpoint {
                 continue;
             }
-            let rsk = RegistrySptrKey::from_sptr::<Sha256>(sptr);
+            let rsk = DelegatorKey::from_id::<Sha256>(snum);
             let delegating_for = chain.get_delegator(&rsk)?;
-            ptrs.push(PtrEntry {
+            nums.push(NumEntry {
                 txid: fpo.txid,
-                ptrout: fpo.ptrout,
+                numout: fpo.numout,
                 delegating_for,
             })
         }
 
-        Ok(ListPtrsResponse { ptrs })
+        Ok(ListNumsResponse { nums: nums })
     }
 
     fn list_spaces(
@@ -1004,7 +1075,11 @@ impl RpcWallet {
             .collect();
         let mut recent_events: HashMap<Txid, Vec<TxEvent>> = HashMap::new();
         for (txid, event) in wallet.list_recent_events()? {
-            if !event.space.as_ref().is_some_and(|s| owned_spaces.contains(s)) {
+            if !event
+                .space
+                .as_ref()
+                .is_some_and(|s| owned_spaces.contains(s))
+            {
                 recent_events.entry(txid).or_default().push(event);
             }
         }
@@ -1021,15 +1096,16 @@ impl RpcWallet {
                 break;
             }
         }
-        recent_events_with_txs
-            .extend(recent_events.into_values().flatten().map(|e| (None, e)));
+        recent_events_with_txs.extend(recent_events.into_values().flatten().map(|e| (None, e)));
 
         let mut pending = vec![];
         let mut outbid = vec![];
         for (tx, event) in recent_events_with_txs {
             let name = SLabel::from_str(event.space.as_ref().unwrap()).expect("valid space name");
-            if tx.as_ref()
-                .is_some_and(|tx| !tx.chain_position.is_confirmed()) {
+            if tx
+                .as_ref()
+                .is_some_and(|tx| !tx.chain_position.is_confirmed())
+            {
                 pending.push(name);
                 continue;
             }
@@ -1043,8 +1119,10 @@ impl RpcWallet {
                     outbid.push(space);
                     continue;
                 }
-                if event.previous_spaceout
-                    .is_some_and(|input| input == space.outpoint()) {
+                if event
+                    .previous_spaceout
+                    .is_some_and(|input| input == space.outpoint())
+                {
                     continue;
                 }
                 outbid.push(space);
@@ -1152,22 +1230,22 @@ impl RpcWallet {
                 Address::from_script(script_pubkey.as_script(), network.fallback_network())?
             }
             ResolvableTarget::SpaceAddress(address) => address.0,
-            ResolvableTarget::Sptr(sptr) => {
-                let script_pubkey = match chain.get_ptr_info(&sptr)? {
+            ResolvableTarget::Snum(snum) => {
+                let script_pubkey = match chain.get_num_info(&snum)? {
                     None => return Ok(None),
-                    Some(fullptrout) => fullptrout.ptrout.script_pubkey,
+                    Some(fullnumout) => fullnumout.numout.script_pubkey,
                 };
                 Address::from_script(script_pubkey.as_script(), network.fallback_network())?
             }
             ResolvableTarget::Numeric(numeric) => {
                 let key = NumericKey::from_numeric::<Sha256>(&numeric);
-                let sptr = match chain.get_numeric(&key)? {
+                let snum = match chain.get_num_id(&key)? {
                     None => return Ok(None),
-                    Some(sptr) => sptr,
+                    Some(snum) => snum,
                 };
-                let script_pubkey = match chain.get_ptr_info(&sptr)? {
+                let script_pubkey = match chain.get_num_info(&snum)? {
                     None => return Ok(None),
-                    Some(fullptrout) => fullptrout.ptrout.script_pubkey,
+                    Some(fullnumout) => fullnumout.numout.script_pubkey,
                 };
                 Address::from_script(script_pubkey.as_script(), network.fallback_network())?
             }
@@ -1249,30 +1327,19 @@ impl RpcWallet {
                         None
                     };
 
-                    // Process each item - space, PTR, or numeric
+                    // Process each item - space or num
                     for item in &params.spaces {
                         match item {
-                            Subject::Ptr(_) | Subject::Numeric(_) => {
-                                let sptr = match item {
-                                    Subject::Ptr(s) => *s,
-                                    Subject::Numeric(numeric) => {
-                                        let key = NumericKey::from_numeric::<Sha256>(numeric);
-                                        chain.get_numeric(&key)?.ok_or_else(|| {
-                                            anyhow!("transfer: numeric '{}' not found", numeric)
-                                        })?
+                            Subject::NumId(id) => {
+                                let num = match chain.get_num_info(id)? {
+                                    None => return Err(anyhow!("transfer: num '{}' not found or not owned", id)),
+                                    Some(full) if !wallet.is_mine(full.numout.script_pubkey.clone()) => {
+                                        return Err(anyhow!("transfer: you don't own num '{}'", id))
                                     }
-                                    _ => unreachable!(),
-                                };
-                                // Handle PTR transfer
-                                let ptr = match chain.get_ptr_info(&sptr)? {
-                                    None => return Err(anyhow!("transfer: PTR '{}' not found or not owned", sptr)),
-                                    Some(full) if !wallet.is_mine(full.ptrout.script_pubkey.clone()) => {
-                                        return Err(anyhow!("transfer: you don't own PTR '{}'", sptr))
-                                    }
-                                    Some(full) if wallet.get_utxo(OutPoint::new(full.txid, full.ptrout.n as u32)).is_none() => {
+                                    Some(full) if wallet.get_utxo(OutPoint::new(full.txid, full.numout.n as u32)).is_none() => {
                                         return Err(anyhow!(
-                                            "transfer '{}': wallet already has a pending tx for this PTR",
-                                            sptr
+                                            "transfer '{}': wallet already has a pending tx for this num",
+                                            id
                                         ))
                                     }
                                     Some(full) => full,
@@ -1283,12 +1350,42 @@ impl RpcWallet {
                                     Some(addr) => SpaceAddress::from(addr),
                                 };
 
-                                builder = builder.add_ptr_transfer(PtrTransfer {
-                                    ptr,
+                                builder = builder.add_num_transfer(NumTransfer {
+                                    num,
                                     recipient: recipient_addr,
                                 });
                             }
-                            Subject::Space(space) => {
+                            Subject::Label(label) if label.is_numeric() => {
+                                let numeric: SNumeric = label.clone().try_into().unwrap();
+                                let key = NumericKey::from_numeric::<Sha256>(&numeric);
+                                let id = chain.get_num_id(&key)?.ok_or_else(|| {
+                                    anyhow!("transfer: numeric '{}' not found", numeric)
+                                })?;
+                                let num = match chain.get_num_info(&id)? {
+                                    None => return Err(anyhow!("transfer: num '{}' not found or not owned", id)),
+                                    Some(full) if !wallet.is_mine(full.numout.script_pubkey.clone()) => {
+                                        return Err(anyhow!("transfer: you don't own num '{}'", id))
+                                    }
+                                    Some(full) if wallet.get_utxo(OutPoint::new(full.txid, full.numout.n as u32)).is_none() => {
+                                        return Err(anyhow!(
+                                            "transfer '{}': wallet already has a pending tx for this num",
+                                            id
+                                        ))
+                                    }
+                                    Some(full) => full,
+                                };
+
+                                let recipient_addr = match recipient.clone() {
+                                    None => wallet.reveal_next_space_address(),
+                                    Some(addr) => SpaceAddress::from(addr),
+                                };
+
+                                builder = builder.add_num_transfer(NumTransfer {
+                                    num,
+                                    recipient: recipient_addr,
+                                });
+                            }
+                            Subject::Label(space) => {
                                 // Handle space transfer
                                 let spacehash = SpaceKey::from(Sha256::hash(space.as_ref()));
                                 match chain.get_space_info(&spacehash)? {
@@ -1344,7 +1441,7 @@ impl RpcWallet {
                                         builder = builder.add_transfer(SpaceTransfer {
                                             space: full,
                                             recipient: recipient_addr.clone(),
-                                            create_ptr: false,
+                                            create_num: false,
                                         });
                                     }
                                 };
@@ -1452,137 +1549,189 @@ impl RpcWallet {
 
                     builder = builder.add_register(utxo, Some(address));
                 }
-                RpcWalletRequest::CreatePtr(params) => {
-                    let spk_raw = hex::decode(params.spk)
-                        .map_err(|e| anyhow!("transferptr: invalid spk: {:?}", e))?;
+                RpcWalletRequest::CreateNum(params) => {
+                    let spk = match params.bind_spk {
+                        Some(spk) => spk,
+                        None => advance_address_to_unique_num_spk(chain, wallet)?,
+                    };
+                    let snum = NumId::from_spk::<Sha256>(spk.clone());
 
-                    let spk = ScriptBuf::from(spk_raw);
-                    let sptr = Sptr::from_spk::<Sha256>(spk.clone());
-
-                    let sptr = chain.get_ptr_info(&sptr)?;
-                    if sptr.is_some() && !tx.force {
-                        return Err(anyhow!("sptr already exists"));
+                    let snum = chain.get_num_info(&snum)?;
+                    if snum.is_some() && !tx.force {
+                        return Err(anyhow!("snum already exists"));
                     }
 
-                    builder = builder.add_ptr(PtrRequest { spk })
+                    builder = builder.add_num(NumRequest { bind_spk: spk })
                 }
                 RpcWalletRequest::Commit(params) => {
                     let reqs = commit_params_to_req(chain, wallet, params)?;
                     builder = builder.add_commitment(reqs)
                 }
                 RpcWalletRequest::Delegate(params) => {
-                    let space = params.space;
-                    let spacehash = SpaceKey::from(Sha256::hash(space.as_ref()));
+                    let unique_num_spk = advance_address_to_unique_num_spk(chain, wallet)?;
 
-                    // Validate space exists and is owned
-                    let full = match chain.get_space_info(&spacehash)? {
-                        None => return Err(anyhow!("delegate: space '{}' not found", space)),
-                        Some(full)
-                            if full.spaceout.space.is_none()
-                                || !full.spaceout.space.as_ref().unwrap().is_owned()
-                                || !wallet.is_mine(full.spaceout.script_pubkey.clone()) =>
-                        {
-                            return Err(anyhow!("delegate: you don't own '{}'", space))
-                        }
-                        Some(full) if wallet.get_utxo(full.outpoint()).is_none() => {
-                            return Err(anyhow!(
-                                "delegate '{}': wallet already has a pending tx for this space",
-                                space
-                            ))
-                        }
-                        Some(full) => full,
-                    };
-
-                    // Generate fresh unique address and verify SPTR is available
-                    let recipient = loop {
-                        let addr = wallet.reveal_next_space_address();
-                        let spk = addr.script_pubkey();
-                        let sptr = Sptr::from_spk::<Sha256>(spk);
-                        let rsk = RegistrySptrKey::from_sptr::<Sha256>(sptr);
-
-                        // Check if SPTR is already taken
-                        match chain.get_delegator(&rsk)? {
-                            None => break addr, // SPTR is free, use this address
-                            Some(_) => {
-                                // Collision! This SPTR is already delegated, try next address
-                                continue;
-                            }
-                        }
-                    };
-
-                    // Add transfer to builder (establishes/updates delegation and creates PTR)
-                    builder = builder.add_transfer(SpaceTransfer {
-                        space: full,
-                        recipient,
-                        create_ptr: true,
-                    });
-                }
-                RpcWalletRequest::SetFallback(params) => {
-                    match params.subject {
-                        Subject::Space(ref space) => {
-                            let spacehash = SpaceKey::from(Sha256::hash(space.as_ref()));
-                            let full = chain.get_space_info(&spacehash)?
-                                .ok_or_else(|| anyhow!("setfallback: space '{}' not found", space))?;
-                            if !wallet.is_mine(full.spaceout.script_pubkey.clone()) {
-                                return Err(anyhow!("setfallback: you don't own '{}'", space));
-                            }
-                            let recipient = SpaceAddress(
-                                Address::from_script(
-                                    full.spaceout.script_pubkey.as_script(),
-                                    wallet.config.network,
-                                ).expect("valid script"),
-                            );
-                            builder = builder
-                                .add_transfer(SpaceTransfer {
-                                    space: full,
-                                    recipient,
-                                    create_ptr: false,
-                                })
-                                .add_data(params.data);
-                        }
-                        Subject::Ptr(_) | Subject::Numeric(_) => {
-                            let sptr = match &params.subject {
-                                Subject::Ptr(s) => *s,
-                                Subject::Numeric(numeric) => {
-                                    let key = NumericKey::from_numeric::<Sha256>(numeric);
-                                    chain.get_numeric(&key)?.ok_or_else(|| {
-                                        anyhow!("setfallback: numeric '{}' not found", numeric)
-                                    })?
+                    match &params.subject {
+                        Subject::Label(label) if label.is_numeric() => {
+                            let numeric: SNumeric = label.clone().try_into().unwrap();
+                            let key = NumericKey::from_numeric::<Sha256>(&numeric);
+                            let id = chain.get_num_id(&key)?.ok_or_else(|| {
+                                anyhow!("delegate: numeric '{}' not found", label)
+                            })?;
+                            let num = match chain.get_num_info(&id)? {
+                                None => return Err(anyhow!("delegate: num '{}' not found", id)),
+                                Some(full)
+                                    if !wallet.is_mine(full.numout.script_pubkey.clone()) =>
+                                {
+                                    return Err(anyhow!("delegate: you don't own '{}'", label))
                                 }
-                                _ => unreachable!(),
-                            };
-                            let ptr_info = match chain.get_ptr_info(&sptr)? {
-                                None => return Err(anyhow!("setfallback: PTR '{}' not found", sptr)),
-                                Some(ptr) if !wallet.is_mine(ptr.ptrout.script_pubkey.clone()) => {
-                                    return Err(anyhow!("setfallback: you don't own '{}'", sptr))
-                                }
-                                Some(ptr)
+                                Some(full)
                                     if wallet
-                                        .get_utxo(OutPoint::new(ptr.txid, ptr.ptrout.n as u32))
+                                        .get_utxo(OutPoint::new(full.txid, full.numout.n as u32))
                                         .is_none() =>
                                 {
                                     return Err(anyhow!(
-                                        "setfallback '{}': wallet already has a pending tx for this PTR",
-                                        sptr
+                                        "delegate '{}': wallet already has a pending tx",
+                                        label
                                     ))
                                 }
-                                Some(ptr) => ptr,
+                                Some(full) => full,
                             };
+                            builder = builder.add_num_delegate(NumDelegate {
+                                num,
+                                unique_num_spk: unique_num_spk.clone(),
+                            });
+                        }
+                        Subject::NumId(id) => {
+                            let num = match chain.get_num_info(id)? {
+                                None => return Err(anyhow!("delegate: num '{}' not found", id)),
+                                Some(full)
+                                    if !wallet.is_mine(full.numout.script_pubkey.clone()) =>
+                                {
+                                    return Err(anyhow!("delegate: you don't own '{}'", id))
+                                }
+                                Some(full)
+                                    if wallet
+                                        .get_utxo(OutPoint::new(full.txid, full.numout.n as u32))
+                                        .is_none() =>
+                                {
+                                    return Err(anyhow!(
+                                        "delegate '{}': wallet already has a pending tx",
+                                        id
+                                    ))
+                                }
+                                Some(full) => full,
+                            };
+                            builder = builder.add_num_delegate(NumDelegate {
+                                num,
+                                unique_num_spk: unique_num_spk.clone(),
+                            });
+                        }
+                        Subject::Label(label) => {
+                            let spacehash = SpaceKey::from(Sha256::hash(label.as_ref()));
+
+                            let full = match chain.get_space_info(&spacehash)? {
+                                None => {
+                                    return Err(anyhow!("delegate: space '{}' not found", label))
+                                }
+                                Some(full)
+                                    if full.spaceout.space.is_none()
+                                        || !full.spaceout.space.as_ref().unwrap().is_owned()
+                                        || !wallet.is_mine(full.spaceout.script_pubkey.clone()) =>
+                                {
+                                    return Err(anyhow!("delegate: you don't own '{}'", label))
+                                }
+                                Some(full) if wallet.get_utxo(full.outpoint()).is_none() => {
+                                    return Err(anyhow!(
+                                        "delegate '{}': wallet already has a pending tx",
+                                        label
+                                    ))
+                                }
+                                Some(full) => full,
+                            };
+
                             let recipient = SpaceAddress(
-                                Address::from_script(
-                                    ptr_info.ptrout.script_pubkey.as_script(),
-                                    wallet.config.network,
-                                ).expect("valid script"),
+                                Address::from_script(&unique_num_spk, wallet.config.network)
+                                    .expect("valid address"),
                             );
-                            builder = builder
-                                .add_ptr_transfer(PtrTransfer {
-                                    ptr: ptr_info,
-                                    recipient,
-                                })
-                                .add_data(params.data);
+                            builder = builder.add_transfer(SpaceTransfer {
+                                space: full,
+                                recipient,
+                                create_num: true,
+                            });
                         }
                     }
                 }
+                RpcWalletRequest::Authorize(params) => {
+                    let delegate_utxo = find_delegate_utxo(chain, &params.subject)?;
+                    if !wallet.is_mine(delegate_utxo.numout.script_pubkey.clone()) {
+                        return Err(anyhow!("authorize: you don't own '{}'", params.subject));
+                    }
+                    let Some(r) = Self::resolve(network, chain, &params.to, true)? else {
+                        return Err(anyhow!("authorize: recipient '{}' not found", params.to));
+                    };
+                    builder = builder.add_num_transfer(NumTransfer {
+                        num: delegate_utxo,
+                        recipient: SpaceAddress::from(r),
+                    })
+                }
+                RpcWalletRequest::SetFallback(params) => match params.subject {
+                    Subject::Label(ref label) if !label.is_numeric() => {
+                        let spacehash = SpaceKey::from(Sha256::hash(label.as_ref()));
+                        let full = chain
+                            .get_space_info(&spacehash)?
+                            .ok_or_else(|| anyhow!("setfallback: space '{}' not found", label))?;
+                        if !wallet.is_mine(full.spaceout.script_pubkey.clone()) {
+                            return Err(anyhow!("setfallback: you don't own '{}'", label));
+                        }
+                        let recipient = SpaceAddress(
+                            Address::from_script(
+                                full.spaceout.script_pubkey.as_script(),
+                                wallet.config.network,
+                            )
+                            .expect("valid script"),
+                        );
+                        builder = builder
+                            .add_transfer(SpaceTransfer {
+                                space: full,
+                                recipient,
+                                create_num: false,
+                            })
+                            .add_data(params.data);
+                    }
+                    _ => {
+                        let id = resolve_subject_to_num_id::<Sha256>(chain, &params.subject)?;
+                        let num_info = match chain.get_num_info(&id)? {
+                                None => return Err(anyhow!("setfallback: num '{}' not found", id)),
+                                Some(num) if !wallet.is_mine(num.numout.script_pubkey.clone()) => {
+                                    return Err(anyhow!("setfallback: you don't own '{}'", id))
+                                }
+                                Some(num)
+                                    if wallet
+                                        .get_utxo(OutPoint::new(num.txid, num.numout.n as u32))
+                                        .is_none() =>
+                                {
+                                    return Err(anyhow!(
+                                        "setfallback '{}': wallet already has a pending tx for this num",
+                                        id
+                                    ))
+                                }
+                                Some(num) => num,
+                            };
+                        let recipient = SpaceAddress(
+                            Address::from_script(
+                                num_info.numout.script_pubkey.as_script(),
+                                wallet.config.network,
+                            )
+                            .expect("valid script"),
+                        );
+                        builder = builder
+                            .add_num_transfer(NumTransfer {
+                                num: num_info,
+                                recipient,
+                            })
+                            .add_data(params.data);
+                    }
+                },
             }
         }
 
@@ -1786,6 +1935,14 @@ impl RpcWallet {
         resp_rx.await?
     }
 
+    pub async fn send_increment_address(&self, kind: AddressKind) -> anyhow::Result<String> {
+        let (resp, resp_rx) = oneshot::channel();
+        self.sender
+            .send(WalletCommand::IncrementAddress { kind, resp })
+            .await?;
+        resp_rx.await?
+    }
+
     pub async fn send_fee_bump(
         &self,
         txid: Txid,
@@ -1864,7 +2021,7 @@ impl RpcWallet {
         resp_rx.await?
     }
 
-    pub async fn send_list_ptrs(&self) -> anyhow::Result<ListPtrsResponse> {
+    pub async fn send_list_nums(&self) -> anyhow::Result<ListNumsResponse> {
         let (resp, resp_rx) = oneshot::channel();
         self.sender.send(WalletCommand::ListPtrs { resp }).await?;
         resp_rx.await?
@@ -1912,10 +2069,10 @@ impl RpcWallet {
         resp_rx.await?
     }
 
-    pub async fn send_can_operate(&self, space: SLabel) -> anyhow::Result<bool> {
+    pub async fn send_can_operate(&self, subject: Subject) -> anyhow::Result<bool> {
         let (resp, resp_rx) = oneshot::channel();
         self.sender
-            .send(WalletCommand::CanOperate { space, resp })
+            .send(WalletCommand::CanOperate { subject, resp })
             .await?;
         resp_rx.await?
     }
@@ -1947,4 +2104,102 @@ async fn named_future<T>(
     rx: oneshot::Receiver<T>,
 ) -> (String, Result<T, oneshot::error::RecvError>) {
     (name, rx.await)
+}
+
+fn advance_address_to_unique_num_spk(
+    chain: &mut Chain,
+    w: &mut SpacesWallet,
+) -> anyhow::Result<ScriptBuf> {
+    loop {
+        let addr = w.reveal_next_space_address();
+        let spk = addr.script_pubkey();
+        let id = NumId::from_spk::<Sha256>(spk);
+        if chain.get_num_outpoint_by_id(&id)?.is_some() {
+            continue;
+        }
+        // the num utxo may not be present, but its id can still be delegated
+        let dk = DelegatorKey::from_id::<Sha256>(id);
+        match chain.get_delegator(&dk)? {
+            None => return Ok(addr.script_pubkey()),
+            Some(_) => continue,
+        }
+    }
+}
+
+
+fn find_delegate_utxo(chain: &mut Chain, subject: &Subject) -> anyhow::Result<FullNumOut> {
+    let num_id = match &subject {
+        Subject::NumId(id) => Some(id.clone()),
+        Subject::Label(label) if label.is_numeric() => {
+            let numeric: SNumeric = label
+                .clone()
+                .try_into()
+                .expect("valid numeric");
+            let key = NumericKey::from_numeric::<Sha256>(&numeric);
+            let id = chain.get_num_id(&key)?.ok_or_else(|| {
+                anyhow!("authorize: numeric '{}' not found", label)
+            })?;
+            Some(id)
+        }
+        Subject::Label(_) => None,
+    };
+
+    let target = if let Some(num_id) = num_id {
+        let Some(num_utxo) = chain.get_num_info(&num_id)? else {
+            return Err(anyhow!("authorize: num {} not found", subject));
+        };
+
+        let target = NumId::from_spk::<Sha256>(num_utxo.numout.script_pubkey);
+        if target == num_id {
+            return Err(anyhow!("authorize: num has no separate delegation - call delegate first"))
+        }
+
+        let dk = DelegatorKey::from_id::<Sha256>(target);
+        let Some(delegator) = chain.get_delegator(&dk)? else {
+            return Err(anyhow!("authorize: num {} is not delegated - call delegate first", subject));
+        };
+        if !delegator.is_numeric() {
+            return Err(anyhow!("authorize: num {} is delegated to {} - call delegate to switch",
+                subject, delegator));
+        }
+        let numeric : SNumeric = delegator.clone().try_into().expect("valid numeric");
+
+        if numeric != num_utxo.numout.num.name {
+            return Err(anyhow!("authorize: num {} is delegated to {} - call delegate to switch",
+                subject, delegator));
+        }
+
+        target
+    } else {
+        let Subject::Label(label) = subject else {
+            return Err(anyhow!("authorize: expected a space, got {}", subject))
+        };
+
+        let space_utxo = chain
+            .get_space_info(&SpaceKey::from(Sha256::hash(label.as_ref())))?
+            .ok_or_else(|| anyhow!("authorize: space '{}' not found", label))?;
+        let Some(space) = space_utxo.spaceout.space else {
+            return Err(anyhow!("authorize: space {} not found", subject));
+        };
+
+        let target = NumId::from_spk::<Sha256>(space_utxo.spaceout.script_pubkey);
+        let dk = DelegatorKey::from_id::<Sha256>(target);
+        let Some(delegator) = chain.get_delegator(&dk)? else {
+            return Err(anyhow!("authorize: space {} is not delegated - call delegate first", subject));
+        };
+
+        if delegator != space.name {
+            return Err(anyhow!("authorize: num {} is delegated to {} - call delegate to switch",
+            target, delegator)
+            );
+        }
+
+        target
+    };
+
+    let Some(num_utxo) = chain.get_num_info(&target)? else {
+        return Err(anyhow!("authorize: target '{}' not found - call delegate first", target));
+    };
+
+    Ok(num_utxo)
 }

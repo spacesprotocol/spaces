@@ -2607,14 +2607,28 @@ dependencies = [
  "serde_json",
  "sip7",
  "spacedb",
+ "spaces_nums",
  "spaces_protocol",
- "spaces_ptr",
  "spaces_testutil",
  "spaces_wallet",
  "tabled",
  "threadpool",
  "tokio",
  "tower 0.4.13",
+]
+
+[[package]]
+name = "spaces_nums"
+version = "0.1.0"
+dependencies = [
+ "bech32",
+ "bitcoin",
+ "borsh",
+ "borsh_utils",
+ "hex",
+ "log",
+ "serde",
+ "spaces_protocol",
 ]
 
 [[package]]
@@ -2626,19 +2640,6 @@ dependencies = [
  "borsh_utils",
  "serde",
  "serde_json",
-]
-
-[[package]]
-name = "spaces_ptr"
-version = "0.1.0"
-dependencies = [
- "bech32",
- "bitcoin",
- "borsh",
- "borsh_utils",
- "hex",
- "serde",
- "spaces_protocol",
 ]
 
 [[package]]
@@ -2670,8 +2671,8 @@ dependencies = [
  "secp256k1",
  "serde",
  "serde_json",
+ "spaces_nums",
  "spaces_protocol",
- "spaces_ptr",
  "tempfile",
 ]
 

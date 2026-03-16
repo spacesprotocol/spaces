@@ -14,7 +14,7 @@ use spaces_protocol::{
     slabel::SLabel,
     Bytes, Covenant,
 };
-use spaces_ptr::ChainProofRequest;
+use spaces_nums::ChainProofRequest;
 use spaces_testutil::TestRig;
 use spaces_wallet::{export::WalletExport, tx_event::TxEventKind};
 
@@ -377,7 +377,7 @@ async fn it_should_allow_batch_transfers_refreshing_expire_height(
         .iter()
         .map(|out| {
             let name = out.spaceout.space.as_ref().expect("space").name.to_string();
-            Subject::Space(SLabel::from_str(&name).expect("valid space"))
+            Subject::Label(SLabel::from_str(&name).expect("valid space"))
         })
         .collect();
 
@@ -448,7 +448,7 @@ async fn it_should_allow_applying_script_in_batch(rig: &TestRig) -> anyhow::Resu
         .iter()
         .map(|out| {
             let name = out.spaceout.space.as_ref().expect("space").name.to_string();
-            Subject::Space(SLabel::from_str(&name).expect("valid space"))
+            Subject::Label(SLabel::from_str(&name).expect("valid space"))
         })
         .collect();
 
@@ -869,7 +869,7 @@ async fn it_should_not_allow_register_or_transfer_to_same_space_multiple_times(
         rig,
         ALICE,
         vec![RpcWalletRequest::Transfer(TransferSpacesParams {
-            spaces: vec![Subject::Space(SLabel::from_str(&transfer).expect("valid"))],
+            spaces: vec![Subject::Label(SLabel::from_str(&transfer).expect("valid"))],
             to: Some(bob_address.clone()),
             data: None,
         })],
@@ -887,7 +887,7 @@ async fn it_should_not_allow_register_or_transfer_to_same_space_multiple_times(
         rig,
         ALICE,
         vec![RpcWalletRequest::Transfer(TransferSpacesParams {
-            spaces: vec![Subject::Space(SLabel::from_str(&transfer).expect("valid"))],
+            spaces: vec![Subject::Label(SLabel::from_str(&transfer).expect("valid"))],
             to: Some(bob_address),
             data: None,
         })],
@@ -901,7 +901,7 @@ async fn it_should_not_allow_register_or_transfer_to_same_space_multiple_times(
         rig,
         ALICE,
         vec![RpcWalletRequest::Transfer(TransferSpacesParams {
-            spaces: vec![Subject::Space(SLabel::from_str(&setdata).expect("valid"))],
+            spaces: vec![Subject::Label(SLabel::from_str(&setdata).expect("valid"))],
             to: None,
             data: Some(vec![0xAA, 0xAA]),
         })],
@@ -918,7 +918,7 @@ async fn it_should_not_allow_register_or_transfer_to_same_space_multiple_times(
         rig,
         ALICE,
         vec![RpcWalletRequest::Transfer(TransferSpacesParams {
-            spaces: vec![Subject::Space(SLabel::from_str(&setdata).expect("valid"))],
+            spaces: vec![Subject::Label(SLabel::from_str(&setdata).expect("valid"))],
             to: None,
             data: Some(vec![0xDE, 0xAD]),
         })],
@@ -969,7 +969,7 @@ async fn it_can_batch_txs(rig: &TestRig) -> anyhow::Result<()> {
         ALICE,
         vec![
             RpcWalletRequest::Transfer(TransferSpacesParams {
-                spaces: vec![Subject::Space(SLabel::from_str("@test9996").expect("valid"))],
+                spaces: vec![Subject::Label(SLabel::from_str("@test9996").expect("valid"))],
                 to: Some(bob_address),
                 data: None,
             }),
@@ -988,9 +988,9 @@ async fn it_can_batch_txs(rig: &TestRig) -> anyhow::Result<()> {
             // Transfer spaces to self with data (replaces Execute)
             RpcWalletRequest::Transfer(TransferSpacesParams {
                 spaces: vec![
-                    Subject::Space(SLabel::from_str("@test10000").expect("valid")),
-                    Subject::Space(SLabel::from_str("@test9999").expect("valid")),
-                    Subject::Space(SLabel::from_str("@test9998").expect("valid")),
+                    Subject::Label(SLabel::from_str("@test10000").expect("valid")),
+                    Subject::Label(SLabel::from_str("@test9999").expect("valid")),
+                    Subject::Label(SLabel::from_str("@test9998").expect("valid")),
                 ],
                 to: None,
                 data: Some(vec![0xEE, 0xEE, 0x22, 0x22]),
@@ -1251,7 +1251,7 @@ async fn it_should_handle_expired_spaces(rig: &TestRig) -> anyhow::Result<()> {
         rig,
         ALICE,
         vec![RpcWalletRequest::Transfer(TransferSpacesParams {
-            spaces: vec![Subject::Space(
+            spaces: vec![Subject::Label(
                 SLabel::from_str(&space_name).expect("valid")
             )],
             to: None, // renew to self
@@ -1328,7 +1328,7 @@ async fn it_should_handle_expired_spaces(rig: &TestRig) -> anyhow::Result<()> {
         rig,
         ALICE,
         vec![RpcWalletRequest::Transfer(TransferSpacesParams {
-            spaces: vec![Subject::Space(
+            spaces: vec![Subject::Label(
                 SLabel::from_str(&space_name_2).expect("valid")
             )],
             to: None,
@@ -1390,7 +1390,7 @@ async fn it_should_sign_and_verify_schnorr(rig: &TestRig) -> anyhow::Result<()> 
     let spaces = rig.spaced.client.wallet_list_spaces(BOB).await?;
     let space = spaces.owned.first().expect("bob should have at least 1 space");
     let space_name = space.spaceout.space.as_ref().unwrap().name.to_string();
-    let subject = Subject::Space(SLabel::from_str(&space_name).unwrap());
+    let subject = Subject::Label(SLabel::from_str(&space_name).unwrap());
 
     let message = Bytes::new(b"hello world".to_vec());
     let signature = rig
@@ -1451,7 +1451,7 @@ async fn it_should_build_chain_proof_with_snapshot_caching(rig: &TestRig) -> any
         .build_chain_proof(
             ChainProofRequest {
                 spaces: vec![label.clone()],
-                ptrs_keys: vec![],
+                nums: vec![],
             },
             Some(false),
         )
@@ -1483,7 +1483,7 @@ async fn it_should_build_chain_proof_with_snapshot_caching(rig: &TestRig) -> any
         .build_chain_proof(
             ChainProofRequest {
                 spaces: vec![label.clone()],
-                ptrs_keys: vec![],
+                nums: vec![],
             },
             Some(false),
         )

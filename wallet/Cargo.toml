@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 spaces_protocol = { path = "../protocol", features = ["std"] }
-spaces_ptr = { path = "../ptr", features = ["std"] }
+spaces_nums = { path = "../nums", features = ["std"] }
 bitcoin = { version = "0.32.8", features = ["base64", "serde"] }
 bdk_wallet = { workspace = true }
 secp256k1 = { workspace = true }

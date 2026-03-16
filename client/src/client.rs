@@ -15,7 +15,7 @@ use spaces_protocol::{
     validate::{TxChangeSet, UpdateKind, Validator},
     Bytes, Covenant, FullSpaceOut, RevokeReason, SpaceOut,
 };
-use spaces_ptr::{CommitmentKey, NumericKey, RegistryKey, RegistrySptrKey, PtrOutpointKey};
+use spaces_nums::{CommitmentKey, NumericKey, CommitmentTipKey, DelegatorKey, NumOutpointKey};
 use spaces_wallet::bitcoin::{Network, Transaction};
 
 use crate::{
@@ -78,7 +78,7 @@ pub struct BlockchainInfo {
 #[derive(Debug, Clone)]
 pub struct Client {
     validator: Validator,
-    ptr_validator: spaces_ptr::Validator,
+    ptr_validator: spaces_nums::Validator,
     tx_data: bool,
 }
 
@@ -92,7 +92,7 @@ pub struct BlockMeta {
 
 /// A block structure containing validated transaction metadata for ptrs
 #[derive(Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
-pub struct PtrBlockMeta {
+pub struct NumBlockMeta {
     pub height: u32,
     pub tx_meta: Vec<PtrTxEntry>,
 }
@@ -100,7 +100,7 @@ pub struct PtrBlockMeta {
 #[derive(Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct PtrTxEntry {
     #[serde(flatten)]
-    pub changeset: spaces_ptr::TxChangeSet,
+    pub changeset: spaces_nums::TxChangeSet,
     #[serde(skip_serializing_if = "Option::is_none", flatten)]
     pub tx: Option<TxData>,
 }
@@ -142,7 +142,7 @@ impl Client {
     pub fn new(tx_data: bool) -> Self {
         Self {
             validator: Validator::new(),
-            ptr_validator: spaces_ptr::Validator::new(),
+            ptr_validator: spaces_nums::Validator::new(),
             tx_data,
         }
     }
@@ -159,9 +159,9 @@ impl Client {
                     .into());
             }
         }
-        // Ptrs tip must connect to block
-        if chain.can_scan_ptrs(height) {
-            let tip = chain.ptrs_tip();
+        // Nums tip must connect to block
+        if chain.can_scan_nums(height) {
+            let tip = chain.nums_tip();
             if tip.hash != block.header.prev_blockhash || tip.height + 1 != height {
                 return Err(SyncError {
                     checkpoint: tip.clone(),
@@ -182,7 +182,7 @@ impl Client {
         block: &Block,
         index_spaces: bool,
         index_ptrs: bool,
-    ) -> anyhow::Result<(Option<BlockMeta>, Option<PtrBlockMeta>)> {
+    ) -> anyhow::Result<(Option<BlockMeta>, Option<NumBlockMeta>)> {
         Self::verify_block_connected(chain, height, block_hash, block)?;
 
         let mut spaces_meta = None;
@@ -193,9 +193,9 @@ impl Client {
             });
         }
 
-        let mut ptr_meta = None;
+        let mut num_meta = None;
         if index_ptrs {
-            ptr_meta = Some(PtrBlockMeta {
+            num_meta = Some(NumBlockMeta {
                 height,
                 tx_meta: vec![],
             });
@@ -253,8 +253,8 @@ impl Client {
                 self.apply_space_tx(chain, &tx, validated_tx);
             }
 
-            let ptrs_ctx = if chain.can_scan_ptrs(height) {
-                spaces_ptr::TxContext::from_tx::<Chain, Sha256>(
+            let ptrs_ctx = if chain.can_scan_nums(height) {
+                spaces_nums::TxContext::from_tx::<Chain, Sha256>(
                     chain,
                     tx,
                     spaceouts_input_ctx.is_some(),
@@ -270,7 +270,7 @@ impl Client {
                 let ptrs_validated = self.ptr_validator
                     .process::<Sha256>(height, &tx, position as _, ptrs_ctx, spent_spaceouts, created_spaceouts);
 
-                if let Some(idx) = ptr_meta.as_mut() {
+                if let Some(idx) = num_meta.as_mut() {
                     {
                         idx.tx_meta.push(PtrTxEntry {
                             changeset: ptrs_validated.clone(),
@@ -292,52 +292,52 @@ impl Client {
         }
 
         chain.update_spaces_tip(height, block_hash);
-        if chain.can_scan_ptrs(height) {
-            chain.update_ptrs_tip(height, block_hash);
+        if chain.can_scan_nums(height) {
+            chain.update_nums_tip(height, block_hash);
         }
 
-        Ok((spaces_meta, ptr_meta))
+        Ok((spaces_meta, num_meta))
     }
 
-    fn apply_ptrs_tx(&self, state: &mut Chain, tx: &Transaction, changeset: spaces_ptr::TxChangeSet) {
+    fn apply_ptrs_tx(&self, state: &mut Chain, tx: &Transaction, changeset: spaces_nums::TxChangeSet) {
         // Remove spends
         for n in changeset.spends.into_iter() {
             let previous = tx.input[n].previous_output;
-            state.remove_ptr_utxo(previous);
+            state.remove_num_utxo(previous);
         }
 
         // Remove revoked delegations
         for revoked in changeset.revoked_delegations {
-            let sptr_key = RegistrySptrKey::from_sptr::<Sha256>(revoked.sptr);
-            state.remove_delegation(sptr_key);
+            let delegator_key = DelegatorKey::from_id::<Sha256>(revoked.id);
+            state.remove_delegator(delegator_key);
         }
         // Remove revoked commitments
         for revoked in changeset.revoked_commitments {
             let commitment_key = CommitmentKey::new::<Sha256>(&revoked.space, revoked.commitment.state_root);
             state.remove_commitment(commitment_key);
 
-            let registry_key = RegistryKey::from_slabel::<Sha256>(&revoked.space);
+            let registry_key = CommitmentTipKey::from_slabel::<Sha256>(&revoked.space);
             if let Some(prev) = revoked.commitment.prev_root {
                 // Points space -> prev commitments tip
-                state.insert_registry(registry_key, prev);
+                state.insert_commitment_tip(registry_key, prev);
             } else {
-                state.remove_registry(registry_key);
+                state.remove_commitment_tip(registry_key);
             }
         }
 
         // Create new delegations
         for delegation in changeset.new_delegations {
-            let sptr_key = RegistrySptrKey::from_sptr::<Sha256>(delegation.sptr);
-            state.insert_delegation(sptr_key, delegation.space);
+            let delegator_key = DelegatorKey::from_id::<Sha256>(delegation.id);
+            state.insert_delegator(delegator_key, delegation.subject);
         }
 
         // Insert new commitments
         for commitment_info in changeset.commitments {
             let commitment_key = CommitmentKey::new::<Sha256>(&commitment_info.space, commitment_info.commitment.state_root);
-            let registry_key = RegistryKey::from_slabel::<Sha256>(&commitment_info.space);
+            let registry_key = CommitmentTipKey::from_slabel::<Sha256>(&commitment_info.space);
 
             // Points space -> commitments tip
-            state.insert_registry(registry_key, commitment_info.commitment.state_root);
+            state.insert_commitment_tip(registry_key, commitment_info.commitment.state_root);
             // commitment key = HASH(HASH(space) || state root) -> commitment
             state.insert_commitment(commitment_key, commitment_info.commitment);
 
@@ -350,14 +350,14 @@ impl Client {
                 vout: create.n as u32,
             };
 
-            // Ptr => Outpoint + Numeric => Sptr
-            state.insert_ptr(create.sptr.id, outpoint.into());
-            let numeric_key = NumericKey::from_numeric::<Sha256>(&create.sptr.numeric);
-            state.insert_numeric(numeric_key, create.sptr.id);
+            // Num => Outpoint + Numeric => NumId
+            state.insert_num_outpoint(create.num.id, outpoint.into());
+            let numeric_key = NumericKey::from_numeric::<Sha256>(&create.num.name);
+            state.insert_num(numeric_key, create.num.id);
 
             // Outpoint => PtrOut
-            let outpoint_key = PtrOutpointKey::from_outpoint::<Sha256>(outpoint);
-            state.insert_ptrout(outpoint_key, create);
+            let outpoint_key = NumOutpointKey::from_outpoint::<Sha256>(outpoint);
+            state.insert_numout(outpoint_key, create);
         }
     }
 

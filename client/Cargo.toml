@@ -17,7 +17,7 @@ path = "src/lib.rs"
 [dependencies]
 spaces_wallet = { path = "../wallet" }
 spaces_protocol = { path = "../protocol", features = ["std"] }
-spaces_ptr = { path = "../ptr", features = ["std"] }
+spaces_nums= { path = "../nums", features = ["std"] }
 sip7 = { path = "../sip7", features = ["serde"] }
 spacedb = { workspace = true }
 borsh_utils = { path = "../borsh_utils" }

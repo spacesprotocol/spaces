@@ -9,13 +9,13 @@ use spaces_protocol::hasher::{BaseHash, BidKey, OutpointKey, SpaceKey};
 use spaces_protocol::prepare::SpacesSource;
 use spaces_protocol::{FullSpaceOut, SpaceOut};
 use spaces_protocol::slabel::SLabel;
-use spaces_ptr::{Commitment, CommitmentKey, FullPtrOut, NumericKey, PtrOut, PtrSource, RegistryKey, RegistrySptrKey, PtrOutpointKey, RootAnchor};
-use spaces_ptr::sptr::Sptr;
+use spaces_nums::{Commitment, CommitmentKey, FullNumOut, NumericKey, NumOut, NumSource, CommitmentTipKey, DelegatorKey, NumOutpointKey, RootAnchor};
+use spaces_nums::num_id::NumId;
 use spaces_wallet::bitcoin::Network;
-use crate::client::{BlockMeta, PtrBlockMeta};
-use crate::rpc::{BlockMetaWithHash, PtrBlockMetaWithHash};
+use crate::client::{BlockMeta, NumBlockMeta};
+use crate::rpc::{BlockMetaWithHash, NumBlockMetaWithHash};
 use crate::store::{EncodableOutpoint, ReadTx, Sha256};
-use crate::store::ptrs::{PtrChainState, PtrLiveStore, PtrStore};
+use crate::store::ptrs::{NumChainState, NumLiveStore, NumStore};
 use crate::store::spaces::{RolloutEntry, RolloutIterator, SpLiveStore, SpStore, SpStoreUtils, SpacesState};
 
 pub const ROOT_ANCHORS_COUNT: u32 = 120;
@@ -39,13 +39,13 @@ const_assert!(
 pub struct CachedSnapshot {
     pub height: u32,
     pub spaces: ReadTx,
-    pub ptrs: ReadTx,
+    pub nums: ReadTx,
 }
 
 pub struct Chain {
     db: LiveStore,
     idx: LiveIndex,
-    ptrs_genesis: ChainAnchor,
+    nums_genesis: ChainAnchor,
     cached_snapshot: Option<CachedSnapshot>,
 }
 
@@ -54,7 +54,7 @@ impl Clone for Chain {
         Self {
             db: self.db.clone(),
             idx: self.idx.clone(),
-            ptrs_genesis: self.ptrs_genesis,
+            nums_genesis: self.nums_genesis,
             cached_snapshot: None,
         }
     }
@@ -63,13 +63,13 @@ impl Clone for Chain {
 #[derive(Clone)]
 pub struct LiveStore {
     sp: SpLiveStore,
-    pt: PtrLiveStore,
+    num: NumLiveStore,
 }
 
 #[derive(Clone)]
 pub struct LiveIndex {
     sp: Option<SpLiveStore>,
-    pt: Option<PtrLiveStore>,
+    num: Option<NumLiveStore>,
 }
 
 impl SpacesSource for Chain {
@@ -82,29 +82,29 @@ impl SpacesSource for Chain {
     }
 }
 
-impl PtrSource for Chain {
-    fn get_ptr_outpoint(&mut self, space_hash: &Sptr) -> spaces_protocol::errors::Result<Option<OutPoint>> {
-        self.db.pt.state.get_ptr_outpoint(space_hash)
+impl NumSource for Chain {
+    fn get_num_outpoint_by_id(&mut self, space_hash: &NumId) -> spaces_protocol::errors::Result<Option<OutPoint>> {
+        self.db.num.state.get_num_outpoint_by_id(space_hash)
     }
 
     fn get_commitment(&mut self, key: &CommitmentKey) -> spaces_protocol::errors::Result<Option<Commitment>> {
-        self.db.pt.state.get_commitment(key)
+        self.db.num.state.get_commitment(key)
     }
 
-    fn get_delegator(&mut self, sptr: &RegistrySptrKey) -> spaces_protocol::errors::Result<Option<SLabel>> {
-        self.db.pt.state.get_delegator(sptr)
+    fn get_delegator(&mut self, key: &DelegatorKey) -> spaces_protocol::errors::Result<Option<SLabel>> {
+        self.db.num.state.get_delegator(key)
     }
 
-    fn get_commitments_tip(&mut self, key: &RegistryKey) -> spaces_protocol::errors::Result<Option<Hash>> {
-        self.db.pt.state.get_commitments_tip(key)
+    fn get_commitments_tip(&mut self, key: &CommitmentTipKey) -> spaces_protocol::errors::Result<Option<Hash>> {
+        self.db.num.state.get_commitments_tip(key)
     }
 
-    fn get_ptrout(&mut self, outpoint: &OutPoint) -> spaces_protocol::errors::Result<Option<PtrOut>> {
-        self.db.pt.state.get_ptrout(outpoint)
+    fn get_numout(&mut self, outpoint: &OutPoint) -> spaces_protocol::errors::Result<Option<NumOut>> {
+        self.db.num.state.get_numout(outpoint)
     }
 
-    fn get_numeric(&mut self, key: &NumericKey) -> spaces_protocol::errors::Result<Option<Sptr>> {
-        self.db.pt.state.get_numeric(key)
+    fn get_num_id(&mut self, key: &NumericKey) -> spaces_protocol::errors::Result<Option<NumId>> {
+        self.db.num.state.get_num_id(key)
     }
 }
 
@@ -113,8 +113,8 @@ impl Chain {
         self.db.sp.state.get_space_info(space_hash)
     }
 
-    pub fn get_ptr_info(&mut self, key: &Sptr) -> anyhow::Result<Option<FullPtrOut>> {
-        self.db.pt.state.get_ptr_info(key)
+    pub fn get_num_info(&mut self, key: &NumId) -> anyhow::Result<Option<FullNumOut>> {
+        self.db.num.state.get_num_info(key)
     }
 
     pub fn snapshot_at(&mut self, target_height: u32) -> anyhow::Result<&mut CachedSnapshot> {
@@ -126,18 +126,18 @@ impl Chain {
 
         if !self.cached_snapshot.as_ref().is_some_and(|c| c.height == target_height) {
             let spaces = self.db.sp.state.read_at(target_height)?;
-            let ptrs = self.db.pt.state.read_at(target_height)?;
-            self.cached_snapshot = Some(CachedSnapshot { height: target_height, spaces, ptrs });
+            let ptrs = self.db.num.state.read_at(target_height)?;
+            self.cached_snapshot = Some(CachedSnapshot { height: target_height, spaces, nums: ptrs });
         }
 
         Ok(self.cached_snapshot.as_mut().unwrap())
     }
 
-    pub fn load(_network: Network, genesis: ChainAnchor, ptrs_genesis: ChainAnchor, dir: &Path, index_spaces: bool, index_ptrs: bool) -> anyhow::Result<Self> {
+    pub fn load(_network: Network, genesis: ChainAnchor, nums_genesis: ChainAnchor, dir: &Path, index_spaces: bool, index_ptrs: bool) -> anyhow::Result<Self> {
         let proto_db_path = dir.join("root.sdb");
-        let ptrs_db_path = dir.join("refs.sdb");
+        let nums_db_path = dir.join("nums.sdb");
         let initial_sp_sync = !proto_db_path.exists();
-        let initial_pt_sync = !ptrs_db_path.exists();
+        let initial_num_sync = !nums_db_path.exists();
 
         let sp_store = SpStore::open(proto_db_path)?;
         let sp = SpLiveStore {
@@ -145,10 +145,10 @@ impl Chain {
             store: sp_store,
         };
 
-        let pt_store = PtrStore::open(ptrs_db_path)?;
-        let pt = PtrLiveStore {
-            state: pt_store.begin(&ptrs_genesis)?,
-            store: pt_store,
+        let num_store = NumStore::open(nums_db_path)?;
+        let num = NumLiveStore {
+            state: num_store.begin(&nums_genesis)?,
+            store: num_store,
         };
 
 
@@ -159,33 +159,33 @@ impl Chain {
             sp_idx = Some(load_sp_index(dir, genesis, *current_tip, initial_sp_sync)?)
         }
 
-        let mut pt_idx = None;
+        let mut num_idx = None;
         if index_ptrs {
-            let current_tip = pt.state.tip.read().expect("tip");
-            pt_idx = Some(load_pt_index(dir, ptrs_genesis, *current_tip, initial_pt_sync)?)
+            let current_tip = num.state.tip.read().expect("tip");
+            num_idx = Some(load_num_index(dir, nums_genesis, *current_tip, initial_num_sync)?)
         }
 
         let chain = Chain {
-            db: LiveStore { sp, pt },
-            idx: LiveIndex { sp: sp_idx, pt: pt_idx },
-            ptrs_genesis,
+            db: LiveStore { sp, num },
+            idx: LiveIndex { sp: sp_idx, num: num_idx },
+            nums_genesis,
             cached_snapshot: None,
         };
 
         // If spaces synced past the ptrs point, reset the tip
-        if initial_pt_sync {
+        if initial_num_sync {
             let sp_tip = chain.db.sp.state.tip.read().expect("tip").clone();
-            if sp_tip.height > ptrs_genesis.height {
-                info!("spaces tip = {} > ptrs genesis = {} - rescanning to index ptrs",
-                    sp_tip.height, ptrs_genesis.height
+            if sp_tip.height > nums_genesis.height {
+                info!("spaces tip = {} > nums genesis = {} - rescanning to index nums",
+                    sp_tip.height, nums_genesis.height
                 );
                 assert_eq!(
-                    ptrs_genesis.height % COMMIT_BLOCK_INTERVAL, 0,
-                    "ptrs genesis must align with commit interval"
+                    nums_genesis.height % COMMIT_BLOCK_INTERVAL, 0,
+                    "nums genesis must align with commit interval"
                 );
                 chain.restore_spaces(|_| {
                     return Ok(BlockHash::from_slice(&[0u8; 32]).expect("hash"));
-                }, Some(ptrs_genesis.height))?;
+                }, Some(nums_genesis.height))?;
             }
         }
 
@@ -210,9 +210,9 @@ impl Chain {
     pub fn apply_block_to_ptrs_index(
         &self,
         block_hash: BlockHash,
-        block: PtrBlockMeta,
+        block: NumBlockMeta,
     ) -> anyhow::Result<()> {
-        if let Some(idx) = &self.idx.pt {
+        if let Some(idx) = &self.idx.num {
             idx.state.insert(BaseHash::from_slice(block_hash.as_ref()), block);
         }
         Ok(())
@@ -224,10 +224,10 @@ impl Chain {
         }
 
         let spaces_batch = self.db.sp.store.write().expect("write handle");
-        let ptrs_batch = self.db.pt.store.write().expect("write handle");
+        let ptrs_batch = self.db.num.store.write().expect("write handle");
 
         self.db.sp.state.commit(checkpoint.clone(), spaces_batch)?;
-        self.db.pt.state.commit(checkpoint.clone(), ptrs_batch)?;
+        self.db.num.state.commit(checkpoint.clone(), ptrs_batch)?;
 
         let sp_index_writer = self.idx.sp.clone();
         if let Some(index) = sp_index_writer {
@@ -235,7 +235,7 @@ impl Chain {
             index.state.commit(checkpoint, tx)?;
         }
 
-        let pt_index_writer = self.idx.pt.clone();
+        let pt_index_writer = self.idx.num.clone();
         if let Some(index) = pt_index_writer {
             let tx = index.store.write().expect("write handle");
             index.state.commit(checkpoint, tx)?;
@@ -247,16 +247,16 @@ impl Chain {
         &mut self.db.sp
     }
 
-    pub fn ptrs_mut(&mut self) -> &mut PtrLiveStore {
-        &mut self.db.pt
+    pub fn nums_mut(&mut self) -> &mut NumLiveStore {
+        &mut self.db.num
     }
 
     pub fn has_spaces_index(&self) -> bool {
         self.idx.sp.is_some()
     }
 
-    pub fn has_ptrs_index(&self) -> bool {
-        self.idx.pt.is_some()
+    pub fn has_nums_index(&self) -> bool {
+        self.idx.num.is_some()
     }
 
     pub fn rollout_iter(&self) -> anyhow::Result<(RolloutIterator, ReadTx)> {
@@ -264,7 +264,7 @@ impl Chain {
     }
 
     pub fn is_dirty(&self) -> bool {
-        self.db.sp.state.is_dirty() || self.db.pt.state.is_dirty()
+        self.db.sp.state.is_dirty() || self.db.num.state.is_dirty()
     }
 
     pub fn spaces_tip_meatadata(&mut self) -> anyhow::Result<&[u8]> {
@@ -294,16 +294,16 @@ impl Chain {
         self.db.sp.state.inner()
     }
 
-    pub fn ptrs_tip(&self) -> ChainAnchor {
-        *self.db.pt.state.tip.read().expect("ptrs tip")
+    pub fn nums_tip(&self) -> ChainAnchor {
+        *self.db.num.state.tip.read().expect("ptrs tip")
     }
 
-    pub fn can_scan_ptrs(&self, height: u32) -> bool {
-        height > self.ptrs_genesis.height
+    pub fn can_scan_nums(&self, height: u32) -> bool {
+        height > self.nums_genesis.height
     }
 
-    pub fn update_ptrs_tip(&self, height: u32, block_hash: BlockHash) {
-        let mut tip = self.db.pt.state.tip.write().expect("write tip");
+    pub fn update_nums_tip(&self, height: u32, block_hash: BlockHash) {
+        let mut tip = self.db.num.state.tip.write().expect("write tip");
         tip.height = height;
         tip.hash = block_hash;
     }
@@ -315,47 +315,45 @@ impl Chain {
         tip.hash = block_hash;
     }
 
-    pub(crate) fn insert_ptrout(&self, key: PtrOutpointKey, ptrout: PtrOut) {
-        self.db.pt.state.insert(key, ptrout)
+    pub(crate) fn insert_numout(&self, key: NumOutpointKey, ptrout: NumOut) {
+        self.db.num.state.insert(key, ptrout)
     }
 
-    pub(crate) fn insert_ptr(&self, key: Sptr, outpoint: EncodableOutpoint) {
-        self.db.pt.state.insert(key, outpoint)
+    pub(crate) fn insert_num_outpoint(&self, key: NumId, outpoint: EncodableOutpoint) {
+        self.db.num.state.insert_num_outpoint(key, outpoint)
     }
 
-    pub(crate) fn insert_numeric(&self, key: NumericKey, sptr: Sptr) {
-        self.db.pt.state.insert_numeric(key, sptr)
+    pub(crate) fn insert_num(&self, key: NumericKey, id: NumId) {
+        self.db.num.state.insert_num(key, id)
     }
 
-    pub(crate) fn insert_delegation(&self, key: RegistrySptrKey, space: SLabel) {
-        self.db.pt.state.insert_registry_delegation(key, space)
+    pub(crate) fn insert_delegator(&self, key: DelegatorKey, space: SLabel) {
+        self.db.num.state.insert_delegator(key, space)
     }
 
-    pub fn remove_delegation(&mut self, delegation: RegistrySptrKey) {
-        self.db.pt.state.remove(delegation)
+    pub fn remove_delegator(&mut self, key: DelegatorKey) {
+        self.db.num.state.remove(key)
     }
 
     pub(crate) fn insert_commitment(&self, key: CommitmentKey, commitment: Commitment) {
-        self.db.pt.state.insert_commitment(key, commitment)
+        self.db.num.state.insert_commitment(key, commitment)
     }
 
-    pub(crate) fn insert_registry(&self, key: RegistryKey, state_root: Hash) {
-        self.db.pt.state.insert_registry(key, state_root)
+    pub(crate) fn insert_commitment_tip(&self, key: CommitmentTipKey, state_root: Hash) {
+        self.db.num.state.insert_commitment_tip(key, state_root)
     }
 
-    pub(crate) fn remove_registry(&self, key: RegistryKey) {
-        self.db.pt.state.remove_registry(key)
+    pub(crate) fn remove_commitment_tip(&self, key: CommitmentTipKey) {
+        self.db.num.state.remove_commitment_tip(key)
     }
 
-    pub fn remove_ptr_utxo(&mut self, outpoint: OutPoint) {
+    pub fn remove_num_utxo(&mut self, outpoint: OutPoint) {
         let key = OutpointKey::from_outpoint::<Sha256>(outpoint);
-        self.db.pt.state.remove(key)
+        self.db.num.state.remove(key)
     }
-
-
 
     pub fn remove_commitment(&mut self, commitment: CommitmentKey) {
-        self.db.pt.state.remove(commitment)
+        self.db.num.state.remove(commitment)
     }
 
     pub fn remove_space_utxo(&mut self, outpoint: OutPoint) {
@@ -390,15 +388,15 @@ impl Chain {
         }))
     }
 
-    pub fn get_ptrs_block(&mut self, hash: BlockHash) -> anyhow::Result<Option<PtrBlockMetaWithHash>> {
-        let idx = match &mut self.idx.pt  {
+    pub fn get_nums_block(&mut self, hash: BlockHash) -> anyhow::Result<Option<NumBlockMetaWithHash>> {
+        let idx = match &mut self.idx.num {
             None => return Err(anyhow!("ptrs index must be enabled")),
             Some(idx) => idx
         };
         let key = BaseHash::from_slice(hash.as_ref());
-        let block = idx.state.get(key).context("could not retrieve ptr block meta")?;
+        let block = idx.state.get(key).context("could not retrieve num block meta")?;
         Ok(block.map(|b| {
-           PtrBlockMetaWithHash {
+           NumBlockMetaWithHash {
                hash,
                block_meta: b,
            }
@@ -410,11 +408,11 @@ impl Chain {
         F: Fn(u32) -> anyhow::Result<BlockHash>,
     {
         let point = self.restore_spaces(get_block_hash, None)?;
-        self.restore_ptrs(point)
+        self.restore_nums(point)
     }
 
-    pub fn restore_ptrs(&self, required_checkpoint: ChainAnchor) -> anyhow::Result<()> {
-        let iter = self.db.pt.store.iter();
+    pub fn restore_nums(&self, required_checkpoint: ChainAnchor) -> anyhow::Result<()> {
+        let iter = self.db.num.store.iter();
 
         let mut restore_point = None;
         for (idx, snapshot) in iter.enumerate() {
@@ -428,37 +426,37 @@ impl Chain {
 
         let (snapshot_idx, snapshot, checkpoint) =
             match restore_point {
-                None => return Err(anyhow!("Could not restore ptrs to height = {}", required_checkpoint.height)),
+                None => return Err(anyhow!("Could not restore nums to height = {}", required_checkpoint.height)),
                 Some(rp) => rp,
             };
 
-        info!("Restoring ptrs block={} height={}", checkpoint.hash, checkpoint.height);
+        info!("Restoring nums block={} height={}", checkpoint.hash, checkpoint.height);
 
-        if let Some(ptr_idx) = self.idx.pt.as_ref() {
-            let idx = ptr_idx.store
+        if let Some(num_idx) = self.idx.num.as_ref() {
+            let idx = num_idx.store
                 .iter().skip(snapshot_idx).next();
             if idx.is_none() {
                 return Err(anyhow!(
-                        "Could not restore ptr block index due to missing snapshot"
+                        "Could not restore num block index due to missing snapshot"
                     ));
             }
             let idx = idx.unwrap()?;
             let idx_checkpoint: ChainAnchor = idx.metadata().try_into()?;
             if idx_checkpoint != checkpoint {
                 return Err(anyhow!(
-                        "ptr block index checkpoint does not match the ptr's checkpoint"
+                        "num block index checkpoint does not match the num's checkpoint"
                     ));
             }
             idx.rollback()
-                .context("could not rollback ptr block index snapshot")?;
+                .context("could not rollback num block index snapshot")?;
         }
 
         snapshot
             .rollback()
-            .context("could not rollback ptr snapshot")?;
+            .context("could not rollback num snapshot")?;
 
-        self.db.pt.state.restore(checkpoint.clone());
-        if let Some(idx) = self.idx.pt.as_ref() {
+        self.db.num.state.restore(checkpoint.clone());
+        if let Some(idx) = self.idx.num.as_ref() {
             idx.state.restore(checkpoint);
         }
 
@@ -547,7 +545,7 @@ impl Chain {
 
         let mut anchors = Vec::new();
         let sp_iter = self.db.sp.store.iter().take(num_anchors as _);
-        let mut pt_iter = self.db.pt.store.iter();
+        let mut pt_iter = self.db.num.store.iter();
 
         for sp_snap in sp_iter {
             let mut sp_snap = sp_snap?;
@@ -569,7 +567,7 @@ impl Chain {
                 // Preserve existing anchor but update ptrs_root if we have a new one
                 let updated_anchor = RootAnchor {
                     spaces_root: existing.spaces_root,
-                    ptrs_root: ptrs_root.or(existing.ptrs_root),
+                    nums_root: ptrs_root.or(existing.nums_root),
                     block: existing.block.clone(),
                 };
                 anchors.push(updated_anchor);
@@ -577,7 +575,7 @@ impl Chain {
                 let spaces_root = sp_snap.compute_root()?;
                 anchors.push(RootAnchor {
                     spaces_root,
-                    ptrs_root,
+                    nums_root: ptrs_root,
                     block: anchor,
                 });
             }
@@ -590,7 +588,7 @@ impl Chain {
             info!(
                 "Latest root anchor spaces={} ptrs={} (height: {})",
                 hex::encode(result.spaces_root),
-                result.ptrs_root.as_ref().map(hex::encode).unwrap_or_else(|| "none".to_string()),
+                result.nums_root.as_ref().map(hex::encode).unwrap_or_else(|| "none".to_string()),
                 result.block.height
             );
         }
@@ -623,15 +621,15 @@ fn load_sp_index(dir: &Path, genesis: ChainAnchor, tip: ChainAnchor, initial_syn
     Ok(index)
 }
 
-fn load_pt_index(dir: &Path, genesis: ChainAnchor, tip: ChainAnchor, initial_sync: bool) -> anyhow::Result<PtrLiveStore> {
-    let block_db_path = dir.join("ptrs_block_index.sdb");
+fn load_num_index(dir: &Path, genesis: ChainAnchor, tip: ChainAnchor, initial_sync: bool) -> anyhow::Result<NumLiveStore> {
+    let block_db_path = dir.join("nums_block_index.sdb");
     if !initial_sync && !block_db_path.exists() {
         return Err(anyhow::anyhow!(
-                    "Ptr Block index must be enabled from the initial sync."
+                    "Num Block index must be enabled from the initial sync."
                 ));
     }
-    let block_store = PtrStore::open(block_db_path)?;
-    let index = PtrLiveStore {
+    let block_store = NumStore::open(block_db_path)?;
+    let index = NumLiveStore {
         state: block_store.begin(&genesis).expect("begin block index"),
         store: block_store,
     };
@@ -639,7 +637,7 @@ fn load_pt_index(dir: &Path, genesis: ChainAnchor, tip: ChainAnchor, initial_syn
         let idx_tip = index.state.tip.read().expect("index");
         if idx_tip.height != tip.height || idx_tip.hash != tip.hash {
             return Err(anyhow::anyhow!(
-                        "Ptrs tip and block index states don't match."
+                        "Nums tip and block index states don't match."
                     ));
         }
     }

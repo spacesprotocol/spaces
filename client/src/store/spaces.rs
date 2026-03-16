@@ -26,7 +26,7 @@ use spaces_protocol::{
     prepare::SpacesSource,
     Covenant, FullSpaceOut, SpaceOut,
 };
-use spaces_ptr::RootAnchor;
+use spaces_nums::RootAnchor;
 use crate::store::{EncodableOutpoint, ReadTx, Sha256, SpaceDb, WriteMemory, WriteTx};
 
 #[derive(Clone)]
@@ -111,7 +111,7 @@ impl SpStore {
                 let spaces_root = snap.compute_root()?;
                 anchors.push(RootAnchor {
                     spaces_root,
-                    ptrs_root: None,
+                    nums_root: None,
                     block: anchor,
                 });
             }

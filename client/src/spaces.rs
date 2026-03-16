@@ -63,7 +63,7 @@ impl Spaced {
         block: Block,
     ) -> anyhow::Result<()> {
         let sp_idx = self.chain.has_spaces_index();
-        let pt_idx = self.chain.has_ptrs_index();
+        let pt_idx = self.chain.has_nums_index();
 
         let (block_result,ptr_block_result) = node
             .scan_block(&mut self.chain, id.height, id.hash, &block, sp_idx, pt_idx)?;

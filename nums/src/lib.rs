@@ -1,6 +1,6 @@
-#[cfg(feature = "std")]
-pub mod sptr;
 pub mod constants;
+#[cfg(feature = "std")]
+pub mod num_id;
 pub mod snumeric;
 
 #[cfg(feature = "borsh")]
@@ -9,31 +9,46 @@ use borsh::{BorshDeserialize, BorshSerialize};
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
-use spaces_protocol::constants::ChainAnchor;
-use spaces_protocol::script::find_op_set_data;
-use bitcoin::{Amount, OutPoint, ScriptBuf, Transaction, TxOut, Txid};
+use crate::constants::COMMITMENT_FINALITY_INTERVAL;
+use crate::num_id::NumId;
+use crate::snumeric::SNumeric;
 use bitcoin::absolute::LockTime;
 use bitcoin::opcodes::all::{OP_PUSHNUM_2, OP_RETURN};
 use bitcoin::script::{Instruction, PushBytesBuf};
-use spaces_protocol::hasher::{KeyHasher, KeyHash, Hash};
+use bitcoin::{Amount, OutPoint, ScriptBuf, Transaction, TxOut, Txid};
+use spaces_protocol::constants::ChainAnchor;
+use spaces_protocol::hasher::{Hash, KeyHash, KeyHasher};
+use spaces_protocol::script::find_op_set_data;
 use spaces_protocol::slabel::SLabel;
 use spaces_protocol::{Bytes, SpaceOut};
-use crate::constants::COMMITMENT_FINALITY_INTERVAL;
-use crate::snumeric::SNumeric;
-use crate::sptr::Sptr;
 
-pub trait PtrSource {
-    fn get_ptr_outpoint(&mut self, sptr: &Sptr) -> spaces_protocol::errors::Result<Option<OutPoint>>;
+pub trait NumSource {
+    fn get_num_outpoint_by_id(
+        &mut self,
+        id: &NumId,
+    ) -> spaces_protocol::errors::Result<Option<OutPoint>>;
 
-    fn get_commitment(&mut self, key: &CommitmentKey) -> spaces_protocol::errors::Result<Option<Commitment>>;
+    fn get_commitment(
+        &mut self,
+        key: &CommitmentKey,
+    ) -> spaces_protocol::errors::Result<Option<Commitment>>;
 
-    fn get_commitments_tip(&mut self, key: &RegistryKey) -> spaces_protocol::errors::Result<Option<Hash>>;
+    fn get_commitments_tip(
+        &mut self,
+        key: &CommitmentTipKey,
+    ) -> spaces_protocol::errors::Result<Option<Hash>>;
 
-    fn get_delegator(&mut self, sptr: &RegistrySptrKey) -> spaces_protocol::errors::Result<Option<SLabel>>;
+    fn get_delegator(
+        &mut self,
+        key: &DelegatorKey,
+    ) -> spaces_protocol::errors::Result<Option<SLabel>>;
 
-    fn get_ptrout(&mut self, outpoint: &OutPoint) -> spaces_protocol::errors::Result<Option<PtrOut>>;
+    fn get_numout(
+        &mut self,
+        outpoint: &OutPoint,
+    ) -> spaces_protocol::errors::Result<Option<NumOut>>;
 
-    fn get_numeric(&mut self, key: &NumericKey) -> spaces_protocol::errors::Result<Option<Sptr>>;
+    fn get_num_id(&mut self, key: &NumericKey) -> spaces_protocol::errors::Result<Option<NumId>>;
 }
 
 #[derive(Debug, Clone)]
@@ -52,10 +67,10 @@ pub struct TxChangeSet {
         )
     )]
     pub txid: Txid,
-    /// List of transaction input indexes spending a ptrout.
+    /// List of transaction input indexes spending nums.
     pub spends: Vec<usize>,
-    /// List of transaction outputs creating a ptrout.
-    pub creates: Vec<PtrOut>,
+    /// List of transaction outputs creating numouts.
+    pub creates: Vec<NumOut>,
     /// New commitments made
     pub commitments: Vec<CommitmentInfo>,
     pub revoked_commitments: Vec<CommitmentInfo>,
@@ -76,14 +91,14 @@ pub struct CommitmentInfo {
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "borsh", derive(BorshSerialize, BorshDeserialize))]
 pub struct DelegationInfo {
-    pub space: SLabel,
-    pub sptr: Sptr,
+    pub id: NumId,
+    pub subject: SLabel,
 }
 
 #[derive(Clone, PartialEq, Debug)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "borsh", derive(BorshSerialize, BorshDeserialize))]
-pub struct FullPtrOut {
+pub struct FullNumOut {
     #[cfg_attr(
         feature = "borsh",
         borsh(
@@ -94,7 +109,7 @@ pub struct FullPtrOut {
     pub txid: Txid,
 
     #[cfg_attr(feature = "serde", serde(flatten))]
-    pub ptrout: PtrOut,
+    pub numout: NumOut,
 }
 
 /// PTR TxOut
@@ -102,10 +117,10 @@ pub struct FullPtrOut {
 #[derive(Clone, PartialEq, Debug)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "borsh", derive(BorshSerialize, BorshDeserialize))]
-pub struct PtrOut {
+pub struct NumOut {
     pub n: usize,
     #[cfg_attr(feature = "serde", serde(flatten))]
-    pub sptr: Ptr,
+    pub num: Num,
     /// The value of the output, in satoshis.
     #[cfg_attr(
         feature = "borsh",
@@ -129,9 +144,9 @@ pub struct PtrOut {
 #[derive(Clone, PartialEq, Debug)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "borsh", derive(BorshSerialize, BorshDeserialize))]
-pub struct Ptr {
-    pub id: Sptr,
-    pub numeric: SNumeric,
+pub struct Num {
+    pub id: NumId,
+    pub name: SNumeric,
     pub data: Option<Bytes>,
     pub last_update: u32,
 }
@@ -141,24 +156,33 @@ pub struct Ptr {
 #[cfg_attr(feature = "borsh", derive(BorshSerialize, BorshDeserialize))]
 pub struct Commitment {
     /// Merkle/Trie commitment to the current state.
-    #[cfg_attr(feature = "serde", serde(
-        serialize_with = "serialize_hash_serde",
-        deserialize_with = "deserialize_hash_serde"
-    ))]
+    #[cfg_attr(
+        feature = "serde",
+        serde(
+            serialize_with = "serialize_hash_serde",
+            deserialize_with = "deserialize_hash_serde"
+        )
+    )]
     pub state_root: [u8; 32],
 
     /// Previous state root (None for genesis).
-    #[cfg_attr(feature = "serde", serde(
-        serialize_with = "serialize_optional_hash_serde",
-        deserialize_with = "deserialize_optional_hash_serde"
-    ))]
+    #[cfg_attr(
+        feature = "serde",
+        serde(
+            serialize_with = "serialize_optional_hash_serde",
+            deserialize_with = "deserialize_optional_hash_serde"
+        )
+    )]
     pub prev_root: Option<[u8; 32]>,
 
     /// Rolling hash for all previous commitments
-    #[cfg_attr(feature = "serde", serde(
-        serialize_with = "serialize_hash_serde",
-        deserialize_with = "deserialize_hash_serde"
-    ))]
+    #[cfg_attr(
+        feature = "serde",
+        serde(
+            serialize_with = "serialize_hash_serde",
+            deserialize_with = "deserialize_hash_serde"
+        )
+    )]
     pub rolling_hash: [u8; 32],
 
     /// Block height at which the commitment was made
@@ -169,10 +193,10 @@ pub struct Commitment {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyKind {
     Commitment = 0x01,
-    Sptr = 0x02,
+    NumId = 0x02,
     Registry = 0x03,
-    RegistrySptr = 0x04,
-    PtrOutpoint = 0x05,
+    Delegator = 0x04,
+    NumOutpoint = 0x05,
     SNumeric = 0x06,
 }
 
@@ -190,15 +214,14 @@ pub fn ns_hash<H: KeyHasher>(kind: KeyKind, data: [u8; 32]) -> [u8; 32] {
     H::hash(&buf)
 }
 
-
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
 #[cfg_attr(feature = "borsh", derive(BorshSerialize, BorshDeserialize))]
-pub struct RegistryKey([u8; 32]);
+pub struct CommitmentTipKey([u8; 32]);
 
 #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Debug)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "borsh", derive(BorshSerialize, BorshDeserialize))]
-pub struct RegistrySptrKey([u8; 32]);
+pub struct DelegatorKey([u8; 32]);
 
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
 #[cfg_attr(feature = "borsh", derive(BorshSerialize, BorshDeserialize))]
@@ -207,7 +230,7 @@ pub struct CommitmentKey([u8; 32]);
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "borsh", derive(BorshSerialize, BorshDeserialize))]
-pub struct PtrOutpointKey([u8; 32]);
+pub struct NumOutpointKey([u8; 32]);
 
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
 #[cfg_attr(feature = "borsh", derive(BorshSerialize, BorshDeserialize))]
@@ -216,18 +239,24 @@ pub struct NumericKey([u8; 32]);
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct RootAnchor {
-    #[cfg_attr(feature = "serde", serde(
-        serialize_with = "serialize_hash_serde",
-        deserialize_with = "deserialize_hash_serde"
-    ))]
+    #[cfg_attr(
+        feature = "serde",
+        serde(
+            serialize_with = "serialize_hash_serde",
+            deserialize_with = "deserialize_hash_serde"
+        )
+    )]
     pub spaces_root: Hash,
-    #[cfg_attr(feature = "serde", serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        serialize_with = "serialize_optional_hash_serde",
-        deserialize_with = "deserialize_optional_hash_serde"
-    ))]
-    pub ptrs_root: Option<Hash>,
+    #[cfg_attr(
+        feature = "serde",
+        serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            serialize_with = "serialize_optional_hash_serde",
+            deserialize_with = "deserialize_optional_hash_serde"
+        )
+    )]
+    pub nums_root: Option<Hash>,
     pub block: ChainAnchor,
 }
 
@@ -241,27 +270,30 @@ pub struct ChainProofRequest {
     /// Spaces to prove (server resolves to outpoint keys).
     pub spaces: Vec<SLabel>,
     /// Typed keys to prove in the ptrs tree.
-    pub ptrs_keys: Vec<PtrKeyKind>,
+    pub nums: Vec<NumKeyKind>,
 }
 
-/// A typed key for the ptrs tree.
+/// A typed key for the nums tree.
 ///
 /// Server resolves these to the appropriate merkle proof paths.
-/// For Sptr, the server must look o the outpoint to prove existence.
+/// For a num id, the server must look up the outpoint to prove existence.
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "serde", serde(tag = "key", content = "value", rename_all = "lowercase"))]
+#[cfg_attr(
+    feature = "serde",
+    serde(tag = "key", content = "value", rename_all = "lowercase")
+)]
 #[derive(Clone, Copy)]
-pub enum PtrKeyKind {
-    Sptr(Sptr),
-    Numeric(SNumeric),
+pub enum NumKeyKind {
+    Id(NumId),
+    Num(SNumeric),
     Commitment(CommitmentKey),
-    Registry(RegistryKey),
+    CommitmentTip(CommitmentTipKey),
 }
 
-impl KeyHash for RegistryKey {}
-impl KeyHash for RegistrySptrKey {}
+impl KeyHash for CommitmentTipKey {}
+impl KeyHash for DelegatorKey {}
 impl KeyHash for CommitmentKey {}
-impl KeyHash for PtrOutpointKey {}
+impl KeyHash for NumOutpointKey {}
 impl KeyHash for NumericKey {}
 
 impl Commitment {
@@ -271,23 +303,23 @@ impl Commitment {
     }
 }
 
-impl FullPtrOut {
+impl FullNumOut {
     pub fn outpoint(&self) -> OutPoint {
         OutPoint {
             txid: self.txid,
-            vout: self.ptrout.n as _
+            vout: self.numout.n as _,
         }
     }
 }
 
-impl From<RegistryKey> for Hash {
-    fn from(value: RegistryKey) -> Self {
+impl From<CommitmentTipKey> for Hash {
+    fn from(value: CommitmentTipKey) -> Self {
         value.0
     }
 }
 
-impl From<RegistrySptrKey> for Hash {
-    fn from(value: RegistrySptrKey) -> Self {
+impl From<DelegatorKey> for Hash {
+    fn from(value: DelegatorKey) -> Self {
         value.0
     }
 }
@@ -298,8 +330,8 @@ impl From<CommitmentKey> for Hash {
     }
 }
 
-impl From<PtrOutpointKey> for Hash {
-    fn from(value: PtrOutpointKey) -> Self {
+impl From<NumOutpointKey> for Hash {
+    fn from(value: NumOutpointKey) -> Self {
         value.0
     }
 }
@@ -310,12 +342,12 @@ impl From<NumericKey> for Hash {
     }
 }
 
-impl PtrOutpointKey {
+impl NumOutpointKey {
     pub fn from_outpoint<H: KeyHasher>(outpoint: OutPoint) -> Self {
         let mut buffer = [0u8; 36];
         buffer[0..32].copy_from_slice(outpoint.txid.as_ref());
         buffer[32..36].copy_from_slice(&outpoint.vout.to_le_bytes());
-        Self(ns_hash::<H>(KeyKind::PtrOutpoint, H::hash(&buffer)))
+        Self(ns_hash::<H>(KeyKind::NumOutpoint, H::hash(&buffer)))
     }
 }
 
@@ -328,24 +360,24 @@ impl CommitmentKey {
     }
 }
 
-
-impl RegistryKey {
-    pub fn from_slabel<H: KeyHasher>(space: &SLabel) -> Self {
-        Self(ns_hash::<H>(KeyKind::Registry, H::hash(space.as_ref())))
+impl CommitmentTipKey {
+    pub fn from_slabel<H: KeyHasher>(subject: &SLabel) -> Self {
+        Self(ns_hash::<H>(KeyKind::Registry, H::hash(subject.as_ref())))
     }
 }
 
-impl RegistrySptrKey {
-    pub fn from_sptr<H: KeyHasher>(sptr: Sptr) -> Self {
-        RegistrySptrKey(ns_hash::<H>(KeyKind::RegistrySptr, sptr.to_bytes()))
+impl DelegatorKey {
+    pub fn from_id<H: KeyHasher>(id: NumId) -> Self {
+        DelegatorKey(ns_hash::<H>(KeyKind::Delegator, id.to_bytes()))
     }
 }
 
 impl NumericKey {
     pub fn from_numeric<H: KeyHasher>(numeric: &SNumeric) -> Self {
-        let mut buf = [0u8; 6];
+        let mut buf = [0u8; 8];
         buf[..4].copy_from_slice(&numeric.block().to_le_bytes());
-        buf[4..].copy_from_slice(&numeric.tx_pos().to_le_bytes());
+        buf[4..6].copy_from_slice(&numeric.tx_pos().to_le_bytes());
+        buf[6..8].copy_from_slice(&numeric.vout().to_le_bytes());
         Self(ns_hash::<H>(KeyKind::SNumeric, H::hash(&buf)))
     }
 }
@@ -353,28 +385,31 @@ impl NumericKey {
 #[derive(Clone)]
 pub struct Stxo {
     pub n: usize,
-    pub ptrout: PtrOut,
+    pub numout: NumOut,
     pub delegate: Option<DelegateContext>,
 }
 
 #[derive(Clone)]
 pub struct DelegateContext {
-    space: SLabel,
+    subject: SLabel,
     pending_tip: Option<Commitment>,
     finalized_tip: Option<Commitment>,
 }
 
 pub struct TxContext {
     pub inputs: Vec<Stxo>,
-    pub relevant_sptr_spks: Vec<ScriptBuf>,
-    // sptrs with existing delegations cannot be used multiple times
-    pub sptrs_with_delegations: Vec<RegistrySptrKey>,
+    pub existing_num_spks: Vec<ScriptBuf>,
+    // nums with existing delegations cannot be used multiple times
+    pub nums_with_delegations: Vec<DelegatorKey>,
 }
 
 impl TxContext {
-    pub fn spending_ptrs<T: PtrSource>(src: &mut T, tx: &Transaction) -> spaces_protocol::errors::Result<bool> {
+    pub fn spending_nums<T: NumSource>(
+        src: &mut T,
+        tx: &Transaction,
+    ) -> spaces_protocol::errors::Result<bool> {
         for input in tx.input.iter() {
-            if src.get_ptrout(&input.previous_output)?.is_some() {
+            if src.get_numout(&input.previous_output)?.is_some() {
                 return Ok(true);
             }
         }
@@ -386,19 +421,18 @@ impl TxContext {
     ///
     /// Returns `Some(TxContext)` if the transaction is ptrs tx.
     /// Returns `None` if the transaction is not relevant.
-    pub fn from_tx<T: PtrSource, H: KeyHasher>(
+    pub fn from_tx<T: NumSource, H: KeyHasher>(
         src: &mut T,
         tx: &Transaction,
         spends_spaces: bool,
         space_outputs: Vec<SpaceOut>,
         height: u32,
     ) -> spaces_protocol::errors::Result<Option<TxContext>> {
-        let has_ptr_outputs = is_ptr_minting_locktime(&tx.lock_time) &&
-            tx.output.iter().any(|out| out.is_ptr_output());
+        let has_num_outputs = is_num_minting_locktime(&tx.lock_time)
+            && tx.output.iter().any(|out| out.is_ptr_output());
         let has_spaces = spends_spaces || space_outputs.len() > 0;
 
-        let relevant = has_spaces || has_ptr_outputs || Self::spending_ptrs(src, tx)?;
-
+        let relevant = has_spaces || has_num_outputs || Self::spending_nums(src, tx)?;
         if !relevant {
             return Ok(None);
         }
@@ -406,76 +440,84 @@ impl TxContext {
         let mut inputs = Vec::with_capacity(tx.input.len());
 
         for (n, input) in tx.input.iter().enumerate() {
-            let ptrout = src.get_ptrout(&input.previous_output)?;
+            let Some(numout) = src.get_numout(&input.previous_output)? else {
+                continue;
+            };
 
-            if let Some(ptrout) = ptrout {
-                let delegate = {
-                    let rsk = RegistrySptrKey::from_sptr::<H>(ptrout.sptr.id);
+            let delegate = {
+                let dk = DelegatorKey::from_id::<H>(numout.num.id);
+                match src.get_delegator(&dk)? {
+                    Some(slabel) => {
+                        let ctip = CommitmentTipKey::from_slabel::<H>(&slabel);
+                        let tip_root = src.get_commitments_tip(&ctip)?;
+                        let tip = match tip_root {
+                            Some(root) => {
+                                let ck = CommitmentKey::new::<H>(&slabel, root);
+                                src.get_commitment(&ck)?
+                            }
+                            None => None,
+                        };
 
-                    match src.get_delegator(&rsk)? {
-                        Some(slabel) => {
-                            let registry_key = RegistryKey::from_slabel::<H>(&slabel);
-                            let tip_root = src.get_commitments_tip(&registry_key)?;
-                            let tip = match tip_root {
-                                Some(root) => {
-                                    let ck = CommitmentKey::new::<H>(&slabel, root);
-                                    src.get_commitment(&ck)?
-                                }
-                                None => None,
-                            };
+                        // Determine pending and finalized tips
+                        let (pending_tip, finalized_tip) = match tip {
+                            Some(t) if t.is_finalized(height) => (None, Some(t)),
+                            Some(t) => {
+                                // Tip is pending, check for previous finalized commitment
+                                let finalized = match t.prev_root {
+                                    Some(prev_root) => {
+                                        let ck = CommitmentKey::new::<H>(&slabel, prev_root);
+                                        src.get_commitment(&ck)?
+                                    }
+                                    None => None,
+                                };
+                                (Some(t), finalized)
+                            }
+                            None => (None, None),
+                        };
 
-                            // Determine pending and finalized tips
-                            let (pending_tip, finalized_tip) = match tip {
-                                Some(t) if t.is_finalized(height) => {
-                                    (None, Some(t))
-                                }
-                                Some(t) => {
-                                    // Tip is pending, check for previous finalized commitment
-                                    let finalized = match t.prev_root {
-                                        Some(prev_root) => {
-                                            let ck = CommitmentKey::new::<H>(&slabel, prev_root);
-                                            src.get_commitment(&ck)?
-                                        }
-                                        None => None,
-                                    };
-                                    (Some(t), finalized)
-                                }
-                                None => (None, None),
-                            };
-
-                            Some(DelegateContext {
-                                space: slabel,
-                                pending_tip,
-                                finalized_tip,
-                            })
-                        }
-                        None => None,
+                        Some(DelegateContext {
+                            subject: slabel,
+                            pending_tip,
+                            finalized_tip,
+                        })
                     }
-                };
+                    None => None,
+                }
+            };
 
-                inputs.push(Stxo {
-                    n,
-                    ptrout,
-                    delegate,
-                });
-            }
+            inputs.push(Stxo {
+                n,
+                numout,
+                delegate,
+            });
         }
 
-        let mut sptrs_with_delegations = Vec::with_capacity(space_outputs.len());
+        let mut nums_with_delegations = Vec::with_capacity(space_outputs.len());
         for spaceout in space_outputs {
-            let rsk = RegistrySptrKey::from_sptr::<H>(Sptr::from_spk::<H>(spaceout.script_pubkey));
+            let rsk = DelegatorKey::from_id::<H>(NumId::from_spk::<H>(spaceout.script_pubkey));
             if src.get_delegator(&rsk)?.is_some() {
-                sptrs_with_delegations.push(rsk);
+                nums_with_delegations.push(rsk);
+            }
+        }
+        for input in &inputs {
+            let dk = DelegatorKey::from_id::<H>(
+                NumId::from_spk::<H>(input.numout.script_pubkey.clone()),
+            );
+            if !nums_with_delegations.contains(&dk) {
+                if src.get_delegator(&dk)?.is_some() {
+                    nums_with_delegations.push(dk);
+                }
             }
         }
 
-        // Build relevant SPTR script pubkeys for existence checks
-        let relevant_sptr_spks = tx.output
+        // Output script pubkeys that already have a num (skip minting duplicates)
+        let existing_num_spks = tx
+            .output
             .iter()
             .filter(|out| out.is_ptr_output())
             .filter_map(|out| {
-                let sptr = Sptr::from_spk::<H>(out.script_pubkey.clone());
-                src.get_ptr_outpoint(&sptr)
+                let id = NumId::from_spk::<H>(out.script_pubkey.clone());
+                src.get_num_outpoint_by_id(&id)
                     .ok()?
                     .map(|_| out.script_pubkey.clone())
             })
@@ -483,8 +525,8 @@ impl TxContext {
 
         Ok(Some(TxContext {
             inputs,
-            relevant_sptr_spks,
-            sptrs_with_delegations
+            existing_num_spks,
+            nums_with_delegations,
         }))
     }
 }
@@ -502,7 +544,8 @@ impl Validator {
     }
 
     pub fn process<H: KeyHasher>(
-        &self, height: u32,
+        &self,
+        height: u32,
         tx: &Transaction,
         tx_pos: u16,
         mut ctx: TxContext,
@@ -523,38 +566,49 @@ impl Validator {
         let data_op = find_op_set_data(&tx.output);
         let has_spaces = !spent_space_utxos.is_empty() || !new_space_utxos.is_empty();
 
-        // Revoke sptr -> space delegations for spent space UTXOs
+        // Revoke num id -> space delegations for spent space UTXOs
         changeset.revoked_delegations = spent_space_utxos
             .into_iter()
             .filter_map(|spent| {
                 spent.space.as_ref().map(|space| {
-                    let sptr = Sptr::from_spk::<H>(spent.script_pubkey);
+                    let id = NumId::from_spk::<H>(spent.script_pubkey);
                     DelegationInfo {
-                        space: space.name.clone(),
-                        sptr,
+                        subject: space.name.clone(),
+                        id,
                     }
                 })
             })
             .collect();
 
-        // Revoke delegations for spent numeric PTRs that had an active
-        // numeric delegation. Named space delegations are handled above.
+        // Revoke num to num delegations only when the source num is spent
+        // and a delegation actually exists at that address.
         changeset.revoked_delegations.extend(
-            ctx.inputs.iter()
-                .filter(|s|
-                    s.delegate.as_ref().is_some_and(|d| d.space.is_numeric()))
-                .map(|input| DelegationInfo {
-                    space: input.ptrout.sptr.numeric.to_slabel(),
-                    sptr: input.ptrout.sptr.id,
-                })
+            ctx.inputs
+                .iter()
+                .filter_map(|input| {
+                    let operator_id = NumId::from_spk::<H>(input.numout.script_pubkey.clone());
+                    if operator_id == input.numout.num.id {
+                        return None;
+                    }
+                    let dk = DelegatorKey::from_id::<H>(operator_id);
+                    if !ctx.nums_with_delegations.contains(&dk) {
+                        return None;
+                    }
+                    Some(DelegationInfo {
+                        subject: input.numout.num.name.to_slabel(),
+                        id: operator_id,
+                    })
+                }),
         );
 
-        // Clear revoked sptrs so they can be redelegated in the same tx
-        let revoked_keys: Vec<RegistrySptrKey> = changeset.revoked_delegations
+        // Clear revoked num ids so they can be redelegated in the same tx
+        let revoked_keys: Vec<DelegatorKey> = changeset
+            .revoked_delegations
             .iter()
-            .map(|rd| RegistrySptrKey::from_sptr::<H>(rd.sptr))
+            .map(|rd| DelegatorKey::from_id::<H>(rd.id))
             .collect();
-        ctx.sptrs_with_delegations.retain(|rsk| !revoked_keys.contains(rsk));
+        ctx.nums_with_delegations
+            .retain(|rsk| !revoked_keys.contains(rsk));
 
         // Create delegations for owned spaces (Transfer covenant only).
         // Spaces still in auction (Bid covenant) are not delegatable.
@@ -565,16 +619,14 @@ impl Validator {
                     return None;
                 }
 
-                let sptr = Sptr::from_spk::<H>(created.script_pubkey.clone());
-                let rsk = RegistrySptrKey::from_sptr::<H>(sptr);
-                if ctx.sptrs_with_delegations.contains(&rsk) {
+                let id = NumId::from_spk::<H>(created.script_pubkey.clone());
+                let dk = DelegatorKey::from_id::<H>(id);
+                if ctx.nums_with_delegations.contains(&dk) {
                     return None;
                 }
-                created.space.as_ref().map(|space| {
-                    DelegationInfo {
-                        space: space.name.clone(),
-                        sptr,
-                    }
+                created.space.as_ref().map(|space| DelegationInfo {
+                    subject: space.name.clone(),
+                    id,
                 })
             })
             .collect();
@@ -592,12 +644,10 @@ impl Validator {
                         // Rollback applies to ALL delegates with pending commitments
                         if let Some(pending) = delegate.pending_tip {
                             if !pending.is_finalized(height) {
-                                changeset.revoked_commitments.push(
-                                    CommitmentInfo {
-                                        space: delegate.space.clone(),
-                                        commitment: pending,
-                                    }
-                                );
+                                changeset.revoked_commitments.push(CommitmentInfo {
+                                    space: delegate.subject.clone(),
+                                    commitment: pending,
+                                });
                             }
                         }
                     }
@@ -622,15 +672,13 @@ impl Validator {
                             };
                             // Revoke pending commitment
                             if let Some(pending) = delegate.pending_tip {
-                                changeset.revoked_commitments.push(
-                                    CommitmentInfo {
-                                        space: delegate.space.clone(),
-                                        commitment: pending,
-                                    }
-                                );
+                                changeset.revoked_commitments.push(CommitmentInfo {
+                                    space: delegate.subject.clone(),
+                                    commitment: pending,
+                                });
                             }
                             changeset.commitments.push(CommitmentInfo {
-                                space: delegate.space,
+                                space: delegate.subject,
                                 commitment,
                             });
                         }
@@ -640,30 +688,41 @@ impl Validator {
             }
             // Process spend
             changeset.spends.push(input_ctx.n);
-            self.process_spend(tx, input_ctx.n, input_ctx.ptrout, &new_space_utxos, &mut changeset, height, &data_op);
+            self.process_spend(
+                tx,
+                input_ctx.n,
+                input_ctx.numout,
+                &new_space_utxos,
+                &mut changeset,
+                height,
+                &data_op,
+            );
         }
 
-        // Process new PTR outputs
+        // Process new nums
         for (n, output) in tx.output.iter().enumerate() {
             // Skip if not a PTR output or already processed
             if !output.is_ptr_output()
                 || changeset.creates.iter().any(|x| x.n == n)
-                || new_space_utxos.iter().any(|x| x.n == n) {
+                || new_space_utxos.iter().any(|x| x.n == n)
+            {
                 continue;
             }
 
-            // Skip if SPTR already exists
-            if ctx.relevant_sptr_spks
+            // Skip if num id already exists
+            if ctx
+                .existing_num_spks
                 .iter()
-                .any(|spk| output.script_pubkey.as_bytes() == spk.as_bytes()) {
+                .any(|spk| output.script_pubkey.as_bytes() == spk.as_bytes())
+            {
                 continue;
             }
 
-            changeset.creates.push(PtrOut {
+            changeset.creates.push(NumOut {
                 n,
-                sptr: Ptr {
-                    id: Sptr::from_spk::<H>(output.script_pubkey.clone()),
-                    numeric: SNumeric::new(height, tx_pos),
+                num: Num {
+                    id: NumId::from_spk::<H>(output.script_pubkey.clone()),
+                    name: SNumeric::new(height, tx_pos, n as u16),
                     data: data_op.clone(),
                     last_update: height,
                 },
@@ -672,21 +731,25 @@ impl Validator {
             });
         }
 
-        // Create delegations for numeric PTRs that opt in via output
+        // Create delegations for nums that opt in via output
         // value ending in 8. Most numerics don't need commitments, so this
         // avoids creating a delegation entry for every PTR.
-        // Skipped for txs involving spaces to prevent a numeric delegation
-        // from overwriting a space delegation sharing the same sptr.
+        // Skipped for txs involving spaces to prevent a nums delegation
+        // from overwriting a space delegation sharing the same num id.
         if !has_spaces {
             for created in &changeset.creates {
+                // Here we are only concerned with the main num that wants to delegate....
                 if created.value.to_sat() % 10 != 8 {
                     continue;
                 }
-                let rsk = RegistrySptrKey::from_sptr::<H>(created.sptr.id);
-                if !ctx.sptrs_with_delegations.contains(&rsk) {
+
+                // The current spk of the num points to the operator
+                let operator_id = NumId::from_spk::<H>(created.script_pubkey.clone());
+                let operator_key = DelegatorKey::from_id::<H>(operator_id);
+                if !ctx.nums_with_delegations.contains(&operator_key) {
                     changeset.new_delegations.push(DelegationInfo {
-                        space: created.sptr.numeric.to_slabel(),
-                        sptr: created.sptr.id,
+                        subject: created.num.name.to_slabel(),
+                        id: operator_id,
                     });
                 }
             }
@@ -699,15 +762,15 @@ impl Validator {
         &self,
         tx: &Transaction,
         input_index: usize,
-        mut ptrout: PtrOut,
+        mut numout: NumOut,
         new_space_utxos: &Vec<SpaceOut>,
         changeset: &mut TxChangeSet,
         height: u32,
         data: &Option<Bytes>,
     ) {
-        let mut ptr = ptrout.sptr;
+        let mut ptr = numout.num;
         // if a corresponding output at the same index has the same value,
-        // that output becomes the PTR
+        // that output becomes the num
         let mut output_index = input_index;
         let mut output = match tx.output.get(input_index) {
             None => return, // cannot be rebound, if N doesn't exist, then we can skip n+1 rule check
@@ -715,11 +778,11 @@ impl Validator {
         };
 
         // if the values don't match, then we assume it's a trading tx - ptr should be at n+1
-        if output.value != ptrout.value {
+        if output.value != numout.value {
             output_index = input_index + 1;
             output = match tx.output.get(output_index) {
                 None => return, // no rebounds
-                Some(output) => output
+                Some(output) => output,
             };
         }
 
@@ -733,18 +796,17 @@ impl Validator {
         // 1. A data OP_RETURN is present
         // 2. PTR is P2TR and input uses SIGHASH_ALL (prevents malicious data injection)
         if let Some(new_data) = data {
-            if ptrout.script_pubkey.is_p2tr() && is_p2tr_sighash_all(tx, input_index) {
+            if numout.script_pubkey.is_p2tr() && is_p2tr_sighash_all(tx, input_index) {
                 ptr.data = Some(new_data.clone());
             }
         }
-        ptrout.n = output_index;
-        ptrout.value = output.value;
-        ptrout.script_pubkey = output.script_pubkey.clone();
-        ptrout.sptr = ptr;
-        changeset.creates.push(ptrout);
+        numout.n = output_index;
+        numout.value = output.value;
+        numout.script_pubkey = output.script_pubkey.clone();
+        numout.num = ptr;
+        changeset.creates.push(numout);
     }
 }
-
 
 pub enum CommitmentOp {
     /// Add one or more new commitments
@@ -753,7 +815,7 @@ pub enum CommitmentOp {
     Rollback,
 }
 
-pub enum PtrOp {
+pub enum NumOp {
     Commitment(CommitmentOp),
     Data(Vec<u8>),
 }
@@ -765,28 +827,25 @@ pub fn find_op_commit(tx_outputs: &[TxOut]) -> Option<CommitmentOp> {
     tx_outputs.iter().find_map(|s| {
         let mut instructions = s.script_pubkey.instructions().skip(1);
         match (instructions.next()?.ok()?, instructions.next()?.ok()?) {
-            (Instruction::Op(OP_PUSHNUM_2), Instruction::PushBytes(payload)) =>
-                {
-                    if payload.is_empty() {
-                        Some(CommitmentOp::Rollback)
-                    } else if payload.len() % 32 != 0 {
-                        None
-                    } else {
-                        let mut commitments = Vec::with_capacity(payload.len() / 32);
-                        for chunk in payload.as_bytes().chunks_exact(32) {
-                            let mut commitment = [0u8; 32];
-                            commitment.copy_from_slice(chunk);
-                            commitments.push(commitment);
-                        }
-                        Some(CommitmentOp::Commit(commitments))
+            (Instruction::Op(OP_PUSHNUM_2), Instruction::PushBytes(payload)) => {
+                if payload.is_empty() {
+                    Some(CommitmentOp::Rollback)
+                } else if payload.len() % 32 != 0 {
+                    None
+                } else {
+                    let mut commitments = Vec::with_capacity(payload.len() / 32);
+                    for chunk in payload.as_bytes().chunks_exact(32) {
+                        let mut commitment = [0u8; 32];
+                        commitment.copy_from_slice(chunk);
+                        commitments.push(commitment);
                     }
-
-                },
+                    Some(CommitmentOp::Commit(commitments))
+                }
+            }
             _ => None,
         }
     })
 }
-
 
 // Create commitment scripts
 // Format: OP_RETURN OP_PUSHNUM_2 <commitments>
@@ -813,7 +872,6 @@ pub fn create_commitment_script(op: &CommitmentOp) -> ScriptBuf {
     builder.into_script()
 }
 
-
 /// Check if an input uses SIGHASH_ALL for a P2TR key path spend
 /// Per BIP 341:
 /// - 64 bytes = SIGHASH_DEFAULT (0x00), equivalent to SIGHASH_ALL
@@ -834,13 +892,13 @@ fn is_p2tr_sighash_all(tx: &Transaction, input_index: usize) -> bool {
     let sig = &witness[0];
 
     match sig.len() {
-        64 => true, // SIGHASH_DEFAULT (0x00) - equivalent to SIGHASH_ALL
+        64 => true,            // SIGHASH_DEFAULT (0x00) - equivalent to SIGHASH_ALL
         65 => sig[64] == 0x01, // SIGHASH_ALL (0x01)
         _ => false,
     }
 }
 
-pub fn is_ptr_minting_locktime(lock_time: &LockTime) -> bool {
+pub fn is_num_minting_locktime(lock_time: &LockTime) -> bool {
     if let LockTime::Seconds(s) = lock_time {
         return s.to_consensus_u32() % 1000 == 777;
     }
@@ -859,7 +917,7 @@ impl PtrTrackableOutput for TxOut {
 
 #[cfg(feature = "serde")]
 mod serde_helpers {
-    use serde::{Deserializer, Serializer, Deserialize};
+    use serde::{Deserialize, Deserializer, Serializer};
 
     pub fn serialize_hash_serde<S>(bytes: &[u8; 32], serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -920,8 +978,8 @@ use serde_helpers::*;
 
 #[cfg(feature = "serde")]
 mod hash_key_serde {
-    use serde::{Deserializer, Serializer};
     use super::serde_helpers::*;
+    use serde::{Deserializer, Serializer};
 
     macro_rules! impl_hash_key_serde {
         ($ty:ident) => {
@@ -939,8 +997,6 @@ mod hash_key_serde {
         };
     }
 
-    impl_hash_key_serde!(RegistryKey);
+    impl_hash_key_serde!(CommitmentTipKey);
     impl_hash_key_serde!(CommitmentKey);
 }
-
-
