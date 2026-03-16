@@ -7,11 +7,11 @@ use spaces_client::{
     },
     wallets::{AddressKind, WalletResponse},
 };
-use spaces_client::rpc::{CommitParams, CreatePtrParams, DelegateParams, SetFallbackParams, Subject, TransferSpacesParams};
+use spaces_client::rpc::{CommitParams, CreateNumParams, DelegateParams, SetFallbackParams, Subject, TransferSpacesParams};
 use spaces_client::store::Sha256;
 use spaces_protocol::{bitcoin, bitcoin::{FeeRate}};
 use spaces_protocol::bitcoin::hashes::{sha256, Hash};
-use spaces_ptr::sptr::Sptr;
+use spaces_nums::num_id::NumId;
 use spaces_testutil::TestRig;
 use spaces_wallet::{export::WalletExport};
 use spaces_wallet::address::SpaceAddress;
@@ -80,9 +80,9 @@ async fn mine_and_sync(rig: &TestRig, blocks: usize) -> anyhow::Result<()> {
     sync_all(rig).await
 }
 
-// ============== Test: Basic SPTR Creation ==============
+// ============== Test: Basic Num Id Creation ==============
 
-async fn it_should_create_sptrs(rig: &TestRig) -> anyhow::Result<()> {
+async fn it_should_create_nums(rig: &TestRig) -> anyhow::Result<()> {
     rig.wait_until_wallet_synced(ALICE).await?;
 
     // Create ptr bound to addr0
@@ -90,12 +90,10 @@ async fn it_should_create_sptrs(rig: &TestRig) -> anyhow::Result<()> {
     let addr0_spk = bitcoin::address::Address::from_str(&addr0)
         .expect("valid").assume_checked()
         .script_pubkey();
-    let addr0_spk_string = hex::encode(addr0_spk.as_bytes());
-
     let create0 = wallet_do(
         rig,
         ALICE,
-        vec![RpcWalletRequest::CreatePtr(CreatePtrParams { spk: addr0_spk_string.clone() })],
+        vec![RpcWalletRequest::CreateNum(CreateNumParams { bind_spk: Some(addr0_spk.clone()) })],
         false,
     ).await.expect("CreatePtr addr0");
     assert!(wallet_res_err(&create0).is_ok(), "CreatePtr(addr0) must not error");
@@ -106,11 +104,11 @@ async fn it_should_create_sptrs(rig: &TestRig) -> anyhow::Result<()> {
         .expect("valid addr0")
         .assume_checked()
         .script_pubkey();
-    let sptr0 = Sptr::from_spk::<Sha256>(spk0.clone());
+    let id0 = NumId::from_spk::<Sha256>(spk0.clone());
 
-    let ptr0 = rig.spaced.client.get_ptr(Subject::Ptr(sptr0)).await?
+    let ptr0 = rig.spaced.client.get_num(Subject::NumId(id0)).await?
         .expect("ptr must exist after first CreatePtr");
-    let bound_spk_before = ptr0.ptrout.script_pubkey.clone();
+    let bound_spk_before = ptr0.numout.script_pubkey.clone();
 
     // Transfer ptr to addr1 (binding should change)
     let addr1 = rig.spaced.client.wallet_get_new_address(BOB, AddressKind::Space).await?;
@@ -118,7 +116,7 @@ async fn it_should_create_sptrs(rig: &TestRig) -> anyhow::Result<()> {
         rig,
         ALICE,
         vec![RpcWalletRequest::Transfer(TransferSpacesParams {
-            spaces: vec![Subject::Ptr(sptr0)],
+            spaces: vec![Subject::NumId(id0)],
             to: Some(addr1.clone()),
             data: None,
         })],
@@ -132,9 +130,9 @@ async fn it_should_create_sptrs(rig: &TestRig) -> anyhow::Result<()> {
         .expect("valid addr1")
         .script_pubkey();
 
-    let ptr_after_xfer = rig.spaced.client.get_ptr(Subject::Ptr(sptr0)).await?
+    let ptr_after_xfer = rig.spaced.client.get_num(Subject::NumId(id0)).await?
         .expect("ptr must still resolve after transfer");
-    let bound_spk_after = ptr_after_xfer.ptrout.script_pubkey.clone();
+    let bound_spk_after = ptr_after_xfer.numout.script_pubkey.clone();
 
     assert_ne!(bound_spk_before, bound_spk_after, "binding must change after transfer");
     assert_eq!(bound_spk_after, spk1, "binding must equal new destination spk");
@@ -143,16 +141,16 @@ async fn it_should_create_sptrs(rig: &TestRig) -> anyhow::Result<()> {
     let dup = wallet_do(
         rig,
         ALICE,
-        vec![RpcWalletRequest::CreatePtr(CreatePtrParams { spk: addr0_spk_string })],
+        vec![RpcWalletRequest::CreateNum(CreateNumParams { bind_spk: Some(addr0_spk.clone()) })],
         true,
     ).await.expect("duplicate CreatePtr(addr0)");
     assert!(wallet_res_err(&dup).is_ok(), "duplicate CreatePtr should not error");
 
     mine_and_sync(rig, 1).await?;
 
-    let ptr_after_dup = rig.spaced.client.get_ptr(Subject::Ptr(sptr0)).await?
+    let ptr_after_dup = rig.spaced.client.get_num(Subject::NumId(id0)).await?
         .expect("ptr must still resolve after duplicate");
-    let bound_spk_final = ptr_after_dup.ptrout.script_pubkey.clone();
+    let bound_spk_final = ptr_after_dup.numout.script_pubkey.clone();
 
     assert_eq!(bound_spk_final, spk1, "duplicate CreatePtr must be ignored");
     assert_ne!(bound_spk_final, spk0, "binding must not revert to original");
@@ -172,12 +170,12 @@ async fn it_should_commit_and_rollback(rig: &TestRig) -> anyhow::Result<()> {
     let space_name = owned.spaceout.space.as_ref()
         .expect("space must exist").name.clone();
 
-    // Setup: Delegate the space to establish SPTR
+    // Setup: Delegate the space to establish Num Id
     let delegate = wallet_do(
         rig,
         ALICE,
         vec![RpcWalletRequest::Delegate(DelegateParams {
-            space: space_name.clone(),
+            subject: space_name.clone().into(),
         })],
         false,
     ).await?;
@@ -185,7 +183,7 @@ async fn it_should_commit_and_rollback(rig: &TestRig) -> anyhow::Result<()> {
     mine_and_sync(rig, 1).await?;
 
     // Verify delegation is set up
-    rig.spaced.client.get_delegation(space_name.clone()).await?
+    rig.spaced.client.get_delegation(space_name.clone().into()).await?
         .expect("delegation should be established");
 
     // Test 1: Make initial commitment [1u8;32]
@@ -194,7 +192,7 @@ async fn it_should_commit_and_rollback(rig: &TestRig) -> anyhow::Result<()> {
         rig,
         ALICE,
         vec![RpcWalletRequest::Commit(CommitParams {
-            space: space_name.clone(),
+            subject: space_name.clone().into(),
             root: Some(sha256::Hash::from_slice(&[1u8;32]).expect("valid")),
         })],
         false,
@@ -202,7 +200,7 @@ async fn it_should_commit_and_rollback(rig: &TestRig) -> anyhow::Result<()> {
     assert!(wallet_res_err(&commit1).is_ok());
     mine_and_sync(rig, 1).await?;
 
-    let tip = rig.spaced.client.get_commitment(space_name.clone(), None).await?
+    let tip = rig.spaced.client.get_commitment(space_name.clone().into(), None).await?
         .expect("commitment should exist");
     assert_eq!(tip.state_root, [1u8;32]);
     assert_eq!(tip.prev_root, None);
@@ -213,7 +211,7 @@ async fn it_should_commit_and_rollback(rig: &TestRig) -> anyhow::Result<()> {
         rig,
         ALICE,
         vec![RpcWalletRequest::Commit(CommitParams {
-            space: space_name.clone(),
+            subject: space_name.clone().into(),
             root: None, // None = rollback
         })],
         false,
@@ -221,7 +219,7 @@ async fn it_should_commit_and_rollback(rig: &TestRig) -> anyhow::Result<()> {
     assert!(wallet_res_err(&rollback).is_ok());
     mine_and_sync(rig, 1).await?;
 
-    let tip_after_rollback = rig.spaced.client.get_commitment(space_name.clone(), None).await?;
+    let tip_after_rollback = rig.spaced.client.get_commitment(space_name.clone().into(), None).await?;
     assert_eq!(tip_after_rollback, None, "commitment should be rolled back");
 
     // Test 3: Create new commitment and finalize it
@@ -230,7 +228,7 @@ async fn it_should_commit_and_rollback(rig: &TestRig) -> anyhow::Result<()> {
         rig,
         ALICE,
         vec![RpcWalletRequest::Commit(CommitParams {
-            space: space_name.clone(),
+            subject: space_name.clone().into(),
             root: Some(sha256::Hash::from_slice(&[2u8;32]).expect("valid")),
         })],
         false,
@@ -248,7 +246,7 @@ async fn it_should_commit_and_rollback(rig: &TestRig) -> anyhow::Result<()> {
         rig,
         ALICE,
         vec![RpcWalletRequest::Commit(CommitParams {
-            space: space_name.clone(),
+            subject: space_name.clone().into(),
             root: None, // Rollback attempt
         })],
         false,
@@ -256,7 +254,7 @@ async fn it_should_commit_and_rollback(rig: &TestRig) -> anyhow::Result<()> {
     assert!(wallet_res_err(&rollback_finalized).is_ok());
     mine_and_sync(rig, 1).await?;
 
-    let tip_after_failed_rollback = rig.spaced.client.get_commitment(space_name.clone(), None).await?
+    let tip_after_failed_rollback = rig.spaced.client.get_commitment(space_name.clone().into(), None).await?
         .expect("finalized commitment should still exist");
     assert_eq!(tip_after_failed_rollback.state_root, [2u8;32],
                "finalized commitment should not be rolled back");
@@ -267,7 +265,7 @@ async fn it_should_commit_and_rollback(rig: &TestRig) -> anyhow::Result<()> {
         rig,
         ALICE,
         vec![RpcWalletRequest::Commit(CommitParams {
-            space: space_name.clone(),
+            subject: space_name.clone().into(),
             root: Some(sha256::Hash::from_slice(&[3u8;32]).expect("valid")),
         })],
         false,
@@ -275,14 +273,14 @@ async fn it_should_commit_and_rollback(rig: &TestRig) -> anyhow::Result<()> {
     assert!(wallet_res_err(&commit3).is_ok());
     mine_and_sync(rig, 1).await?;
 
-    let tip_final = rig.spaced.client.get_commitment(space_name.clone(), None).await?
+    let tip_final = rig.spaced.client.get_commitment(space_name.clone().into(), None).await?
         .expect("new commitment should exist");
     assert_eq!(tip_final.state_root, [3u8;32]);
     assert_eq!(tip_final.prev_root, Some([2u8;32]));
 
     // Verify finalized [2u8;32] still exists
     let finalized = rig.spaced.client.get_commitment(
-        space_name.clone(),
+        space_name.clone().into(),
         Some(sha256::Hash::from_slice(&[2u8;32]).expect("valid"))
     ).await?.expect("finalized commitment should be preserved");
     assert_eq!(finalized.state_root, [2u8;32]);
@@ -293,7 +291,7 @@ async fn it_should_commit_and_rollback(rig: &TestRig) -> anyhow::Result<()> {
         rig,
         ALICE,
         vec![RpcWalletRequest::Commit(CommitParams {
-            space: space_name.clone(),
+            subject: space_name.clone().into(),
             root: None,
         })],
         false,
@@ -301,7 +299,7 @@ async fn it_should_commit_and_rollback(rig: &TestRig) -> anyhow::Result<()> {
     assert!(wallet_res_err(&rollback3).is_ok());
     mine_and_sync(rig, 1).await?;
 
-    let tip_after_rollback = rig.spaced.client.get_commitment(space_name.clone(), None).await?
+    let tip_after_rollback = rig.spaced.client.get_commitment(space_name.clone().into(), None).await?
         .expect("should still have finalized commitment after rollback");
     assert_eq!(tip_after_rollback.state_root, [2u8;32],
         "registry should point back to finalized [2u8;32] after rolling back pending");
@@ -324,13 +322,13 @@ async fn it_should_handle_multiple_commitments(rig: &TestRig) -> anyhow::Result<
     let space2_name = alice_spaces.owned[1].spaceout.space.as_ref()
         .expect("space must exist").name.clone();
 
-    // Setup: Delegate both spaces to establish SPTRs
+    // Setup: Delegate both spaces to establish Num Ids
     for space_name in [&space1_name, &space2_name] {
         let delegate = wallet_do(
             rig,
             ALICE,
             vec![RpcWalletRequest::Delegate(DelegateParams {
-                space: space_name.clone(),
+                subject: space_name.clone().into(),
             })],
             false,
         ).await?;
@@ -339,19 +337,19 @@ async fn it_should_handle_multiple_commitments(rig: &TestRig) -> anyhow::Result<
     mine_and_sync(rig, 1).await?;
 
     // Verify both delegations exist
-    let sptr1 = rig.spaced.client.get_delegation(space1_name.clone()).await?
+    let id1 = rig.spaced.client.get_delegation(space1_name.clone().into()).await?
         .expect("space1 should have delegation");
-    let sptr2 = rig.spaced.client.get_delegation(space2_name.clone()).await?
+    let id2 = rig.spaced.client.get_delegation(space2_name.clone().into()).await?
         .expect("space2 should have delegation");
 
-    println!("Space 1: {} -> SPTR: {}", space1_name, sptr1);
-    println!("Space 2: {} -> SPTR: {}", space2_name, sptr2);
+    println!("Space 1: {} -> Num Id: {}", space1_name, id1);
+    println!("Space 2: {} -> Num Id: {}", space2_name, id2);
 
     // Verify delegations match delegator
-    let delegator1 = rig.spaced.client.get_delegator(Subject::Ptr(sptr1)).await?
-        .expect("sptr1 delegator should exist");
-    let delegator2 = rig.spaced.client.get_delegator(Subject::Ptr(sptr2)).await?
-        .expect("sptr2 delegator should exist");
+    let delegator1 = rig.spaced.client.get_delegator(Subject::NumId(id1)).await?
+        .expect("id1 delegator should exist");
+    let delegator2 = rig.spaced.client.get_delegator(Subject::NumId(id2)).await?
+        .expect("id2 delegator should exist");
 
     assert_eq!(delegator1.to_string(), space1_name.to_string(), "space 1 delegators dont match");
     assert_eq!(delegator2.to_string(), space2_name.to_string(), "space 2 delegators dont match");
@@ -364,11 +362,11 @@ async fn it_should_handle_multiple_commitments(rig: &TestRig) -> anyhow::Result<
         ALICE,
         vec![
             RpcWalletRequest::Commit(CommitParams {
-                space: space1_name.clone(),
+                subject: space1_name.clone().into(),
                 root: Some(sha256::Hash::from_slice(&[10u8;32]).expect("valid")),
             }),
             RpcWalletRequest::Commit(CommitParams {
-                space: space2_name.clone(),
+                subject: space2_name.clone().into(),
                 root: Some(sha256::Hash::from_slice(&[20u8;32]).expect("valid")),
             }),
         ],
@@ -378,9 +376,9 @@ async fn it_should_handle_multiple_commitments(rig: &TestRig) -> anyhow::Result<
     mine_and_sync(rig, 1).await?;
 
     // Verify both commitments were created
-    let commit2 = rig.spaced.client.get_commitment(space2_name.clone(), None).await?
+    let commit2 = rig.spaced.client.get_commitment(space2_name.clone().into(), None).await?
         .expect("space2 should have commitment");
-    let commit1 = rig.spaced.client.get_commitment(space1_name.clone(), None).await?
+    let commit1 = rig.spaced.client.get_commitment(space1_name.clone().into(), None).await?
         .expect("space1 should have commitment");
 
 
@@ -394,11 +392,11 @@ async fn it_should_handle_multiple_commitments(rig: &TestRig) -> anyhow::Result<
         ALICE,
         vec![
             RpcWalletRequest::Commit(CommitParams {
-                space: space1_name.clone(),
+                subject: space1_name.clone().into(),
                 root: None, // rollback
             }),
             RpcWalletRequest::Commit(CommitParams {
-                space: space2_name.clone(),
+                subject: space2_name.clone().into(),
                 root: None, // rollback
             }),
         ],
@@ -408,8 +406,8 @@ async fn it_should_handle_multiple_commitments(rig: &TestRig) -> anyhow::Result<
     mine_and_sync(rig, 1).await?;
 
     // Verify both were rolled back
-    let commit1_after = rig.spaced.client.get_commitment(space1_name.clone(), None).await?;
-    let commit2_after = rig.spaced.client.get_commitment(space2_name.clone(), None).await?;
+    let commit1_after = rig.spaced.client.get_commitment(space1_name.clone().into(), None).await?;
+    let commit2_after = rig.spaced.client.get_commitment(space2_name.clone().into(), None).await?;
 
     assert_eq!(commit1_after, None, "space1 should be rolled back");
     assert_eq!(commit2_after, None, "space2 should be rolled back");
@@ -421,7 +419,7 @@ async fn it_should_handle_multiple_commitments(rig: &TestRig) -> anyhow::Result<
         ALICE,
         vec![
             RpcWalletRequest::Commit(CommitParams {
-                space: space1_name.clone(),
+                subject: space1_name.clone().into(),
                 root: Some(sha256::Hash::from_slice(&[30u8;32]).expect("valid")),
             }),
         ],
@@ -430,9 +428,9 @@ async fn it_should_handle_multiple_commitments(rig: &TestRig) -> anyhow::Result<
     assert!(wallet_res_err(&mixed).is_ok());
     mine_and_sync(rig, 1).await?;
 
-    let commit1_final = rig.spaced.client.get_commitment(space1_name.clone(), None).await?
+    let commit1_final = rig.spaced.client.get_commitment(space1_name.clone().into(), None).await?
         .expect("space1 should have new commitment");
-    let commit2_final = rig.spaced.client.get_commitment(space2_name.clone(), None).await?;
+    let commit2_final = rig.spaced.client.get_commitment(space2_name.clone().into(), None).await?;
 
     assert_eq!(commit1_final.state_root, [30u8;32], "space1 updated");
     assert_eq!(commit2_final, None, "space2 unchanged");
@@ -449,12 +447,12 @@ async fn it_should_override_pending_commitments(rig: &TestRig) -> anyhow::Result
     let space_name = alice_spaces.owned[0].spaceout.space.as_ref()
         .expect("space must exist").name.clone();
 
-    // Setup: Delegate the space to establish SPTR
+    // Setup: Delegate the space to establish Num Id
     let delegate = wallet_do(
         rig,
         ALICE,
         vec![RpcWalletRequest::Delegate(DelegateParams {
-            space: space_name.clone(),
+            subject: space_name.clone().into(),
         })],
         false,
     ).await?;
@@ -467,7 +465,7 @@ async fn it_should_override_pending_commitments(rig: &TestRig) -> anyhow::Result
         rig,
         ALICE,
         vec![RpcWalletRequest::Commit(CommitParams {
-            space: space_name.clone(),
+            subject: space_name.clone().into(),
             root: Some(sha256::Hash::from_slice(&[1u8;32]).expect("valid")),
         })],
         false,
@@ -481,7 +479,7 @@ async fn it_should_override_pending_commitments(rig: &TestRig) -> anyhow::Result
         rig,
         ALICE,
         vec![RpcWalletRequest::Commit(CommitParams {
-            space: space_name.clone(),
+            subject: space_name.clone().into(),
             root: Some(sha256::Hash::from_slice(&[2u8;32]).expect("valid")),
         })],
         false,
@@ -491,12 +489,12 @@ async fn it_should_override_pending_commitments(rig: &TestRig) -> anyhow::Result
 
     // Verify [1u8;32] is gone, [2u8;32] is tip
     let old_commit = rig.spaced.client.get_commitment(
-        space_name.clone(),
+        space_name.clone().into(),
         Some(sha256::Hash::from_slice(&[1u8;32]).expect("valid"))
     ).await?;
     assert_eq!(old_commit, None, "[1u8;32] should be overridden");
 
-    let tip = rig.spaced.client.get_commitment(space_name.clone(), None).await?
+    let tip = rig.spaced.client.get_commitment(space_name.clone().into(), None).await?
         .expect("tip should exist");
     assert_eq!(tip.state_root, [2u8;32]);
     assert_eq!(tip.prev_root, None, "no previous since [1u8;32] was overridden");
@@ -511,7 +509,7 @@ async fn it_should_override_pending_commitments(rig: &TestRig) -> anyhow::Result
         rig,
         ALICE,
         vec![RpcWalletRequest::Commit(CommitParams {
-            space: space_name.clone(),
+            subject: space_name.clone().into(),
             root: Some(sha256::Hash::from_slice(&[3u8;32]).expect("valid")),
         })],
         false,
@@ -521,12 +519,12 @@ async fn it_should_override_pending_commitments(rig: &TestRig) -> anyhow::Result
 
     // Verify [2u8;32] still exists and [3u8;32] chains from it
     let finalized = rig.spaced.client.get_commitment(
-        space_name.clone(),
+        space_name.clone().into(),
         Some(sha256::Hash::from_slice(&[2u8;32]).expect("valid"))
     ).await?.expect("[2u8;32] should still exist");
     assert_eq!(finalized.state_root, [2u8;32]);
 
-    let new_tip = rig.spaced.client.get_commitment(space_name.clone(), None).await?
+    let new_tip = rig.spaced.client.get_commitment(space_name.clone().into(), None).await?
         .expect("new tip should exist");
     assert_eq!(new_tip.state_root, [3u8;32]);
     assert_eq!(new_tip.prev_root, Some([2u8;32]));
@@ -534,7 +532,7 @@ async fn it_should_override_pending_commitments(rig: &TestRig) -> anyhow::Result
     Ok(())
 }
 
-async fn it_should_reject_duplicate_sptr_delegations(rig: &TestRig) -> anyhow::Result<()> {
+async fn it_should_reject_duplicate_num_id_delegations(rig: &TestRig) -> anyhow::Result<()> {
     sync_all(rig).await?;
 
     // Get two spaces that Alice owns
@@ -546,17 +544,17 @@ async fn it_should_reject_duplicate_sptr_delegations(rig: &TestRig) -> anyhow::R
     let space2_name = alice_spaces.owned[1].spaceout.space.as_ref()
         .expect("space must exist").name.clone();
 
-    println!("Testing SPTR uniqueness with {} and {}", space1_name, space2_name);
+    println!("Testing Num Id uniqueness with {} and {}", space1_name, space2_name);
 
-    // Get a common address to create the same SPTR
+    // Get a common address to create the same Num Id
     let common_addr = rig.spaced.client.wallet_get_new_address(ALICE, AddressKind::Space).await?;
     let common_spk = SpaceAddress::from_str(&common_addr)
         .expect("valid space address")
         .script_pubkey();
-    let common_sptr = Sptr::from_spk::<Sha256>(common_spk.clone());
+    let common_id = NumId::from_spk::<Sha256>(common_spk.clone());
 
     println!("Common address: {}", common_addr);
-    println!("Expected SPTR: {}", common_sptr);
+    println!("Expected Num Id: {}", common_id);
 
     // Transfer space1 to the common address
     println!("Transferring {} to common address...", space1_name);
@@ -564,7 +562,7 @@ async fn it_should_reject_duplicate_sptr_delegations(rig: &TestRig) -> anyhow::R
         rig,
         ALICE,
         vec![RpcWalletRequest::Transfer(TransferSpacesParams {
-            spaces: vec![Subject::Space(space1_name.clone())],
+            spaces: vec![Subject::Label(space1_name.clone())],
             to: Some(common_addr.clone()),
             data: None,
         })],
@@ -573,21 +571,21 @@ async fn it_should_reject_duplicate_sptr_delegations(rig: &TestRig) -> anyhow::R
     assert!(wallet_res_err(&transfer1).is_ok());
     mine_and_sync(rig, 1).await?;
 
-    // Verify the reverse mapping: SPTR -> space1
-    let delegator1 = rig.spaced.client.get_delegator(Subject::Ptr(common_sptr)).await?
-        .expect("common SPTR should have delegator");
-    assert_eq!(delegator1, space1_name, "common SPTR should point to space1");
+    // Verify the reverse mapping: Num Id -> space1
+    let delegator1 = rig.spaced.client.get_delegator(Subject::NumId(common_id)).await?
+        .expect("common Num Id should have delegator");
+    assert_eq!(delegator1, space1_name, "common Num Id should point to space1");
 
-    println!("✓ Space1 successfully claimed SPTR {} (reverse mapping: {} -> {})",
-        common_sptr, common_sptr, space1_name);
+    println!("✓ Space1 successfully claimed Num Id {} (reverse mapping: {} -> {})",
+        common_id, common_id, space1_name);
 
-    // Transfer space2 to the SAME address (same SPTR)
-    println!("Transferring {} to the same address (attempting to claim same SPTR)...", space2_name);
+    // Transfer space2 to the SAME address (same Num Id)
+    println!("Transferring {} to the same address (attempting to claim same Num Id)...", space2_name);
     let transfer2 = wallet_do(
         rig,
         ALICE,
         vec![RpcWalletRequest::Transfer(TransferSpacesParams {
-            spaces: vec![Subject::Space(space2_name.clone())],
+            spaces: vec![Subject::Label(space2_name.clone())],
             to: Some(common_addr.clone()),
             data: None,
         })],
@@ -597,26 +595,26 @@ async fn it_should_reject_duplicate_sptr_delegations(rig: &TestRig) -> anyhow::R
     mine_and_sync(rig, 1).await?;
 
     // Key test: Verify the reverse mapping was NOT overwritten
-    // The SPTR should still point to space1, not space2
-    let delegator_after = rig.spaced.client.get_delegator(Subject::Ptr(common_sptr)).await?
-        .expect("common SPTR should still have delegator");
+    // The Num Id should still point to space1, not space2
+    let delegator_after = rig.spaced.client.get_delegator(Subject::NumId(common_id)).await?
+        .expect("common Num Id should still have delegator");
     assert_eq!(delegator_after, space1_name,
-        "CRITICAL: common SPTR should still point to space1 (not overwritten by space2)");
+        "CRITICAL: common Num Id should still point to space1 (not overwritten by space2)");
 
     println!("✓ Space2 correctly rejected - reverse mapping preserved ({} -> {})",
-        common_sptr, space1_name);
+        common_id, space1_name);
 
-    // Note: get_delegation for both spaces will return Some(common_sptr) because
+    // Note: get_delegation for both spaces will return Some(common_id) because
     // both are at the same address, but only space1 actually owns the delegation
 
-    // Transfer space1 away to free up the SPTR
-    println!("Moving {} away to free up SPTR...", space1_name);
+    // Transfer space1 away to free up the Num Id
+    println!("Moving {} away to free up Num Id...", space1_name);
     let new_addr = rig.spaced.client.wallet_get_new_address(ALICE, AddressKind::Space).await?;
     let transfer_away = wallet_do(
         rig,
         ALICE,
         vec![RpcWalletRequest::Transfer(TransferSpacesParams {
-            spaces: vec![Subject::Space(space1_name.clone())],
+            spaces: vec![Subject::Label(space1_name.clone())],
             to: Some(new_addr),
             data: None,
         })],
@@ -625,19 +623,19 @@ async fn it_should_reject_duplicate_sptr_delegations(rig: &TestRig) -> anyhow::R
     assert!(wallet_res_err(&transfer_away).is_ok());
     mine_and_sync(rig, 1).await?;
 
-    // Verify common_sptr is now free (reverse mapping removed)
-    let delegator_freed = rig.spaced.client.get_delegator(Subject::Ptr(common_sptr)).await?;
-    assert_eq!(delegator_freed, None, "common SPTR should be free (no reverse mapping) after space1 moved");
+    // Verify common_id is now free (reverse mapping removed)
+    let delegator_freed = rig.spaced.client.get_delegator(Subject::NumId(common_id)).await?;
+    assert_eq!(delegator_freed, None, "common Num Id should be free (no reverse mapping) after space1 moved");
 
-    println!("✓ SPTR freed - reverse mapping removed");
+    println!("✓ Num Id freed - reverse mapping removed");
 
     // Now space2 should be able to claim it if we transfer it back
-    println!("Re-transferring {} to now-free SPTR...", space2_name);
+    println!("Re-transferring {} to now-free Num Id...", space2_name);
     let transfer2_retry = wallet_do(
         rig,
         ALICE,
         vec![RpcWalletRequest::Transfer(TransferSpacesParams {
-            spaces: vec![Subject::Space(space2_name.clone())],
+            spaces: vec![Subject::Label(space2_name.clone())],
             to: Some(common_addr),
             data: None,
         })],
@@ -647,18 +645,18 @@ async fn it_should_reject_duplicate_sptr_delegations(rig: &TestRig) -> anyhow::R
     mine_and_sync(rig, 1).await?;
 
     // Verify space2 now owns the reverse mapping
-    let delegator2_retry = rig.spaced.client.get_delegator(Subject::Ptr(common_sptr)).await?
-        .expect("common SPTR should have delegator");
+    let delegator2_retry = rig.spaced.client.get_delegator(Subject::NumId(common_id)).await?
+        .expect("common Num Id should have delegator");
     assert_eq!(delegator2_retry, space2_name,
-        "common SPTR should now point to space2 (reverse mapping updated)");
+        "common Num Id should now point to space2 (reverse mapping updated)");
 
-    println!("✓ Space2 successfully claimed SPTR after it was freed ({} -> {})",
-        common_sptr, space2_name);
+    println!("✓ Space2 successfully claimed Num Id after it was freed ({} -> {})",
+        common_id, space2_name);
 
     Ok(())
 }
 
-// ============== Test: Transfer Back to Original SPTR ==============
+// ============== Test: Transfer Back to Original Num Id ==============
 // Regression test for https://github.com/spacesprotocol/spaces/issues/134
 
 async fn it_should_restore_delegation_when_transferring_back(rig: &TestRig) -> anyhow::Result<()> {
@@ -669,7 +667,7 @@ async fn it_should_restore_delegation_when_transferring_back(rig: &TestRig) -> a
     let original_spk = SpaceAddress::from_str(&original_addr)
         .expect("valid space address")
         .script_pubkey();
-    let original_sptr = Sptr::from_spk::<Sha256>(original_spk.clone());
+    let original_id = NumId::from_spk::<Sha256>(original_spk.clone());
 
     // Get a space that Alice owns
     let alice_spaces = rig.spaced.client.wallet_list_spaces(ALICE).await?;
@@ -688,7 +686,7 @@ async fn it_should_restore_delegation_when_transferring_back(rig: &TestRig) -> a
         rig,
         ALICE,
         vec![RpcWalletRequest::Transfer(TransferSpacesParams {
-            spaces: vec![Subject::Space(space_name.clone())],
+            spaces: vec![Subject::Label(space_name.clone())],
             to: Some(original_addr.clone()),
             data: None,
         })],
@@ -698,26 +696,26 @@ async fn it_should_restore_delegation_when_transferring_back(rig: &TestRig) -> a
     mine_and_sync(rig, 1).await?;
 
     // Verify initial delegation is established
-    let initial_delegator = rig.spaced.client.get_delegator(Subject::Ptr(original_sptr)).await?
-        .expect("Original SPTR should have delegation after setup");
+    let initial_delegator = rig.spaced.client.get_delegator(Subject::NumId(original_id)).await?
+        .expect("Original Num Id should have delegation after setup");
     assert_eq!(initial_delegator, space_name);
-    println!("✓ Initial delegation established: {} -> {}", original_sptr, space_name);
+    println!("✓ Initial delegation established: {} -> {}", original_id, space_name);
 
-    // Step 2: Transfer space to a NEW address (different SPTR)
+    // Step 2: Transfer space to a NEW address (different Num Id)
     let new_addr = rig.spaced.client.wallet_get_new_address(ALICE, AddressKind::Space).await?;
     let new_spk = SpaceAddress::from_str(&new_addr)
         .expect("valid space address")
         .script_pubkey();
-    let new_sptr = Sptr::from_spk::<Sha256>(new_spk.clone());
+    let new_id = NumId::from_spk::<Sha256>(new_spk.clone());
 
     println!("\nStep 2: Transferring {} to new address...", space_name);
-    println!("New SPTR will be: {}", new_sptr);
+    println!("New Num Id will be: {}", new_id);
 
     let transfer1 = wallet_do(
         rig,
         ALICE,
         vec![RpcWalletRequest::Transfer(TransferSpacesParams {
-            spaces: vec![Subject::Space(space_name.clone())],
+            spaces: vec![Subject::Label(space_name.clone())],
             to: Some(new_addr.clone()),
             data: None,
         })],
@@ -726,18 +724,18 @@ async fn it_should_restore_delegation_when_transferring_back(rig: &TestRig) -> a
     assert!(wallet_res_err(&transfer1).is_ok());
     mine_and_sync(rig, 1).await?;
 
-    // Verify: original SPTR should have NO delegation now
-    let delegator_after_transfer1 = rig.spaced.client.get_delegator(Subject::Ptr(original_sptr)).await?;
+    // Verify: original Num Id should have NO delegation now
+    let delegator_after_transfer1 = rig.spaced.client.get_delegator(Subject::NumId(original_id)).await?;
     assert_eq!(delegator_after_transfer1, None,
-        "Original SPTR should have no delegation after space was transferred away");
-    println!("✓ Original SPTR delegation revoked: {:?}", delegator_after_transfer1);
+        "Original Num Id should have no delegation after space was transferred away");
+    println!("✓ Original Num Id delegation revoked: {:?}", delegator_after_transfer1);
 
-    // Verify: new SPTR should have the delegation
-    let delegator_new = rig.spaced.client.get_delegator(Subject::Ptr(new_sptr)).await?
-        .expect("New SPTR should have delegation");
+    // Verify: new Num Id should have the delegation
+    let delegator_new = rig.spaced.client.get_delegator(Subject::NumId(new_id)).await?
+        .expect("New Num Id should have delegation");
     assert_eq!(delegator_new, space_name,
-        "New SPTR should point to the space");
-    println!("✓ New SPTR has delegation: {} -> {}", new_sptr, delegator_new);
+        "New Num Id should point to the space");
+    println!("✓ New Num Id has delegation: {} -> {}", new_id, delegator_new);
 
     // Step 3: Transfer space BACK to original address
     println!("\nStep 3: Transferring {} BACK to original address...", space_name);
@@ -747,7 +745,7 @@ async fn it_should_restore_delegation_when_transferring_back(rig: &TestRig) -> a
         rig,
         ALICE,
         vec![RpcWalletRequest::Transfer(TransferSpacesParams {
-            spaces: vec![Subject::Space(space_name.clone())],
+            spaces: vec![Subject::Label(space_name.clone())],
             to: Some(original_addr.clone()),
             data: None,
         })],
@@ -756,22 +754,22 @@ async fn it_should_restore_delegation_when_transferring_back(rig: &TestRig) -> a
     assert!(wallet_res_err(&transfer2).is_ok());
     mine_and_sync(rig, 1).await?;
 
-    // KEY TEST: Original SPTR should have delegation RESTORED
-    let delegator_restored = rig.spaced.client.get_delegator(Subject::Ptr(original_sptr)).await?;
+    // KEY TEST: Original Num Id should have delegation RESTORED
+    let delegator_restored = rig.spaced.client.get_delegator(Subject::NumId(original_id)).await?;
     println!("Delegation after transfer back: {:?}", delegator_restored);
 
     assert!(delegator_restored.is_some(),
-        "Original SPTR should have delegation restored after transferring back!");
+        "Original Num Id should have delegation restored after transferring back!");
     assert_eq!(delegator_restored.unwrap(), space_name,
-        "Original SPTR should point to the space again");
+        "Original Num Id should point to the space again");
 
-    println!("✓ Original SPTR delegation RESTORED: {} -> {}", original_sptr, space_name);
+    println!("✓ Original Num Id delegation RESTORED: {} -> {}", original_id, space_name);
 
-    // Verify: new SPTR should have NO delegation now
-    let delegator_new_after = rig.spaced.client.get_delegator(Subject::Ptr(new_sptr)).await?;
+    // Verify: new Num Id should have NO delegation now
+    let delegator_new_after = rig.spaced.client.get_delegator(Subject::NumId(new_id)).await?;
     assert_eq!(delegator_new_after, None,
-        "New SPTR should have no delegation after space was transferred back");
-    println!("✓ New SPTR delegation revoked");
+        "New Num Id should have no delegation after space was transferred back");
+    println!("✓ New Num Id delegation revoked");
 
     println!("\n✓ Transfer-back delegation restoration working correctly!");
     Ok(())
@@ -788,25 +786,23 @@ async fn it_should_set_and_persist_ptr_data(rig: &TestRig) -> anyhow::Result<()>
     let addr0_spk = bitcoin::address::Address::from_str(&addr0)?
         .assume_checked()
         .script_pubkey();
-    let addr0_spk_string = hex::encode(addr0_spk.as_bytes());
-
     wallet_do(
         rig,
         ALICE,
-        vec![RpcWalletRequest::CreatePtr(CreatePtrParams {
-            spk: addr0_spk_string,
+        vec![RpcWalletRequest::CreateNum(CreateNumParams {
+            bind_spk: Some(addr0_spk.clone()),
         })],
         false,
     ).await?;
     mine_and_sync(rig, 1).await?;
 
-    let sptr = Sptr::from_spk::<Sha256>(addr0_spk.clone());
-    println!("SPTR created: {}", sptr);
+    let id = NumId::from_spk::<Sha256>(addr0_spk.clone());
+    println!("Num id created: {}", id);
 
     // Verify PTR exists with no data
-    let ptr_initial = rig.spaced.client.get_ptr(Subject::Ptr(sptr)).await?
+    let ptr_initial = rig.spaced.client.get_num(Subject::NumId(id)).await?
         .expect("ptr should exist");
-    assert_eq!(ptr_initial.ptrout.sptr.data, None, "PTR should have no data initially");
+    assert_eq!(ptr_initial.numout.num.data, None, "PTR should have no data initially");
 
     // Test 2: Set data on the PTR
     println!("\nTest 2: Set data on PTR");
@@ -815,7 +811,7 @@ async fn it_should_set_and_persist_ptr_data(rig: &TestRig) -> anyhow::Result<()>
         rig,
         ALICE,
         vec![RpcWalletRequest::SetFallback(SetFallbackParams {
-            subject: Subject::Ptr(sptr),
+            subject: Subject::NumId(id),
             data: test_data.clone(),
         })],
         false,
@@ -825,9 +821,9 @@ async fn it_should_set_and_persist_ptr_data(rig: &TestRig) -> anyhow::Result<()>
 
     use spaces_protocol::Bytes;
     // Verify data was set
-    let ptr_with_data = rig.spaced.client.get_ptr(Subject::Ptr(sptr)).await?
+    let ptr_with_data = rig.spaced.client.get_num(Subject::NumId(id)).await?
         .expect("ptr should exist");
-    assert_eq!(ptr_with_data.ptrout.sptr.data, Some(Bytes::new(test_data.clone())), "PTR data should be set");
+    assert_eq!(ptr_with_data.numout.num.data, Some(Bytes::new(test_data.clone())), "PTR data should be set");
     println!("✓ PTR data set successfully: {:?}", String::from_utf8_lossy(&test_data));
 
     // Test 3: Transfer PTR without data - data should persist
@@ -837,7 +833,7 @@ async fn it_should_set_and_persist_ptr_data(rig: &TestRig) -> anyhow::Result<()>
         rig,
         ALICE,
         vec![RpcWalletRequest::Transfer(TransferSpacesParams {
-            spaces: vec![Subject::Ptr(sptr)],
+            spaces: vec![Subject::NumId(id)],
             to: Some(bob_addr.clone()),
             data: None,
         })],
@@ -846,10 +842,10 @@ async fn it_should_set_and_persist_ptr_data(rig: &TestRig) -> anyhow::Result<()>
     assert!(wallet_res_err(&transfer).is_ok(), "Transfer PTR should succeed");
     mine_and_sync(rig, 1).await?;
 
-    let ptr_after_transfer = rig.spaced.client.get_ptr(Subject::Ptr(sptr)).await?
+    let ptr_after_transfer = rig.spaced.client.get_num(Subject::NumId(id)).await?
         .expect("ptr should exist after transfer");
-    assert_eq!(ptr_after_transfer.ptrout.sptr.data, Some(Bytes::new(test_data.clone())),
-        "PTR data should persist after transfer without new data");
+    assert_eq!(ptr_after_transfer.numout.num.data, Some(Bytes::new(test_data.clone())),
+               "PTR data should persist after transfer without new data");
     println!("✓ PTR data persisted after transfer");
 
     // Test 4: Update data with new value
@@ -859,7 +855,7 @@ async fn it_should_set_and_persist_ptr_data(rig: &TestRig) -> anyhow::Result<()>
         rig,
         BOB,
         vec![RpcWalletRequest::SetFallback(SetFallbackParams {
-            subject: Subject::Ptr(sptr),
+            subject: Subject::NumId(id),
             data: new_data.clone(),
         })],
         false,
@@ -867,9 +863,9 @@ async fn it_should_set_and_persist_ptr_data(rig: &TestRig) -> anyhow::Result<()>
     assert!(wallet_res_err(&update_data).is_ok(), "SetFallback should succeed");
     mine_and_sync(rig, 1).await?;
 
-    let ptr_updated = rig.spaced.client.get_ptr(Subject::Ptr(sptr)).await?
+    let ptr_updated = rig.spaced.client.get_num(Subject::NumId(id)).await?
         .expect("ptr should exist");
-    assert_eq!(ptr_updated.ptrout.sptr.data, Some(Bytes::new(new_data.clone())), "PTR data should be updated");
+    assert_eq!(ptr_updated.numout.num.data, Some(Bytes::new(new_data.clone())), "PTR data should be updated");
     println!("✓ PTR data updated successfully: {:?}", String::from_utf8_lossy(&new_data));
 
     // Test 5: Set empty data
@@ -879,7 +875,7 @@ async fn it_should_set_and_persist_ptr_data(rig: &TestRig) -> anyhow::Result<()>
         rig,
         BOB,
         vec![RpcWalletRequest::SetFallback(SetFallbackParams {
-            subject: Subject::Ptr(sptr),
+            subject: Subject::NumId(id),
             data: empty_data.clone(),
         })],
         false,
@@ -887,9 +883,9 @@ async fn it_should_set_and_persist_ptr_data(rig: &TestRig) -> anyhow::Result<()>
     assert!(wallet_res_err(&set_empty).is_ok(), "SetFallback with empty data should succeed");
     mine_and_sync(rig, 1).await?;
 
-    let ptr_empty = rig.spaced.client.get_ptr(Subject::Ptr(sptr)).await?
+    let ptr_empty = rig.spaced.client.get_num(Subject::NumId(id)).await?
         .expect("ptr should exist");
-    assert_eq!(ptr_empty.ptrout.sptr.data, Some(Bytes::new(empty_data)), "PTR data should be set to empty");
+    assert_eq!(ptr_empty.numout.num.data, Some(Bytes::new(empty_data)), "PTR data should be set to empty");
     println!("✓ PTR data set to empty successfully");
 
     Ok(())
@@ -913,7 +909,7 @@ async fn it_should_set_and_get_space_fallback(rig: &TestRig) -> anyhow::Result<(
     let spk_before = space_before.spaceout.script_pubkey.clone();
 
     // Verify no fallback data initially via getfallback
-    let subject = Subject::Space(space_name.clone());
+    let subject = Subject::Label(space_name.clone());
     let fallback_before = rig.spaced.client.get_fallback(subject.clone()).await?;
     assert!(fallback_before.is_none(), "space should have no fallback data initially");
     println!("✓ No fallback data initially");
@@ -972,7 +968,7 @@ async fn it_should_set_and_get_space_fallback(rig: &TestRig) -> anyhow::Result<(
         rig,
         ALICE,
         vec![RpcWalletRequest::Transfer(TransferSpacesParams {
-            spaces: vec![Subject::Space(space_name.clone())],
+            spaces: vec![Subject::Label(space_name.clone())],
             to: Some(bob_addr),
             data: None,
         })],
@@ -1030,11 +1026,11 @@ async fn run_ptr_tests() -> anyhow::Result<()> {
     load_wallet(&rig, wallets_path.clone(), BOB).await?;
     load_wallet(&rig, wallets_path, EVE).await?;
 
-    println!("\n=== Running SPTR Creation Tests ===");
-    it_should_create_sptrs(&rig).await?;
+    println!("\n=== Running Num Id Creation Tests ===");
+    it_should_create_nums(&rig).await?;
 
-    println!("\n=== Running SPTR Uniqueness Tests ===");
-    it_should_reject_duplicate_sptr_delegations(&rig).await?;
+    println!("\n=== Running Num Id Uniqueness Tests ===");
+    it_should_reject_duplicate_num_id_delegations(&rig).await?;
 
     println!("\n=== Running Transfer-Back Delegation Restoration Tests ===");
     it_should_restore_delegation_when_transferring_back(&rig).await?;
@@ -1057,6 +1053,15 @@ async fn run_ptr_tests() -> anyhow::Result<()> {
     println!("\n=== Running Space Fallback Data Tests ===");
     it_should_set_and_get_space_fallback(&rig).await?;
 
+    println!("\n=== Running Numeric Delegation Tests ===");
+    it_should_delegate_and_commit_numeric(&rig).await?;
+
+    println!("\n=== Running Numeric Authorize Tests ===");
+    it_should_authorize_numeric_to_another_wallet(&rig).await?;
+
+    println!("\n=== Running Multiple Nums Same Tx Tests ===");
+    it_should_create_multiple_nums_same_tx(&rig).await?;
+
     println!("\n=== All tests passed! ===");
     Ok(())
 }
@@ -1072,33 +1077,31 @@ async fn it_should_transfer_ptr_with_n_to_n_rule(rig: &TestRig) -> anyhow::Resul
         // Create a PTR
         let addr0 = rig.spaced.client.wallet_get_new_address(ALICE, AddressKind::Coin).await?;
         let addr0_spk = bitcoin::address::Address::from_str(&addr0)?.assume_checked().script_pubkey();
-        let addr0_spk_string = hex::encode(addr0_spk.as_bytes());
-
         wallet_do(rig, ALICE, vec![
-            RpcWalletRequest::CreatePtr(CreatePtrParams { spk: addr0_spk_string })
+            RpcWalletRequest::CreateNum(CreateNumParams { bind_spk: Some(addr0_spk.clone()) })
         ], false).await?;
         mine_and_sync(rig, 1).await?;
 
-        let sptr = Sptr::from_spk::<Sha256>(addr0_spk.clone());
-        let ptr_before = rig.spaced.client.get_ptr(Subject::Ptr(sptr)).await?.expect("ptr must exist");
-        let value_before = ptr_before.ptrout.value;
+        let id = NumId::from_spk::<Sha256>(addr0_spk.clone());
+        let ptr_before = rig.spaced.client.get_num(Subject::NumId(id)).await?.expect("ptr must exist");
+        let value_before = ptr_before.numout.value;
 
         // Transfer to addr1 with SAME value (should use n→n rule)
         let addr1 = rig.spaced.client.wallet_get_new_address(BOB, AddressKind::Space).await?;
         wallet_do(rig, ALICE, vec![
             RpcWalletRequest::Transfer(TransferSpacesParams {
-                spaces: vec![Subject::Ptr(sptr)],
+                spaces: vec![Subject::NumId(id)],
                 to: Some(addr1.clone()),
                 data: None,
             })
         ], false).await?;
         mine_and_sync(rig, 1).await?;
 
-        let ptr_after = rig.spaced.client.get_ptr(Subject::Ptr(sptr)).await?.expect("ptr must still exist");
+        let ptr_after = rig.spaced.client.get_num(Subject::NumId(id)).await?.expect("ptr must still exist");
         let spk1 = SpaceAddress::from_str(&addr1)?.script_pubkey();
 
-        assert_eq!(ptr_after.ptrout.script_pubkey, spk1, "PTR should transfer to new address");
-        assert_eq!(ptr_after.ptrout.value, value_before, "PTR value should remain same (n→n)");
+        assert_eq!(ptr_after.numout.script_pubkey, spk1, "PTR should transfer to new address");
+        assert_eq!(ptr_after.numout.value, value_before, "PTR value should remain same (n→n)");
         println!("✓ n→n transfer successful (same value preserved)");
     }
 
@@ -1112,13 +1115,13 @@ async fn it_should_transfer_ptr_with_n_to_n_rule(rig: &TestRig) -> anyhow::Resul
         let spk_b = bitcoin::address::Address::from_str(&addr_b)?.assume_checked().script_pubkey();
 
         wallet_do(rig, ALICE, vec![
-            RpcWalletRequest::CreatePtr(CreatePtrParams { spk: hex::encode(spk_a.as_bytes()) }),
-            RpcWalletRequest::CreatePtr(CreatePtrParams { spk: hex::encode(spk_b.as_bytes()) }),
+            RpcWalletRequest::CreateNum(CreateNumParams { bind_spk: Some(spk_a.clone()) }),
+            RpcWalletRequest::CreateNum(CreateNumParams { bind_spk: Some(spk_b.clone()) }),
         ], false).await?;
         mine_and_sync(rig, 1).await?;
 
-        let sptr_a = Sptr::from_spk::<Sha256>(spk_a.clone());
-        let sptr_b = Sptr::from_spk::<Sha256>(spk_b.clone());
+        let id_a = NumId::from_spk::<Sha256>(spk_a.clone());
+        let id_b = NumId::from_spk::<Sha256>(spk_b.clone());
 
         // Transfer both to different addresses
         let dest_a = rig.spaced.client.wallet_get_new_address(BOB, AddressKind::Space).await?;
@@ -1126,25 +1129,25 @@ async fn it_should_transfer_ptr_with_n_to_n_rule(rig: &TestRig) -> anyhow::Resul
 
         wallet_do(rig, ALICE, vec![
             RpcWalletRequest::Transfer(TransferSpacesParams {
-                spaces: vec![Subject::Ptr(sptr_a)],
+                spaces: vec![Subject::NumId(id_a)],
                 to: Some(dest_a.clone()),
                 data: None,
             }),
             RpcWalletRequest::Transfer(TransferSpacesParams {
-                spaces: vec![Subject::Ptr(sptr_b)],
+                spaces: vec![Subject::NumId(id_b)],
                 to: Some(dest_b.clone()),
                 data: None,
             }),
         ], false).await?;
         mine_and_sync(rig, 1).await?;
 
-        let ptr_a_after = rig.spaced.client.get_ptr(Subject::Ptr(sptr_a)).await?.expect("ptr_a must exist");
-        let ptr_b_after = rig.spaced.client.get_ptr(Subject::Ptr(sptr_b)).await?.expect("ptr_b must exist");
+        let ptr_a_after = rig.spaced.client.get_num(Subject::NumId(id_a)).await?.expect("ptr_a must exist");
+        let ptr_b_after = rig.spaced.client.get_num(Subject::NumId(id_b)).await?.expect("ptr_b must exist");
         let spk_dest_a = SpaceAddress::from_str(&dest_a)?.script_pubkey();
         let spk_dest_b = SpaceAddress::from_str(&dest_b)?.script_pubkey();
 
-        assert_eq!(ptr_a_after.ptrout.script_pubkey, spk_dest_a, "PTR A should transfer correctly");
-        assert_eq!(ptr_b_after.ptrout.script_pubkey, spk_dest_b, "PTR B should transfer correctly");
+        assert_eq!(ptr_a_after.numout.script_pubkey, spk_dest_a, "PTR A should transfer correctly");
+        assert_eq!(ptr_b_after.numout.script_pubkey, spk_dest_b, "PTR B should transfer correctly");
         println!("✓ Multiple PTR transfers handled correctly");
     }
 
@@ -1158,36 +1161,358 @@ async fn it_should_transfer_ptr_with_n_to_n_rule(rig: &TestRig) -> anyhow::Resul
 
         // Delegate to create PTR
         wallet_do(rig, ALICE, vec![
-            RpcWalletRequest::Delegate(DelegateParams { space: space_name.clone() })
+            RpcWalletRequest::Delegate(DelegateParams { subject: space_name.clone().into() })
         ], false).await?;
         mine_and_sync(rig, 1).await?;
 
-        let sptr = rig.spaced.client.get_delegation(space_name.clone()).await?
+        let id = rig.spaced.client.get_delegation(space_name.clone().into()).await?
             .expect("delegation should exist");
-        let ptr_before_commit = rig.spaced.client.get_ptr(Subject::Ptr(sptr)).await?.expect("ptr must exist");
-        let value_before = ptr_before_commit.ptrout.value;
-        let spk_before = ptr_before_commit.ptrout.script_pubkey.clone();
+        let ptr_before_commit = rig.spaced.client.get_num(Subject::NumId(id)).await?.expect("ptr must exist");
+        let value_before = ptr_before_commit.numout.value;
+        let spk_before = ptr_before_commit.numout.script_pubkey.clone();
 
         // Make a commitment (should preserve value via n→n)
         wallet_do(rig, ALICE, vec![
             RpcWalletRequest::Commit(CommitParams {
-                space: space_name.clone(),
+                subject: space_name.clone().into(),
                 root: Some(sha256::Hash::from_slice(&[1u8; 32])?),
             })
         ], false).await?;
         mine_and_sync(rig, 1).await?;
 
-        let ptr_after_commit = rig.spaced.client.get_ptr(Subject::Ptr(sptr)).await?.expect("ptr must exist after commit");
+        let ptr_after_commit = rig.spaced.client.get_num(Subject::NumId(id)).await?.expect("ptr must exist after commit");
 
-        assert_eq!(ptr_after_commit.ptrout.value, value_before, "Commitment should preserve PTR value (n→n)");
-        assert_eq!(ptr_after_commit.ptrout.script_pubkey, spk_before, "Commitment should keep same address");
+        assert_eq!(ptr_after_commit.numout.value, value_before, "Commitment should preserve PTR value (n→n)");
+        assert_eq!(ptr_after_commit.numout.script_pubkey, spk_before, "Commitment should keep same address");
 
         // Verify commitment was created
-        let commitment = rig.spaced.client.get_commitment(space_name.clone(), None).await?
+        let commitment = rig.spaced.client.get_commitment(space_name.clone().into(), None).await?
             .expect("commitment should exist");
         assert_eq!(commitment.state_root, [1u8; 32], "Commitment root should match");
         println!("✓ Commitment preserves PTR value and address (n→n rule)");
     }
+
+    Ok(())
+}
+
+// ============== Test: Numeric Delegation and Commitment ==============
+
+async fn it_should_delegate_and_commit_numeric(rig: &TestRig) -> anyhow::Result<()> {
+    sync_all(rig).await?;
+
+    // Create a num
+    println!("Test 1: Create and delegate a numeric");
+    let addr = rig.spaced.client.wallet_get_new_address(ALICE, AddressKind::Coin).await?;
+    let spk = bitcoin::address::Address::from_str(&addr)?.assume_checked().script_pubkey();
+    wallet_do(rig, ALICE, vec![
+        RpcWalletRequest::CreateNum(CreateNumParams { bind_spk: Some(spk.clone()) })
+    ], false).await?;
+    mine_and_sync(rig, 1).await?;
+
+    let id = NumId::from_spk::<Sha256>(spk);
+    let num_info = rig.spaced.client.get_num(Subject::NumId(id)).await?
+        .expect("num must exist");
+    let numeric = num_info.numout.num.name;
+    let numeric_label = numeric.to_slabel();
+    println!("  Created numeric: {}", numeric);
+
+    // Verify no delegation exists yet
+    let delegation_before = rig.spaced.client
+        .get_delegation(Subject::Label(numeric_label.clone())).await?;
+    assert!(delegation_before.is_none(), "no delegation before delegate");
+
+    // Delegate the numeric
+    let delegate_res = wallet_do(rig, ALICE, vec![
+        RpcWalletRequest::Delegate(DelegateParams {
+            subject: Subject::Label(numeric_label.clone()),
+        })
+    ], false).await?;
+    wallet_res_err(&delegate_res)?;
+    mine_and_sync(rig, 1).await?;
+
+    // Verify delegation exists
+    let delegation = rig.spaced.client
+        .get_delegation(Subject::Label(numeric_label.clone())).await?
+        .expect("delegation should exist after delegate");
+    println!("  Delegation established, delegator: {}", delegation);
+
+    // Verify the num now has delegate dust value
+    let num_after = rig.spaced.client.get_num(Subject::NumId(id)).await?
+        .expect("num must still exist after delegate");
+    assert_eq!(
+        num_after.numout.value.to_sat() % 10, 8,
+        "num should have delegate dust signaling (value % 10 == 8)"
+    );
+
+    // Verify can_operate works for numeric subjects
+    let can_op = rig.spaced.client
+        .wallet_can_operate(ALICE, Subject::Label(numeric_label.clone())).await?;
+    assert!(can_op, "owner should be able to operate delegated numeric");
+    let can_op_bob = rig.spaced.client
+        .wallet_can_operate(BOB, Subject::Label(numeric_label.clone())).await?;
+    assert!(!can_op_bob, "non-owner should not be able to operate delegated numeric");
+    println!("✓ Numeric delegation and can_operate successful");
+
+    // Test 2: Commit to the numeric
+    println!("\nTest 2: Commit to delegated numeric");
+    let commit_res = wallet_do(rig, ALICE, vec![
+        RpcWalletRequest::Commit(CommitParams {
+            subject: Subject::Label(numeric_label.clone()),
+            root: Some(sha256::Hash::from_slice(&[42u8; 32])?),
+        })
+    ], false).await?;
+    wallet_res_err(&commit_res)?;
+    mine_and_sync(rig, 1).await?;
+
+    let commitment = rig.spaced.client
+        .get_commitment(Subject::Label(numeric_label.clone()), None).await?
+        .expect("commitment should exist");
+    assert_eq!(commitment.state_root, [42u8; 32], "commitment root should match");
+    println!("✓ Numeric commitment successful");
+
+    // Test 3: Rollback the commitment
+    println!("\nTest 3: Rollback numeric commitment");
+    let rollback_res = wallet_do(rig, ALICE, vec![
+        RpcWalletRequest::Commit(CommitParams {
+            subject: Subject::Label(numeric_label.clone()),
+            root: None,
+        })
+    ], false).await?;
+    wallet_res_err(&rollback_res)?;
+    mine_and_sync(rig, 1).await?;
+
+    let after_rollback = rig.spaced.client
+        .get_commitment(Subject::Label(numeric_label.clone()), None).await?;
+    assert!(after_rollback.is_none(), "commitment tip should be gone after rollback");
+    println!("✓ Numeric rollback successful");
+
+    Ok(())
+}
+
+// ============== Test: Authorize Numeric to Another Wallet ==============
+
+async fn it_should_authorize_numeric_to_another_wallet(rig: &TestRig) -> anyhow::Result<()> {
+    sync_all(rig).await?;
+
+    // Create a num for Alice
+    println!("Test 1: Alice creates and delegates a numeric");
+    wallet_do(rig, ALICE, vec![
+        RpcWalletRequest::CreateNum(CreateNumParams { bind_spk: None })
+    ], false).await?;
+    mine_and_sync(rig, 1).await?;
+
+    let alice_nums = rig.spaced.client.wallet_list_nums(ALICE).await?;
+    let num_entry = alice_nums.nums.last().expect("Alice should have a num");
+    let numeric_label = num_entry.numout.num.name.to_slabel();
+    let num_id = num_entry.numout.num.id;
+    println!("  Created numeric: {} (id={})", num_entry.numout.num.name, num_id);
+
+    // Delegate it
+    let delegate_res = wallet_do(rig, ALICE, vec![
+        RpcWalletRequest::Delegate(DelegateParams {
+            subject: Subject::Label(numeric_label.clone()),
+        })
+    ], false).await?;
+    wallet_res_err(&delegate_res)?;
+    mine_and_sync(rig, 1).await?;
+
+    // Alice can operate, Bob cannot
+    let can_op_alice = rig.spaced.client
+        .wallet_can_operate(ALICE, Subject::Label(numeric_label.clone())).await?;
+    assert!(can_op_alice, "Alice should be able to operate before authorize");
+    let can_op_bob = rig.spaced.client
+        .wallet_can_operate(BOB, Subject::Label(numeric_label.clone())).await?;
+    assert!(!can_op_bob, "Bob should not be able to operate before authorize");
+    println!("✓ Pre-authorize: Alice can operate, Bob cannot");
+
+    // Get the delegating NumId
+    let delegation_id = rig.spaced.client
+        .get_delegation(Subject::Label(numeric_label.clone())).await?
+        .expect("delegation must exist");
+    println!("  Delegating num id: {}", delegation_id);
+
+    // Alice transfers the delegating num to Bob (authorize)
+    println!("\nTest 2: Alice authorizes Bob by transferring the delegating num");
+    let bob_addr = rig.spaced.client
+        .wallet_get_new_address(BOB, AddressKind::Space).await?;
+    let authorize_res = wallet_do(rig, ALICE, vec![
+        RpcWalletRequest::Transfer(TransferSpacesParams {
+            spaces: vec![Subject::NumId(delegation_id)],
+            to: Some(bob_addr),
+            data: None,
+        })
+    ], false).await?;
+    wallet_res_err(&authorize_res)?;
+    mine_and_sync(rig, 1).await?;
+
+    // Now Bob can operate, Alice cannot
+    let can_op_bob_after = rig.spaced.client
+        .wallet_can_operate(BOB, Subject::Label(numeric_label.clone())).await?;
+    assert!(can_op_bob_after, "Bob should be able to operate after authorize");
+    let can_op_alice_after = rig.spaced.client
+        .wallet_can_operate(ALICE, Subject::Label(numeric_label.clone())).await?;
+    assert!(!can_op_alice_after, "Alice should not be able to operate after authorize");
+    println!("✓ Post-authorize: Bob can operate, Alice cannot");
+
+    // Test 3: Bob can commit to the numeric
+    println!("\nTest 3: Bob commits to the numeric");
+    let commit_res = wallet_do(rig, BOB, vec![
+        RpcWalletRequest::Commit(CommitParams {
+            subject: Subject::Label(numeric_label.clone()),
+            root: Some(sha256::Hash::from_slice(&[99u8; 32])?),
+        })
+    ], false).await?;
+    wallet_res_err(&commit_res)?;
+    mine_and_sync(rig, 1).await?;
+
+    let commitment = rig.spaced.client
+        .get_commitment(Subject::Label(numeric_label.clone()), None).await?
+        .expect("commitment should exist after Bob commits");
+    assert_eq!(commitment.state_root, [99u8; 32], "commitment root should match Bob's");
+    println!("✓ Bob successfully committed to Alice's numeric");
+
+    // Test 4: Bob rolls back the commitment
+    println!("\nTest 4: Bob rolls back the commitment");
+    let rollback_res = wallet_do(rig, BOB, vec![
+        RpcWalletRequest::Commit(CommitParams {
+            subject: Subject::Label(numeric_label.clone()),
+            root: None,
+        })
+    ], false).await?;
+    wallet_res_err(&rollback_res)?;
+    mine_and_sync(rig, 1).await?;
+
+    let after_rollback = rig.spaced.client
+        .get_commitment(Subject::Label(numeric_label.clone()), None).await?;
+    assert!(after_rollback.is_none(), "commitment tip should be gone after rollback");
+
+    // Delegation should still be intact after rollback
+    let can_op_bob_after_rollback = rig.spaced.client
+        .wallet_can_operate(BOB, Subject::Label(numeric_label.clone())).await?;
+    assert!(can_op_bob_after_rollback, "Bob should still be able to operate after rollback");
+    println!("✓ Bob rolled back successfully, delegation intact");
+
+    // Test 5: Alice re-delegates to revoke Bob's authorization
+    println!("\nTest 5: Alice re-delegates to revoke Bob's authorization");
+    let redelegate_res = wallet_do(rig, ALICE, vec![
+        RpcWalletRequest::Delegate(DelegateParams {
+            subject: Subject::Label(numeric_label.clone()),
+        })
+    ], false).await?;
+    wallet_res_err(&redelegate_res)?;
+    mine_and_sync(rig, 1).await?;
+
+    let can_op_alice_revoked = rig.spaced.client
+        .wallet_can_operate(ALICE, Subject::Label(numeric_label.clone())).await?;
+    assert!(can_op_alice_revoked, "Alice should be able to operate after re-delegate");
+    let can_op_bob_revoked = rig.spaced.client
+        .wallet_can_operate(BOB, Subject::Label(numeric_label.clone())).await?;
+    assert!(!can_op_bob_revoked, "Bob should no longer be able to operate after revoke");
+    println!("✓ Re-delegate revoked Bob's authorization, Alice has control again");
+
+    // Test 6: Alice commits successfully after re-delegation
+    println!("\nTest 6: Alice commits after revoking Bob");
+    let alice_commit_res = wallet_do(rig, ALICE, vec![
+        RpcWalletRequest::Commit(CommitParams {
+            subject: Subject::Label(numeric_label.clone()),
+            root: Some(sha256::Hash::from_slice(&[77u8; 32])?),
+        })
+    ], false).await?;
+    wallet_res_err(&alice_commit_res)?;
+    mine_and_sync(rig, 1).await?;
+
+    let alice_commitment = rig.spaced.client
+        .get_commitment(Subject::Label(numeric_label.clone()), None).await?
+        .expect("commitment should exist after Alice commits");
+    assert_eq!(alice_commitment.state_root, [77u8; 32], "commitment root should match Alice's");
+    println!("✓ Alice committed successfully");
+
+    // Test 7: Bob can no longer commit
+    println!("\nTest 7: Bob cannot commit after revocation");
+    let bob_fail_res = wallet_do(rig, BOB, vec![
+        RpcWalletRequest::Commit(CommitParams {
+            subject: Subject::Label(numeric_label.clone()),
+            root: Some(sha256::Hash::from_slice(&[88u8; 32])?),
+        })
+    ], false).await;
+    assert!(bob_fail_res.is_err(), "Bob's commit should fail after revocation");
+    println!("✓ Bob cannot commit after Alice revoked authorization");
+
+    Ok(())
+}
+
+// ============== Test: Multiple Nums Created in Same Tx ==============
+
+async fn it_should_create_multiple_nums_same_tx(rig: &TestRig) -> anyhow::Result<()> {
+    sync_all(rig).await?;
+
+    println!("Test 1: Create two nums in a single transaction (auto-generated addresses)");
+    let before = rig.spaced.client.wallet_list_nums(ALICE).await?;
+    let before_count = before.nums.len();
+
+    wallet_do(rig, ALICE, vec![
+        RpcWalletRequest::CreateNum(CreateNumParams { bind_spk: None }),
+        RpcWalletRequest::CreateNum(CreateNumParams { bind_spk: None }),
+    ], false).await?;
+    mine_and_sync(rig, 1).await?;
+
+    let after = rig.spaced.client.wallet_list_nums(ALICE).await?;
+    assert_eq!(after.nums.len(), before_count + 2, "two new nums created");
+
+    let new_nums: Vec<_> = after.nums.iter()
+        .filter(|e| !before.nums.iter().any(|b| b.numout.num.id == e.numout.num.id))
+        .collect();
+    assert_eq!(new_nums.len(), 2, "exactly two new nums");
+
+    let name_a = new_nums[0].numout.num.name;
+    let name_b = new_nums[1].numout.num.name;
+    let id_a = new_nums[0].numout.num.id;
+    let id_b = new_nums[1].numout.num.id;
+
+    println!("  Num A: {} (id={})", name_a, id_a);
+    println!("  Num B: {} (id={})", name_b, id_b);
+
+    // Both should share same block and tx_pos but have different vouts
+    assert_eq!(name_a.block(), name_b.block(), "same block");
+    assert_eq!(name_a.tx_pos(), name_b.tx_pos(), "same tx position");
+    assert_ne!(name_a.vout(), name_b.vout(), "different vouts");
+    println!("✓ Multiple nums in same tx have unique SNumeric (different vout)");
+
+    // Test 2: Both can be looked up by their numeric label
+    println!("\nTest 2: Lookup both by numeric label");
+    let lookup_a = rig.spaced.client
+        .get_num(Subject::Label(name_a.to_slabel())).await?;
+    let lookup_b = rig.spaced.client
+        .get_num(Subject::Label(name_b.to_slabel())).await?;
+    assert!(lookup_a.is_some(), "num A must be findable by numeric label");
+    assert!(lookup_b.is_some(), "num B must be findable by numeric label");
+    assert_eq!(lookup_a.unwrap().numout.num.id, id_a, "correct num A resolved");
+    assert_eq!(lookup_b.unwrap().numout.num.id, id_b, "correct num B resolved");
+    println!("✓ Both nums resolvable by their unique numeric labels");
+
+    // Test 3: Delegate both and verify independent delegations
+    println!("\nTest 3: Delegate both nums independently");
+    wallet_do(rig, ALICE, vec![
+        RpcWalletRequest::Delegate(DelegateParams {
+            subject: Subject::Label(name_a.to_slabel()),
+        })
+    ], false).await?;
+    mine_and_sync(rig, 1).await?;
+
+    wallet_do(rig, ALICE, vec![
+        RpcWalletRequest::Delegate(DelegateParams {
+            subject: Subject::Label(name_b.to_slabel()),
+        })
+    ], false).await?;
+    mine_and_sync(rig, 1).await?;
+
+    let del_a = rig.spaced.client
+        .get_delegation(Subject::Label(name_a.to_slabel())).await?;
+    let del_b = rig.spaced.client
+        .get_delegation(Subject::Label(name_b.to_slabel())).await?;
+    assert!(del_a.is_some(), "delegation A should exist");
+    assert!(del_b.is_some(), "delegation B should exist");
+    println!("✓ Both nums delegated independently");
 
     Ok(())
 }

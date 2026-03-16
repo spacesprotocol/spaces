@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, fmt::Debug, fs, ops::Mul, path::PathBuf, str::FromStr};
+use std::{collections::BTreeMap, fmt, fmt::Debug, fs, ops::Mul, path::PathBuf, str::FromStr};
 use anyhow::{anyhow, Context};
 use bdk_wallet::{
     chain,
@@ -46,8 +46,8 @@ use spaces_protocol::{
     slabel::SLabel,
     Covenant, FullSpaceOut, Space,
 };
-use spaces_ptr::{NumericKey, PtrSource, sptr::Sptr};
-use spaces_ptr::snumeric::SNumeric;
+use spaces_nums::{NumericKey, NumSource, num_id::{NumId, NUM_HRP}};
+use spaces_nums::snumeric::SNumeric;
 
 use crate::{
     address::SpaceAddress,
@@ -84,20 +84,60 @@ pub struct Balance {
     pub details: BalanceDetails,
 }
 
-/// A space name, sptr, or numeric identifier
+/// A space name (@bitcoin), numeric (#800000-3), or num id (num1...)
 #[derive(Debug, Clone)]
 pub enum Subject {
-    Space(SLabel),
-    Ptr(Sptr),
-    Numeric(SNumeric),
+    Label(SLabel),
+    NumId(NumId),
+}
+
+impl From<SLabel> for Subject {
+    fn from(label: SLabel) -> Self {
+        Subject::Label(label)
+    }
+}
+
+impl From<NumId> for Subject {
+    fn from(id: NumId) -> Self {
+        Subject::NumId(id)
+    }
+}
+
+impl fmt::Display for Subject {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Subject::Label(label) => write!(f, "{}", label),
+            Subject::NumId(id) => write!(f, "{}", id),
+        }
+    }
+}
+
+impl FromStr for Subject {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.starts_with(&format!("{}1", NUM_HRP)) {
+            NumId::from_str(s)
+                .map(Subject::NumId)
+                .map_err(|e| format!("invalid num id: {}", e))
+        } else {
+            let normalized = if s.starts_with('#') || s.starts_with('@') {
+                s.to_ascii_lowercase()
+            } else {
+                format!("@{}", s.to_ascii_lowercase())
+            };
+            SLabel::from_str(&normalized)
+                .map(Subject::Label)
+                .map_err(|e| format!("invalid space or numeric: {}", e))
+        }
+    }
 }
 
 impl Serialize for Subject {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         match self {
-            Subject::Space(label) => serializer.serialize_str(&label.to_string()),
-            Subject::Ptr(sptr) => serializer.serialize_str(&sptr.to_string()),
-            Subject::Numeric(num) => serializer.serialize_str(&num.to_string()),
+            Subject::Label(label) => serializer.serialize_str(&label.to_string()),
+            Subject::NumId(id) => serializer.serialize_str(&id.to_string()),
         }
     }
 }
@@ -108,19 +148,7 @@ impl<'de> Deserialize<'de> for Subject {
         D: Deserializer<'de>,
     {
         let s = <String as Deserialize>::deserialize(deserializer)?;
-        if s.starts_with("sptr1") {
-            Sptr::from_str(&s)
-                .map(Subject::Ptr)
-                .map_err(serde::de::Error::custom)
-        } else if s.starts_with('#') {
-            SNumeric::from_str(&s)
-                .map(Subject::Numeric)
-                .map_err(serde::de::Error::custom)
-        } else {
-            SLabel::from_str(&s)
-                .map(Subject::Space)
-                .map_err(serde::de::Error::custom)
-        }
+        Subject::from_str(&s).map_err(serde::de::Error::custom)
     }
 }
 
@@ -438,14 +466,22 @@ impl SpacesWallet {
         TxEvent::get_latest_events(&db_tx).context("could not read latest events")
     }
 
-    pub fn sign_event<H: KeyHasher, S: SpacesSource + PtrSource>(
+    pub fn sign_event<H: KeyHasher, S: SpacesSource + NumSource>(
         &mut self,
         src: &mut S,
         subject: Subject,
         mut event: NostrEvent,
     ) -> anyhow::Result<NostrEvent> {
         let outpoint = match &subject {
-            Subject::Space(label) => {
+            Subject::Label(label) if label.is_numeric() => {
+                let numeric: SNumeric = label.clone().try_into().unwrap();
+                let key = NumericKey::from_numeric::<H>(&numeric);
+                let id = src.get_num_id(&key)?
+                    .ok_or_else(|| anyhow::anyhow!("Numeric '{}' not found", numeric))?;
+                src.get_num_outpoint_by_id(&id)?
+                    .ok_or_else(|| anyhow::anyhow!("Num id not found"))?
+            }
+            Subject::Label(label) => {
                 if event.space().is_some_and(|s| s != label.to_string()) {
                     return Err(anyhow::anyhow!("Space tag does not match specified space"));
                 }
@@ -453,23 +489,14 @@ impl SpacesWallet {
                 src.get_space_outpoint(&space_key)?
                     .ok_or_else(|| anyhow::anyhow!("Space not found"))?
             }
-            Subject::Ptr(sptr) => {
-                src.get_ptr_outpoint(sptr)?
-                    .ok_or_else(|| anyhow::anyhow!("Sptr not found"))?
-            }
-            Subject::Numeric(numeric) => {
-                let key = NumericKey::from_numeric::<H>(numeric);
-                let sptr = src.get_numeric(&key)?
-                    .ok_or_else(|| anyhow::anyhow!("Numeric '{}' not found", numeric))?;
-                src.get_ptr_outpoint(&sptr)?
-                    .ok_or_else(|| anyhow::anyhow!("Sptr not found"))?
+            Subject::NumId(id) => {
+                src.get_num_outpoint_by_id(id)?
+                    .ok_or_else(|| anyhow::anyhow!("Num id not found"))?
             }
         };
 
         // We use list_output instead of get_utxo because the output might
         // be spent in a pending tx, so signatures are still valid until confirmed.
-        // Mainly useful if subs is trying to sign a temporary certificate, but it already
-        // broadcasted a commitment spending the ptr.
         let utxo = self.internal.list_output().find(|o| o.outpoint == outpoint)
             .clone().ok_or_else(|| anyhow::anyhow!("Not owned by wallet"))?;
 
@@ -481,13 +508,24 @@ impl SpacesWallet {
         Ok(event)
     }
 
-    pub fn verify_event<H: KeyHasher, S: SpacesSource + PtrSource>(
+    pub fn verify_event<H: KeyHasher, S: SpacesSource + NumSource>(
         src: &mut S,
         subject: Subject,
         mut event: NostrEvent,
     ) -> anyhow::Result<NostrEvent> {
         let script_pubkey = match &subject {
-            Subject::Space(label) => {
+            Subject::Label(label) if label.is_numeric() => {
+                let numeric: SNumeric = label.clone().try_into().unwrap();
+                let key = NumericKey::from_numeric::<H>(&numeric);
+                let id = src.get_num_id(&key)?
+                    .ok_or_else(|| anyhow::anyhow!("Numeric '{}' not found", numeric))?;
+                let outpoint = src.get_num_outpoint_by_id(&id)?
+                    .ok_or_else(|| anyhow::anyhow!("Num id not found"))?;
+                let numout = src.get_numout(&outpoint)?
+                    .ok_or_else(|| anyhow::anyhow!("Num output not found"))?;
+                numout.script_pubkey
+            }
+            Subject::Label(label) => {
                 if event.space().is_some_and(|s| s != label.to_string()) {
                     return Err(anyhow::anyhow!("Space tag does not match specified space"));
                 }
@@ -498,22 +536,12 @@ impl SpacesWallet {
                     .ok_or_else(|| anyhow::anyhow!("Space not found"))?;
                 spaceout.script_pubkey
             }
-            Subject::Ptr(sptr) => {
-                let outpoint = src.get_ptr_outpoint(sptr)?
-                    .ok_or_else(|| anyhow::anyhow!("Sptr not found"))?;
-                let ptrout = src.get_ptrout(&outpoint)?
-                    .ok_or_else(|| anyhow::anyhow!("Ptrout not found"))?;
-                ptrout.script_pubkey
-            }
-            Subject::Numeric(numeric) => {
-                let key = NumericKey::from_numeric::<H>(numeric);
-                let sptr = src.get_numeric(&key)?
-                    .ok_or_else(|| anyhow::anyhow!("Numeric '{}' not found", numeric))?;
-                let outpoint = src.get_ptr_outpoint(&sptr)?
-                    .ok_or_else(|| anyhow::anyhow!("Sptr not found"))?;
-                let ptrout = src.get_ptrout(&outpoint)?
-                    .ok_or_else(|| anyhow::anyhow!("Ptrout not found"))?;
-                ptrout.script_pubkey
+            Subject::NumId(id) => {
+                let outpoint = src.get_num_outpoint_by_id(id)?
+                    .ok_or_else(|| anyhow::anyhow!("Num id not found"))?;
+                let numout = src.get_numout(&outpoint)?
+                    .ok_or_else(|| anyhow::anyhow!("Num output not found"))?;
+                numout.script_pubkey
             }
         };
 
@@ -544,8 +572,8 @@ impl SpacesWallet {
         Ok(event)
     }
 
-    /// Sign a message with the key controlling a space or sptr
-    pub fn sign_schnorr<H: KeyHasher, S: SpacesSource + PtrSource>(
+    /// Sign a message with the key controlling a space or num id
+    pub fn sign_schnorr<H: KeyHasher, S: SpacesSource + NumSource>(
         &mut self,
         src: &mut S,
         subject: Subject,
@@ -554,28 +582,27 @@ impl SpacesWallet {
         use bitcoin::hashes::{sha256, Hash, HashEngine};
 
         let outpoint = match &subject {
-            Subject::Space(label) => {
+            Subject::Label(label) if label.is_numeric() => {
+                let numeric: SNumeric = label.clone().try_into().unwrap();
+                let key = NumericKey::from_numeric::<H>(&numeric);
+                let id = src.get_num_id(&key)?
+                    .ok_or_else(|| anyhow::anyhow!("Numeric '{}' not found", numeric))?;
+                src.get_num_outpoint_by_id(&id)?
+                    .ok_or_else(|| anyhow::anyhow!("Num id not found"))?
+            }
+            Subject::Label(label) => {
                 let space_key = SpaceKey::from(H::hash(label.as_ref()));
                 src.get_space_outpoint(&space_key)?
                     .ok_or_else(|| anyhow::anyhow!("Space not found"))?
             }
-            Subject::Ptr(sptr) => {
-                src.get_ptr_outpoint(sptr)?
-                    .ok_or_else(|| anyhow::anyhow!("Sptr not found"))?
-            }
-            Subject::Numeric(numeric) => {
-                let key = NumericKey::from_numeric::<H>(numeric);
-                let sptr = src.get_numeric(&key)?
-                    .ok_or_else(|| anyhow::anyhow!("Numeric '{}' not found", numeric))?;
-                src.get_ptr_outpoint(&sptr)?
-                    .ok_or_else(|| anyhow::anyhow!("Sptr not found"))?
+            Subject::NumId(id) => {
+                src.get_num_outpoint_by_id(id)?
+                    .ok_or_else(|| anyhow::anyhow!("Num id not found"))?
             }
         };
 
         // We use list_output instead of get_utxo because the output might
         // be spent in a pending tx, so signatures are still valid until confirmed.
-        // Mainly useful if subs is trying to sign a temporary certificate, but it already
-        // broadcasted a commitment spending the ptr.
         let utxo = self.internal.list_output().find(|o| o.outpoint == outpoint)
             .clone().ok_or_else(|| anyhow::anyhow!("Not owned by wallet"))?;
 
@@ -594,8 +621,8 @@ impl SpacesWallet {
         Ok(sig)
     }
 
-    /// Verify a schnorr signature against a space or sptr's public key
-    pub fn verify_schnorr<H: KeyHasher, S: SpacesSource + PtrSource>(
+    /// Verify a schnorr signature against a space or num id's public key
+    pub fn verify_schnorr<H: KeyHasher, S: SpacesSource + NumSource>(
         src: &mut S,
         subject: Subject,
         message: &[u8],
@@ -604,7 +631,18 @@ impl SpacesWallet {
         use bitcoin::hashes::{sha256, Hash, HashEngine};
 
         let script_pubkey = match &subject {
-            Subject::Space(label) => {
+            Subject::Label(label) if label.is_numeric() => {
+                let numeric: SNumeric = label.clone().try_into().unwrap();
+                let key = NumericKey::from_numeric::<H>(&numeric);
+                let id = src.get_num_id(&key)?
+                    .ok_or_else(|| anyhow::anyhow!("Numeric '{}' not found", numeric))?;
+                let outpoint = src.get_num_outpoint_by_id(&id)?
+                    .ok_or_else(|| anyhow::anyhow!("Num id not found"))?;
+                let numout = src.get_numout(&outpoint)?
+                    .ok_or_else(|| anyhow::anyhow!("Num output not found"))?;
+                numout.script_pubkey
+            }
+            Subject::Label(label) => {
                 let space_key = SpaceKey::from(H::hash(label.as_ref()));
                 let outpoint = src.get_space_outpoint(&space_key)?
                     .ok_or_else(|| anyhow::anyhow!("Space not found"))?;
@@ -612,22 +650,12 @@ impl SpacesWallet {
                     .ok_or_else(|| anyhow::anyhow!("Space not found"))?;
                 spaceout.script_pubkey
             }
-            Subject::Ptr(sptr) => {
-                let outpoint = src.get_ptr_outpoint(sptr)?
-                    .ok_or_else(|| anyhow::anyhow!("Sptr not found"))?;
-                let ptrout = src.get_ptrout(&outpoint)?
-                    .ok_or_else(|| anyhow::anyhow!("Ptrout not found"))?;
-                ptrout.script_pubkey
-            }
-            Subject::Numeric(numeric) => {
-                let key = NumericKey::from_numeric::<H>(numeric);
-                let sptr = src.get_numeric(&key)?
-                    .ok_or_else(|| anyhow::anyhow!("Numeric '{}' not found", numeric))?;
-                let outpoint = src.get_ptr_outpoint(&sptr)?
-                    .ok_or_else(|| anyhow::anyhow!("Sptr not found"))?;
-                let ptrout = src.get_ptrout(&outpoint)?
-                    .ok_or_else(|| anyhow::anyhow!("Ptrout not found"))?;
-                ptrout.script_pubkey
+            Subject::NumId(id) => {
+                let outpoint = src.get_num_outpoint_by_id(id)?
+                    .ok_or_else(|| anyhow::anyhow!("Num id not found"))?;
+                let numout = src.get_numout(&outpoint)?
+                    .ok_or_else(|| anyhow::anyhow!("Num output not found"))?;
+                numout.script_pubkey
             }
         };
 

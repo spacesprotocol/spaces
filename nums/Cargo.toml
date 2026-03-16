@@ -1,5 +1,5 @@
 [package]
-name = "spaces_ptr"
+name = "spaces_nums"
 version = "0.1.0"
 edition = "2024"
 
@@ -13,6 +13,7 @@ borsh_utils = { path = "../borsh_utils", optional = true }
 serde = { version = "1.0", features = ["derive"], default-features = false, optional = true }
 bech32 = { workspace = true, optional = true }
 hex = { workspace = true, optional = true }
+log = "0.4.29"
 
 [features]
 default = ["std"]

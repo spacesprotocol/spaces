@@ -86,7 +86,7 @@ You can create an on-chain identifier that only the controller of the script pub
 $ space-cli createptr 5120d3c3196cb3ed7fa79c882ed62f8e5942e546130d5ae5983da67dbb6c9bdd2e79
 ```
 
-This command creates a UTXO with the same script pubkey and "mints" a space pointer (sptr) derived from it:
+This command creates a UTXO with the same script pubkey and "mints" a num id derived from it:
 
 ```
 sptr13thcluavwywaktvv466wr6hykf7x5avg49hgdh7w8hh8chsqvwcskmtxpd

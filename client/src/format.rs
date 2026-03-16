@@ -19,7 +19,7 @@ use tabled::{Table, Tabled};
 
 use crate::{
     rpc::ServerInfo,
-    wallets::{ListPtrsResponse, ListSpacesResponse, TxInfo, TxResponse, WalletResponse},
+    wallets::{ListNumsResponse, ListSpacesResponse, TxInfo, TxResponse, WalletResponse},
 };
 use crate::wallets::{WalletInfoWithProgress, WalletStatus};
 
@@ -386,11 +386,11 @@ pub fn print_list_spaces_response(
         Format::Json => println!("{}", serde_json::to_string_pretty(&response).unwrap()),
     }
 }
-pub fn print_list_ptrs_response(response: ListPtrsResponse, format: Format) {
+pub fn print_list_nums_response(response: ListNumsResponse, format: Format) {
     match format {
         Format::Text => {
-            if response.ptrs.is_empty() {
-                println!("No PTRs found");
+            if response.nums.is_empty() {
+                println!("No numerics found");
                 return;
             }
             println!("{}", serde_json::to_string_pretty(&response).unwrap());

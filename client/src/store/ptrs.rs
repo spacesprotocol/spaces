@@ -22,8 +22,8 @@ use spaces_protocol::{
     hasher::{KeyHash},
 };
 use spaces_protocol::slabel::SLabel;
-use spaces_ptr::{Commitment, CommitmentKey, FullPtrOut, NumericKey, PtrOut, PtrSource, RegistryKey, RegistrySptrKey, PtrOutpointKey};
-use spaces_ptr::sptr::Sptr;
+use spaces_nums::{Commitment, CommitmentKey, FullNumOut, NumericKey, NumOut, NumSource, CommitmentTipKey, DelegatorKey, NumOutpointKey};
+use spaces_nums::num_id::NumId;
 use crate::store::{EncodableOutpoint, Sha256};
 
 type SpaceDb = Database<Sha256Hasher>;
@@ -32,16 +32,16 @@ pub type WriteTx<'db> = WriteTransaction<'db, Sha256Hasher>;
 type WriteMemory = BTreeMap<Hash, Option<Vec<u8>>>;
 
 #[derive(Clone)]
-pub struct PtrStore(SpaceDb);
+pub struct NumStore(SpaceDb);
 
 #[derive(Clone)]
-pub struct PtrLiveStore {
-    pub store: PtrStore,
-    pub state: PtrLiveSnapshot,
+pub struct NumLiveStore {
+    pub store: NumStore,
+    pub state: NumLiveSnapshot,
 }
 
 #[derive(Clone)]
-pub struct PtrLiveSnapshot {
+pub struct NumLiveSnapshot {
     db: SpaceDb,
     pub tip: Arc<RwLock<ChainAnchor>>,
     staged: Arc<RwLock<Staged>>,
@@ -55,7 +55,7 @@ pub struct Staged {
     memory: WriteMemory,
 }
 
-impl PtrStore {
+impl NumStore {
     pub fn open(path: PathBuf) -> Result<Self> {
         let db = Self::open_db(path)?;
         Ok(Self(db))
@@ -85,7 +85,7 @@ impl PtrStore {
         Ok(self.0.begin_write()?)
     }
 
-    pub fn begin(&self, genesis_block: &ChainAnchor) -> Result<PtrLiveSnapshot> {
+    pub fn begin(&self, genesis_block: &ChainAnchor) -> Result<NumLiveSnapshot> {
         let snapshot = self.0.begin_read()?;
         let anchor: ChainAnchor = if snapshot.metadata().len() == 0 {
             genesis_block.clone()
@@ -94,7 +94,7 @@ impl PtrStore {
         };
 
         let version = anchor.hash;
-        let live = PtrLiveSnapshot {
+        let live = NumLiveSnapshot {
             db: self.0.clone(),
             tip: Arc::new(RwLock::new(anchor)),
             staged: Arc::new(RwLock::new(Staged {
@@ -108,24 +108,24 @@ impl PtrStore {
     }
 }
 
-pub trait PtrChainState {
-    fn insert_ptrout(&self, key: PtrOutpointKey, ptrout: PtrOut);
+pub trait NumChainState {
+    fn insert_numout(&self, key: NumOutpointKey, ptrout: NumOut);
     fn insert_commitment(&self, key: CommitmentKey, commitment: Commitment);
-    fn insert_registry(&self, key: RegistryKey, state_root: Hash);
-    fn remove_registry(&self, key: RegistryKey);
-    fn insert_registry_delegation(&self, key: RegistrySptrKey, space: SLabel);
-    fn insert_ptr(&self, key: Sptr, outpoint: EncodableOutpoint);
-    fn insert_numeric(&self, key: NumericKey, sptr: Sptr);
+    fn insert_commitment_tip(&self, key: CommitmentTipKey, state_root: Hash);
+    fn remove_commitment_tip(&self, key: CommitmentTipKey);
+    fn insert_delegator(&self, key: DelegatorKey, space: SLabel);
+    fn insert_num_outpoint(&self, key: NumId, outpoint: EncodableOutpoint);
+    fn insert_num(&self, key: NumericKey, id: NumId);
 
     #[allow(dead_code)]
-    fn get_ptr_info(
+    fn get_num_info(
         &mut self,
-        space_hash: &Sptr,
-    ) -> Result<Option<FullPtrOut>>;
+        id: &NumId,
+    ) -> Result<Option<FullNumOut>>;
 }
 
-impl PtrChainState for PtrLiveSnapshot {
-    fn insert_ptrout(&self, key: PtrOutpointKey, ptrout: PtrOut) {
+impl NumChainState for NumLiveSnapshot {
+    fn insert_numout(&self, key: NumOutpointKey, ptrout: NumOut) {
         self.insert(key, ptrout)
     }
 
@@ -133,42 +133,42 @@ impl PtrChainState for PtrLiveSnapshot {
         self.insert(key, commitment)
     }
 
-    fn insert_registry(&self, key: RegistryKey, state_root: Hash) {
+    fn insert_commitment_tip(&self, key: CommitmentTipKey, state_root: Hash) {
         self.insert(key, state_root)
     }
 
-    fn remove_registry(&self, key: RegistryKey) {
+    fn remove_commitment_tip(&self, key: CommitmentTipKey) {
         self.remove(key)
     }
 
-    fn insert_registry_delegation(&self, key: RegistrySptrKey, space: SLabel) {
+    fn insert_delegator(&self, key: DelegatorKey, space: SLabel) {
         self.insert(key, space)
     }
 
-    fn insert_ptr(&self, key: Sptr, outpoint: EncodableOutpoint) {
+    fn insert_num_outpoint(&self, key: NumId, outpoint: EncodableOutpoint) {
         self.insert(key, outpoint)
     }
 
-    fn insert_numeric(&self, key: NumericKey, sptr: Sptr) {
-        self.insert(key, sptr)
+    fn insert_num(&self, key: NumericKey, id: NumId) {
+        self.insert(key, id)
     }
 
-    fn get_ptr_info(&mut self, hash: &Sptr) -> Result<Option<FullPtrOut>> {
-        let outpoint = self.get_ptr_outpoint(hash)?;
+    fn get_num_info(&mut self, hash: &NumId) -> Result<Option<FullNumOut>> {
+        let outpoint = self.get_num_outpoint_by_id(hash)?;
 
         if let Some(outpoint) = outpoint {
-            let spaceout = self.get_ptrout(&outpoint)?;
+            let spaceout = self.get_numout(&outpoint)?;
 
-            return Ok(Some(FullPtrOut {
+            return Ok(Some(FullNumOut {
                 txid: outpoint.txid,
-                ptrout: spaceout.expect("should exist if outpoint exists"),
+                numout: spaceout.expect("should exist if outpoint exists"),
             }));
         }
         Ok(None)
     }
 }
 
-impl PtrLiveSnapshot {
+impl NumLiveSnapshot {
     #[inline]
     pub fn is_dirty(&self) -> bool {
         self.staged.read().expect("read").memory.len() > 0
@@ -311,13 +311,13 @@ impl PtrLiveSnapshot {
     }
 }
 
-impl PtrSource for PtrLiveSnapshot {
-    fn get_ptr_outpoint(
+impl NumSource for NumLiveSnapshot {
+    fn get_num_outpoint_by_id(
         &mut self,
-        sptr: &Sptr,
+        id: &NumId,
     ) -> spaces_protocol::errors::Result<Option<OutPoint>> {
-        let result: Option<EncodableOutpoint> = self.get(*sptr).map_err(|err| {
-            spaces_protocol::errors::Error::IO(format!("getptroutpoint: {}", err.to_string()))
+        let result: Option<EncodableOutpoint> = self.get(*id).map_err(|err| {
+            spaces_protocol::errors::Error::IO(format!("getnumoutpoint: {}", err.to_string()))
         })?;
         Ok(result.map(|out| out.into()))
     }
@@ -329,32 +329,32 @@ impl PtrSource for PtrLiveSnapshot {
         Ok(result)
     }
 
-    fn get_delegator(&mut self, key: &RegistrySptrKey) -> spaces_protocol::errors::Result<Option<SLabel>> {
+    fn get_delegator(&mut self, key: &DelegatorKey) -> spaces_protocol::errors::Result<Option<SLabel>> {
         let result = self.get(*key).map_err(|err| {
             spaces_protocol::errors::Error::IO(format!("getdelegate: {}", err.to_string()))
         })?;
         Ok(result)
     }
 
-    fn get_commitments_tip(&mut self, key: &RegistryKey) -> spaces_protocol::errors::Result<Option<Hash>> {
+    fn get_commitments_tip(&mut self, key: &CommitmentTipKey) -> spaces_protocol::errors::Result<Option<Hash>> {
         let result = self.get(*key).map_err(|err| {
             spaces_protocol::errors::Error::IO(format!("getregistry: {}", err.to_string()))
         })?;
         Ok(result)
     }
 
-    fn get_ptrout(
+    fn get_numout(
         &mut self,
         outpoint: &OutPoint,
-    ) -> spaces_protocol::errors::Result<Option<PtrOut>> {
-        let h = PtrOutpointKey::from_outpoint::<Sha256>(*outpoint);
+    ) -> spaces_protocol::errors::Result<Option<NumOut>> {
+        let h = NumOutpointKey::from_outpoint::<Sha256>(*outpoint);
         let result = self.get(h).map_err(|err| {
             spaces_protocol::errors::Error::IO(format!("getptrout: {}", err.to_string()))
         })?;
         Ok(result)
     }
 
-    fn get_numeric(&mut self, key: &NumericKey) -> spaces_protocol::errors::Result<Option<Sptr>> {
+    fn get_num_id(&mut self, key: &NumericKey) -> spaces_protocol::errors::Result<Option<NumId>> {
         let result = self.get(*key).map_err(|err| {
             spaces_protocol::errors::Error::IO(format!("getnumeric: {}", err.to_string()))
         })?;

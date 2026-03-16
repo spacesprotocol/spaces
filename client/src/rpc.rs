@@ -49,21 +49,23 @@ use tokio::{
     sync::{broadcast, mpsc, oneshot, RwLock},
     task::JoinSet,
 };
+use spaces_protocol::bitcoin::ScriptBuf;
 use spaces_protocol::hasher::Hash;
-use spaces_ptr::{PtrSource, FullPtrOut, NumericKey, PtrOut, Commitment, RegistryKey, CommitmentKey, RegistrySptrKey, PtrOutpointKey, RootAnchor, ChainProofRequest, PtrKeyKind};
-use spaces_ptr::sptr::Sptr;
+use spaces_nums::{NumSource, FullNumOut, NumericKey, NumOut, Commitment, CommitmentTipKey, CommitmentKey, DelegatorKey, NumOutpointKey, RootAnchor, ChainProofRequest, NumKeyKind};
+use spaces_nums::snumeric::SNumeric;
+use spaces_nums::num_id::NumId;
 use spaces_wallet::bitcoin::hashes::sha256;
 use crate::auth::BasicAuthLayer;
 use crate::wallets::WalletInfoWithProgress;
 use crate::{
     calc_progress,
     checker::TxChecker,
-    client::{BlockMeta, PtrBlockMeta, TxEntry, BlockchainInfo},
+    client::{BlockMeta, NumBlockMeta, TxEntry, BlockchainInfo},
     config::ExtendedNetwork,
     deserialize_base64, serialize_base64,
     source::BitcoinRpc,
     wallets::{
-        AddressKind, ListPtrsResponse, ListSpacesResponse, RpcWallet, TxInfo, TxResponse,
+        AddressKind, ListNumsResponse, ListSpacesResponse, RpcWallet, TxInfo, TxResponse,
         WalletCommand, WalletResponse,
     },
 };
@@ -104,10 +106,10 @@ pub struct BlockMetaWithHash {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PtrBlockMetaWithHash {
+pub struct NumBlockMetaWithHash {
     pub hash: BlockHash,
     #[serde(flatten)]
-    pub block_meta: PtrBlockMeta,
+    pub block_meta: NumBlockMeta,
 }
 
 pub enum ChainStateCommand {
@@ -131,29 +133,29 @@ pub enum ChainStateCommand {
         resp: Responder<anyhow::Result<Option<OutPoint>>>,
     },
     GetCommitment {
-        space: SLabel,
+        subject: Subject,
         root: Option<Hash>,
         resp: Responder<anyhow::Result<Option<Commitment>>>,
     },
     GetDelegation {
-        space: SLabel,
-        resp: Responder<anyhow::Result<Option<Sptr>>>,
+        subject: Subject,
+        resp: Responder<anyhow::Result<Option<NumId>>>,
     },
     GetDelegator {
         subject: Subject,
         resp: Responder<anyhow::Result<Option<SLabel>>>,
     },
-    GetPtr {
+    GetNum {
         subject: Subject,
-        resp: Responder<anyhow::Result<Option<FullPtrOut>>>,
+        resp: Responder<anyhow::Result<Option<FullNumOut>>>,
     },
-    GetPtrOutpoint {
+    GetNumOutpoint {
         subject: Subject,
         resp: Responder<anyhow::Result<Option<OutPoint>>>,
     },
-    GetPtrOut {
+    GetNumOut {
         outpoint: OutPoint,
-        resp: Responder<anyhow::Result<Option<PtrOut>>>,
+        resp: Responder<anyhow::Result<Option<NumOut>>>,
     },
     GetTxMeta {
         txid: Txid,
@@ -163,9 +165,9 @@ pub enum ChainStateCommand {
         height_or_hash: HeightOrHash,
         resp: Responder<anyhow::Result<BlockMetaWithHash>>,
     },
-    GetPtrBlockMeta {
+    GetNumBlockMeta {
         height_or_hash: HeightOrHash,
-        resp: Responder<anyhow::Result<PtrBlockMetaWithHash>>,
+        resp: Responder<anyhow::Result<NumBlockMetaWithHash>>,
     },
     EstimateBid {
         target: usize,
@@ -226,26 +228,27 @@ pub trait Rpc {
     #[method(name = "getspaceout")]
     async fn get_spaceout(&self, outpoint: OutPoint) -> Result<Option<SpaceOut>, ErrorObjectOwned>;
 
-    #[method(name = "getptr")]
-    async fn get_ptr(
+    #[method(name = "getnum")]
+    async fn get_num(
         &self,
         subject: Subject,
-    ) -> Result<Option<FullPtrOut>, ErrorObjectOwned>;
+    ) -> Result<Option<FullNumOut>, ErrorObjectOwned>;
 
-    #[method(name = "getptrowner")]
-    async fn get_ptr_owner(
+    #[method(name = "getnumowner")]
+    async fn get_num_owner(
         &self,
         subject: Subject,
     ) -> Result<Option<OutPoint>, ErrorObjectOwned>;
 
-    #[method(name = "getptrout")]
-    async fn get_ptrout(&self, outpoint: OutPoint) -> Result<Option<PtrOut>, ErrorObjectOwned>;
+    #[method(name = "getnumout")]
+    async fn get_numout(&self, outpoint: OutPoint) -> Result<Option<NumOut>, ErrorObjectOwned>;
 
     #[method(name = "getcommitment")]
-    async fn get_commitment(&self, space: SLabel, root: Option<sha256::Hash>) -> Result<Option<Commitment>, ErrorObjectOwned>;
+    async fn get_commitment(&self, subject: Subject, root: Option<sha256::Hash>) -> Result<Option<Commitment>, ErrorObjectOwned>;
 
     #[method(name = "getdelegation")]
-    async fn get_delegation(&self, space: SLabel) -> Result<Option<Sptr>, ErrorObjectOwned>;
+    async fn get_delegation(&self, subject: Subject) -> Result<Option<NumId>, ErrorObjectOwned>;
+
 
     #[method(name = "getdelegator")]
     async fn get_delegator(&self, subject: Subject) -> Result<Option<SLabel>, ErrorObjectOwned>;
@@ -268,11 +271,11 @@ pub trait Rpc {
         height_or_hash: HeightOrHash,
     ) -> Result<BlockMetaWithHash, ErrorObjectOwned>;
 
-    #[method(name = "getptrblockmeta")]
-    async fn get_ptr_block_meta(
+    #[method(name = "getnumblockmeta")]
+    async fn get_num_block_meta(
         &self,
         height_or_hash: HeightOrHash,
-    ) -> Result<PtrBlockMetaWithHash, ErrorObjectOwned>;
+    ) -> Result<NumBlockMetaWithHash, ErrorObjectOwned>;
 
     #[method(name = "gettxmeta")]
     async fn get_tx_meta(&self, txid: Txid) -> Result<Option<TxEntry>, ErrorObjectOwned>;
@@ -291,7 +294,7 @@ pub trait Rpc {
     async fn wallet_can_operate(
         &self,
         wallet: &str,
-        space: SLabel,
+        subject: Subject,
     ) -> Result<bool, ErrorObjectOwned>;
 
     #[method(name = "walletsignschnorr")]
@@ -332,6 +335,13 @@ pub trait Rpc {
 
     #[method(name = "walletgetnewaddress")]
     async fn wallet_get_new_address(
+        &self,
+        wallet: &str,
+        kind: AddressKind,
+    ) -> Result<String, ErrorObjectOwned>;
+
+    #[method(name = "walletincrementaddress")]
+    async fn wallet_increment_address(
         &self,
         wallet: &str,
         kind: AddressKind,
@@ -398,11 +408,11 @@ pub trait Rpc {
         wallet: &str,
     ) -> Result<ListSpacesResponse, ErrorObjectOwned>;
 
-    #[method(name = "walletlistptrs")]
-    async fn wallet_list_ptrs(
+    #[method(name = "walletlistnums")]
+    async fn wallet_list_nums(
         &self,
         wallet: &str,
-    ) -> Result<ListPtrsResponse, ErrorObjectOwned>;
+    ) -> Result<ListNumsResponse, ErrorObjectOwned>;
 
     #[method(name = "walletlistunspent")]
     async fn wallet_list_unspent(
@@ -459,12 +469,14 @@ pub enum RpcWalletRequest {
     Register(RegisterParams),
     #[serde(rename = "transfer")]
     Transfer(TransferSpacesParams),
-    #[serde(rename = "createptr")]
-    CreatePtr(CreatePtrParams),
+    #[serde(rename = "createnum")]
+    CreateNum(CreateNumParams),
     #[serde(rename = "delegate")]
     Delegate(DelegateParams),
     #[serde(rename = "commit")]
     Commit(CommitParams),
+    #[serde(rename = "authorize")]
+    Authorize(AuthorizeParams),
     #[serde(rename = "setfallback")]
     SetFallback(SetFallbackParams),
     #[serde(rename = "send")]
@@ -484,18 +496,25 @@ pub struct TransferSpacesParams {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-pub struct CreatePtrParams {
-    pub spk: String,
+pub struct CreateNumParams {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bind_spk: Option<ScriptBuf>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct DelegateParams {
-    pub space: SLabel,
+    pub subject: Subject,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct AuthorizeParams {
+    pub subject: Subject,
+    pub to: String,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct CommitParams {
-    pub space: SLabel,
+    pub subject: Subject,
     pub root: Option<sha256::Hash>,
 }
 
@@ -922,7 +941,7 @@ impl RpcServer for RpcServerImpl {
         Ok(spaceout)
     }
 
-    async fn get_ptr(&self, subject: Subject) -> Result<Option<FullPtrOut>, ErrorObjectOwned> {
+    async fn get_num(&self, subject: Subject) -> Result<Option<FullNumOut>, ErrorObjectOwned> {
         let info = self
             .store
             .get_ptr(subject)
@@ -931,7 +950,7 @@ impl RpcServer for RpcServerImpl {
         Ok(info)
     }
 
-    async fn get_ptr_owner(&self, subject: Subject) -> Result<Option<OutPoint>, ErrorObjectOwned> {
+    async fn get_num_owner(&self, subject: Subject) -> Result<Option<OutPoint>, ErrorObjectOwned> {
         let info = self
             .store
             .get_ptr_outpoint(subject)
@@ -940,28 +959,28 @@ impl RpcServer for RpcServerImpl {
         Ok(info)
     }
 
-    async fn get_ptrout(&self, outpoint: OutPoint) -> Result<Option<PtrOut>, ErrorObjectOwned> {
+    async fn get_numout(&self, outpoint: OutPoint) -> Result<Option<NumOut>, ErrorObjectOwned> {
         let spaceout = self
             .store
-            .get_ptrout(outpoint)
+            .get_numout(outpoint)
             .await
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))?;
         Ok(spaceout)
     }
 
-    async fn get_commitment(&self, space: SLabel, root: Option<sha256::Hash>) -> Result<Option<Commitment>, ErrorObjectOwned> {
+    async fn get_commitment(&self, subject: Subject, root: Option<sha256::Hash>) -> Result<Option<Commitment>, ErrorObjectOwned> {
         let c = self
             .store
-            .get_commitment(space, root.map(|r| *r.as_ref()))
+            .get_commitment(subject, root.map(|r| *r.as_ref()))
             .await
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))?;
         Ok(c)
     }
 
-    async fn get_delegation(&self, space: SLabel) -> Result<Option<Sptr>, ErrorObjectOwned> {
+    async fn get_delegation(&self, subject: Subject) -> Result<Option<NumId>, ErrorObjectOwned> {
         let delegation = self
             .store
-            .get_delegation(space)
+            .get_delegation(subject)
             .await
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))?;
         Ok(delegation)
@@ -1020,13 +1039,13 @@ impl RpcServer for RpcServerImpl {
         Ok(data)
     }
 
-    async fn get_ptr_block_meta(
+    async fn get_num_block_meta(
         &self,
         height_or_hash: HeightOrHash,
-    ) -> Result<PtrBlockMetaWithHash, ErrorObjectOwned> {
+    ) -> Result<NumBlockMetaWithHash, ErrorObjectOwned> {
         let data = self
             .store
-            .get_ptr_block_meta(height_or_hash)
+            .get_num_block_meta(height_or_hash)
             .await
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))?;
 
@@ -1084,11 +1103,11 @@ impl RpcServer for RpcServerImpl {
     async fn wallet_can_operate(
         &self,
         wallet: &str,
-        space: SLabel,
+        subject: Subject,
     ) -> Result<bool, ErrorObjectOwned> {
         self.wallet(&wallet)
             .await?
-            .send_can_operate(space)
+            .send_can_operate(subject)
             .await
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
     }
@@ -1165,6 +1184,18 @@ impl RpcServer for RpcServerImpl {
         self.wallet(&wallet)
             .await?
             .send_get_new_address(kind)
+            .await
+            .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
+    }
+
+    async fn wallet_increment_address(
+        &self,
+        wallet: &str,
+        kind: AddressKind,
+    ) -> Result<String, ErrorObjectOwned> {
+        self.wallet(&wallet)
+            .await?
+            .send_increment_address(kind)
             .await
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
     }
@@ -1272,13 +1303,13 @@ impl RpcServer for RpcServerImpl {
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
     }
 
-    async fn wallet_list_ptrs(
+    async fn wallet_list_nums(
         &self,
         wallet: &str,
-    ) -> Result<ListPtrsResponse, ErrorObjectOwned> {
+    ) -> Result<ListNumsResponse, ErrorObjectOwned> {
         self.wallet(&wallet)
             .await?
-            .send_list_ptrs()
+            .send_list_nums()
             .await
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
     }
@@ -1312,7 +1343,7 @@ impl RpcServer for RpcServerImpl {
 
     async fn get_fallback(&self, subject: Subject) -> Result<Option<FallbackResponse>, ErrorObjectOwned> {
         let data = match &subject {
-            Subject::Space(label) => {
+            Subject::Label(label) if !label.is_numeric() => {
                 let space_hash = SpaceKey::from(Sha256::hash(label.as_ref()));
                 let fso = self.store.get_space(space_hash).await
                     .map_err(|e| ErrorObjectOwned::owned(-1, e.to_string(), None::<String>))?;
@@ -1325,10 +1356,10 @@ impl RpcServer for RpcServerImpl {
                     None
                 })
             }
-            Subject::Ptr(_) | Subject::Numeric(_) => {
+            _ => {
                 let fpt = self.store.get_ptr(subject).await
                     .map_err(|e| ErrorObjectOwned::owned(-1, e.to_string(), None::<String>))?;
-                fpt.and_then(|fpt| fpt.ptrout.sptr.data.map(|b| b.to_vec()))
+                fpt.and_then(|fpt| fpt.numout.num.data.map(|b| b.to_vec()))
             }
         };
 
@@ -1454,7 +1485,7 @@ impl AsyncChainState {
         height_or_hash: HeightOrHash,
         client: &reqwest::Client,
         rpc: &BitcoinRpc,
-    ) -> Result<PtrBlockMetaWithHash, anyhow::Error> {
+    ) -> Result<NumBlockMetaWithHash, anyhow::Error> {
         let hash = match height_or_hash {
             HeightOrHash::Hash(hash) => hash,
             HeightOrHash::Height(height) => rpc
@@ -1463,7 +1494,7 @@ impl AsyncChainState {
                 .map_err(|e| anyhow!("Could not retrieve block hash ({})", e))?,
         };
 
-        if let Some(block_meta) = state.get_ptrs_block(hash)? {
+        if let Some(block_meta) = state.get_nums_block(hash)? {
             return Ok(block_meta);
         }
 
@@ -1478,17 +1509,17 @@ impl AsyncChainState {
             .and_then(|h| u32::try_from(h).ok())
             .ok_or_else(|| anyhow!("Could not retrieve block height"))?;
 
-        let ptrs_tip = state.ptrs_tip();
+        let ptrs_tip = state.nums_tip();
         if height > ptrs_tip.height {
             return Err(anyhow!(
-                "Ptrs is syncing at height {}, requested block height {}",
+                "Nums index is syncing at height {}, requested block height {}",
                 ptrs_tip.height,
                 height
             ));
         }
-        Ok(PtrBlockMetaWithHash {
+        Ok(NumBlockMetaWithHash {
             hash,
-            block_meta: PtrBlockMeta {
+            block_meta: NumBlockMeta {
                 height,
                 tx_meta: Vec::new(),
             },
@@ -1539,34 +1570,34 @@ impl AsyncChainState {
                     .context("could not fetch spaceout");
                 let _ = resp.send(result);
             }
-            ChainStateCommand::GetPtr { subject, resp } => {
-                let result = resolve_sptr(state, &subject)
-                    .and_then(|sptr| state.get_ptr_info(&sptr));
+            ChainStateCommand::GetNum { subject, resp } => {
+                let result = resolve_num_id(state, &subject)
+                    .and_then(|id| state.get_num_info(&id));
                 let _ = resp.send(result);
             }
-            ChainStateCommand::GetPtrOutpoint { subject, resp } => {
-                let result = resolve_sptr(state, &subject)
-                    .and_then(|sptr| state.get_ptr_outpoint(&sptr).context("could not fetch ptrout"));
+            ChainStateCommand::GetNumOutpoint { subject, resp } => {
+                let result = resolve_num_id(state, &subject)
+                    .and_then(|id| state.get_num_outpoint_by_id(&id).context("could not fetch numout"));
                 let _ = resp.send(result);
             }
-            ChainStateCommand::GetCommitment { space, root, resp } => {
-                let result = get_commitment(state, space, root);
+            ChainStateCommand::GetCommitment { subject, root, resp } => {
+                let result = get_commitment(state, &subject, root);
                 let _ = resp.send(result);
             }
-            ChainStateCommand::GetDelegation { space, resp } => {
-                let result = get_delegation(state, space);
+            ChainStateCommand::GetDelegation { subject, resp } => {
+                let result = get_delegation(state, &subject);
                 let _ = resp.send(result);
             }
             ChainStateCommand::GetDelegator { subject, resp } => {
-                let result = resolve_sptr(state, &subject)
-                    .and_then(|sptr| state.get_delegator(&RegistrySptrKey::from_sptr::<Sha256>(sptr))
+                let result = resolve_num_id(state, &subject)
+                    .and_then(|id| state.get_delegator(&DelegatorKey::from_id::<Sha256>(id))
                         .map_err(|e| anyhow!("could not get delegator: {}", e)));
                 let _ = resp.send(result);
             }
-            ChainStateCommand::GetPtrOut { outpoint, resp } => {
+            ChainStateCommand::GetNumOut { outpoint, resp } => {
                 let result = state
-                    .get_ptrout(&outpoint)
-                    .context("could not fetch ptrouts");
+                    .get_numout(&outpoint)
+                    .context("could not fetch numouts");
                 let _ = resp.send(result);
             }
             ChainStateCommand::GetBlockMeta {
@@ -1578,7 +1609,7 @@ impl AsyncChainState {
                         .await;
                 let _ = resp.send(res);
             }
-            ChainStateCommand::GetPtrBlockMeta {
+            ChainStateCommand::GetNumBlockMeta {
                 height_or_hash,
                 resp,
             } => {
@@ -1679,8 +1710,8 @@ impl AsyncChainState {
         let meta: ChainAnchor = snapshot.metadata().try_into()?;
 
         // Try to compute PTR root if we're past PTR genesis
-        let ptrs_root = if state.can_scan_ptrs(meta.height) {
-            state.ptrs_mut().state.inner()
+        let ptrs_root = if state.can_scan_nums(meta.height) {
+            state.nums_mut().state.inner()
                 .ok()
                 .and_then(|s| s.compute_root().ok())
         } else {
@@ -1689,7 +1720,7 @@ impl AsyncChainState {
 
         Ok(vec![RootAnchor {
             spaces_root,
-            ptrs_root,
+            nums_root: ptrs_root,
             block: ChainAnchor {
                 hash: meta.hash,
                 height: meta.height,
@@ -1711,11 +1742,11 @@ impl AsyncChainState {
     ) -> anyhow::Result<ChainProofResult> {
         let mut most_recent_update = 0u32;
         let mut space_tree_keys: HashSet<Hash> = HashSet::new();
-        let mut ptr_tree_keys: HashSet<Hash> = HashSet::new();
+        let mut num_tree_keys: HashSet<Hash> = HashSet::new();
 
         for space in request.spaces {
             if space.is_numeric() {
-                request.ptrs_keys.push(PtrKeyKind::Numeric(space.try_into()?));
+                request.nums.push(NumKeyKind::Num(space.try_into()?));
                 continue;
             }
 
@@ -1736,43 +1767,43 @@ impl AsyncChainState {
                 }
             }
 
-            let sptr = Sptr::from_spk::<Sha256>(fso.spaceout.script_pubkey);
-            request.ptrs_keys.push(PtrKeyKind::Sptr(sptr));
+            let id = NumId::from_spk::<Sha256>(fso.spaceout.script_pubkey);
+            request.nums.push(NumKeyKind::Id(id));
         }
 
-        for key in request.ptrs_keys {
+        for key in request.nums {
             match key {
-                PtrKeyKind::Numeric(numeric) => {
+                NumKeyKind::Num(numeric) => {
                     let key = NumericKey::from_numeric::<Sha256>(&numeric);
-                    let sptr = state.get_numeric(&key)?;
-                    if let Some(sptr) = sptr {
-                        let fpt = state.get_ptr_info(&sptr)?
-                            .expect("sptr must exist if numeric exists");
-                        ptr_tree_keys.insert(
-                            PtrOutpointKey::from_outpoint::<Sha256>(fpt.outpoint()).into()
+                    let id = state.get_num_id(&key)?;
+                    if let Some(id) = id {
+                        let fpt = state.get_num_info(&id)?
+                            .expect("num id must exist if numeric exists");
+                        num_tree_keys.insert(
+                            NumOutpointKey::from_outpoint::<Sha256>(fpt.outpoint()).into()
                         );
-                        most_recent_update = std::cmp::max(most_recent_update, fpt.ptrout.sptr.last_update);
+                        most_recent_update = std::cmp::max(most_recent_update, fpt.numout.num.last_update);
                     } else {
                         // non-existence proof
-                        ptr_tree_keys.insert(key.into());
+                        num_tree_keys.insert(key.into());
                     }
                 }
-                PtrKeyKind::Sptr(sptr) => {
-                    if let Some(fpt) = state.get_ptr_info(&sptr)? {
-                        ptr_tree_keys.insert(
-                            PtrOutpointKey::from_outpoint::<Sha256>(fpt.outpoint()).into()
+                NumKeyKind::Id(id) => {
+                    if let Some(fpt) = state.get_num_info(&id)? {
+                        num_tree_keys.insert(
+                            NumOutpointKey::from_outpoint::<Sha256>(fpt.outpoint()).into()
                         );
-                        most_recent_update = std::cmp::max(most_recent_update, fpt.ptrout.sptr.last_update);
+                        most_recent_update = std::cmp::max(most_recent_update, fpt.numout.num.last_update);
                     } else {
                         // non-existence proof
-                        ptr_tree_keys.insert(sptr.into());
+                        num_tree_keys.insert(id.into());
                     }
                 }
-                PtrKeyKind::Commitment(k) => {
-                    ptr_tree_keys.insert(k.into());
+                NumKeyKind::Commitment(k) => {
+                    num_tree_keys.insert(k.into());
                 },
-                PtrKeyKind::Registry(k) => {
-                    ptr_tree_keys.insert(k.into());
+                NumKeyKind::CommitmentTip(k) => {
+                    num_tree_keys.insert(k.into());
                 },
             }
         }
@@ -1788,7 +1819,7 @@ impl AsyncChainState {
             ));
         }
 
-        let ptr_tree_keys : Vec<_> = ptr_tree_keys.into_iter().collect();
+        let num_tree_keys : Vec<_> = num_tree_keys.into_iter().collect();
         let space_tree_keys : Vec<_> = space_tree_keys.into_iter().collect();
 
         let cached_height = Self::cached_snapshot_height(tip.height);
@@ -1803,14 +1834,14 @@ impl AsyncChainState {
             let spaces_proof = snapshot.spaces.prove(&space_tree_keys, ProofType::Standard)?;
             let spaces_root = spaces_proof.compute_root()?;
 
-            let ptrs_anchor: ChainAnchor = snapshot.ptrs.metadata().try_into()?;
+            let ptrs_anchor: ChainAnchor = snapshot.nums.metadata().try_into()?;
             if spaces_anchor != ptrs_anchor {
                 return Err(anyhow!(
                     "Spaces and PTRs snapshots at height {} have mismatched anchors",
                     height
                 ));
             }
-            let ptrs_proof = snapshot.ptrs.prove(&ptr_tree_keys, ProofType::Standard)?;
+            let ptrs_proof = snapshot.nums.prove(&num_tree_keys, ProofType::Standard)?;
             let ptrs_root = ptrs_proof.compute_root()?;
 
             (spaces_proof, spaces_root, spaces_anchor, ptrs_proof, ptrs_root)
@@ -1820,7 +1851,7 @@ impl AsyncChainState {
             let spaces_anchor: ChainAnchor = spaces_snapshot.metadata().try_into()?;
             let spaces_proof = spaces_snapshot.prove(&space_tree_keys, ProofType::Standard)?;
 
-            let ptrs_snapshot = state.ptrs_mut().state.inner()?;
+            let ptrs_snapshot = state.nums_mut().state.inner()?;
             let ptrs_anchor: ChainAnchor = ptrs_snapshot.metadata().try_into()?;
             if spaces_anchor != ptrs_anchor {
                 return Err(anyhow!(
@@ -1829,7 +1860,7 @@ impl AsyncChainState {
                     ptrs_anchor.height
                 ));
             }
-            let ptrs_proof = ptrs_snapshot.prove(&ptr_tree_keys, ProofType::Standard)?;
+            let ptrs_proof = ptrs_snapshot.prove(&num_tree_keys, ProofType::Standard)?;
             let ptrs_root = ptrs_proof.compute_root()?;
 
             (spaces_proof, spaces_root, spaces_anchor, ptrs_proof, ptrs_root)
@@ -1952,10 +1983,10 @@ impl AsyncChainState {
         resp_rx.await?
     }
 
-    pub async fn get_ptr(&self, subject: Subject) -> anyhow::Result<Option<FullPtrOut>> {
+    pub async fn get_ptr(&self, subject: Subject) -> anyhow::Result<Option<FullNumOut>> {
         let (resp, resp_rx) = oneshot::channel();
         self.sender
-            .send(ChainStateCommand::GetPtr { subject, resp })
+            .send(ChainStateCommand::GetNum { subject, resp })
             .await?;
         resp_rx.await?
     }
@@ -1971,7 +2002,7 @@ impl AsyncChainState {
     pub async fn get_ptr_outpoint(&self, subject: Subject) -> anyhow::Result<Option<OutPoint>> {
         let (resp, resp_rx) = oneshot::channel();
         self.sender
-            .send(ChainStateCommand::GetPtrOutpoint { subject, resp })
+            .send(ChainStateCommand::GetNumOutpoint { subject, resp })
             .await?;
         resp_rx.await?
     }
@@ -2003,26 +2034,26 @@ impl AsyncChainState {
         resp_rx.await?
     }
 
-    pub async fn get_ptrout(&self, outpoint: OutPoint) -> anyhow::Result<Option<PtrOut>> {
+    pub async fn get_numout(&self, outpoint: OutPoint) -> anyhow::Result<Option<NumOut>> {
         let (resp, resp_rx) = oneshot::channel();
         self.sender
-            .send(ChainStateCommand::GetPtrOut { outpoint, resp })
+            .send(ChainStateCommand::GetNumOut { outpoint, resp })
             .await?;
         resp_rx.await?
     }
 
-    pub async fn get_commitment(&self, space: SLabel, root: Option<Hash>) -> anyhow::Result<Option<Commitment>> {
+    pub async fn get_commitment(&self, subject: Subject, root: Option<Hash>) -> anyhow::Result<Option<Commitment>> {
         let (resp, resp_rx) = oneshot::channel();
         self.sender
-            .send(ChainStateCommand::GetCommitment { space, root, resp })
+            .send(ChainStateCommand::GetCommitment { subject, root, resp })
             .await?;
         resp_rx.await?
     }
 
-    pub async fn get_delegation(&self, space: SLabel) -> anyhow::Result<Option<Sptr>> {
+    pub async fn get_delegation(&self, subject: Subject) -> anyhow::Result<Option<NumId>> {
         let (resp, resp_rx) = oneshot::channel();
         self.sender
-            .send(ChainStateCommand::GetDelegation { space, resp })
+            .send(ChainStateCommand::GetDelegation { subject, resp })
             .await?;
         resp_rx.await?
     }
@@ -2049,13 +2080,13 @@ impl AsyncChainState {
         resp_rx.await?
     }
 
-    pub async fn get_ptr_block_meta(
+    pub async fn get_num_block_meta(
         &self,
         height_or_hash: HeightOrHash,
-    ) -> anyhow::Result<PtrBlockMetaWithHash> {
+    ) -> anyhow::Result<NumBlockMetaWithHash> {
         let (resp, resp_rx) = oneshot::channel();
         self.sender
-            .send(ChainStateCommand::GetPtrBlockMeta {
+            .send(ChainStateCommand::GetNumBlockMeta {
                 height_or_hash,
                 resp,
             })
@@ -2072,15 +2103,16 @@ impl AsyncChainState {
     }
 }
 
-fn resolve_sptr(state: &mut Chain, subject: &Subject) -> anyhow::Result<Sptr> {
+fn resolve_num_id(state: &mut Chain, subject: &Subject) -> anyhow::Result<NumId> {
     match subject {
-        Subject::Ptr(sptr) => Ok(*sptr),
-        Subject::Numeric(numeric) => {
-            let key = NumericKey::from_numeric::<Sha256>(numeric);
-            state.get_numeric(&key)?
+        Subject::NumId(id) => Ok(*id),
+        Subject::Label(label) if label.is_numeric() => {
+            let numeric: SNumeric = label.clone().try_into().unwrap();
+            let key = NumericKey::from_numeric::<Sha256>(&numeric);
+            state.get_num_id(&key)?
                 .ok_or_else(|| anyhow!("numeric '{}' not found", numeric))
         }
-        Subject::Space(_) => Err(anyhow!("expected a ptr or numeric, not a space")),
+        Subject::Label(_) => Err(anyhow!("expected a num id or numeric, not a space")),
     }
 }
 
@@ -2144,25 +2176,56 @@ async fn get_server_info(
 }
 
 
-fn get_delegation(state: &mut Chain, space: SLabel) -> anyhow::Result<Option<Sptr>> {
-    let info = match state.get_space_info(&SpaceKey::from(Sha256::hash(space.as_ref())))? {
-        None => return Ok(None),
-        Some(info) => info
-    };
-    let sptr = Sptr::from_spk::<Sha256>(info.spaceout.script_pubkey);
-    let delegate = state.get_delegator(&RegistrySptrKey::from_sptr::<Sha256>(sptr))?;
+fn resolve_label(state: &mut Chain, subject: &Subject) -> anyhow::Result<SLabel> {
+    match subject {
+        Subject::Label(label) => Ok(label.clone()),
+        Subject::NumId(id) => {
+            let info = state.get_num_info(id)?
+                .ok_or_else(|| anyhow!("num id '{}' not found", id))?;
+            Ok(info.numout.num.name.to_slabel())
+        }
+    }
+}
 
-    // Only return the SPTR if the reverse mapping points back to this space
+fn get_delegation(state: &mut Chain, subject: &Subject) -> anyhow::Result<Option<NumId>> {
+    let (id, label) = match subject {
+        Subject::Label(num) if num.is_numeric() => {
+            let numeric: SNumeric = num.clone().try_into().expect("is_numeric");
+            let key = NumericKey::from_numeric::<Sha256>(&numeric);
+            let Some(num_id) = state.get_num_id(&key)? else {
+                return Ok(None);
+            };
+            let Some(num_info) = state.get_num_info(&num_id)? else {
+                return Ok(None);
+            };
+            (NumId::from_spk::<Sha256>(num_info.numout.script_pubkey), num.clone())
+        },
+        Subject::Label(space) => {
+            let info = match state.get_space_info(
+                &SpaceKey::from(Sha256::hash(space.as_ref()))
+            )? {
+                None => return Ok(None),
+                Some(info) => info
+            };
+            (NumId::from_spk::<Sha256>(info.spaceout.script_pubkey), space.clone())
+        }
+        Subject::NumId(id) => return Ok(Some(id.clone()))
+    };
+
+    let delegate = state.get_delegator(&DelegatorKey::from_id::<Sha256>(id))?;
+
+    // Only return the num id if the reverse mapping points back to this label
     match delegate {
-        Some(delegator) if delegator == space => Ok(Some(sptr)),
+        Some(delegator) if delegator == label => Ok(Some(id)),
         _ => Ok(None),
     }
 }
 
-fn get_commitment(state: &mut Chain, space: SLabel, root: Option<Hash>) -> anyhow::Result<Option<Commitment>> {
+fn get_commitment(state: &mut Chain, subject: &Subject, root: Option<Hash>) -> anyhow::Result<Option<Commitment>> {
+    let label = resolve_label(state, subject)?;
     let root = match root {
         None => {
-            let rk = RegistryKey::from_slabel::<Sha256>(&space);
+            let rk = CommitmentTipKey::from_slabel::<Sha256>(&label);
             let k = state.get_commitments_tip(&rk)
                     .map_err(|e| anyhow!("could not fetch state root: {}", e))?;
             if let Some(k) = k {
@@ -2174,7 +2237,7 @@ fn get_commitment(state: &mut Chain, space: SLabel, root: Option<Hash>) -> anyho
         Some(r) => r,
     };
 
-    let ck = CommitmentKey::new::<Sha256>(&space, root);
+    let ck = CommitmentKey::new::<Sha256>(&label, root);
     state.get_commitment(&ck)
         .map_err(|e|
             anyhow!("could not fetch commitment with root: {}: {}", hex::encode(root), e)
