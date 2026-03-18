@@ -400,7 +400,7 @@ fn commit_params_to_req(
 
     let num_info = chain
         .get_num_info(&spk_id)?
-        .ok_or_else(|| anyhow!("commit: num '{}' not found - use delegate first", spk_id))?;
+        .ok_or_else(|| anyhow!("commit: num '{}' not found - use operate first", spk_id))?;
 
     if !wallet.is_mine(num_info.numout.script_pubkey.clone()) {
         return Err(anyhow!("commit: you don't control '{}'", spk_id));
@@ -699,7 +699,7 @@ impl RpcWallet {
         Ok(())
     }
 
-    /// Check if wallet can operate on a subject by verifying it controls the delegated num
+    /// Check if wallet can operate on a subject by verifying it controls the operator num
     fn can_operate(
         wallet: &SpacesWallet,
         chain: &mut Chain,
@@ -1567,7 +1567,7 @@ impl RpcWallet {
                     let reqs = commit_params_to_req(chain, wallet, params)?;
                     builder = builder.add_commitment(reqs)
                 }
-                RpcWalletRequest::Delegate(params) => {
+                RpcWalletRequest::Operate(params) => {
                     let unique_num_spk = advance_address_to_unique_num_spk(chain, wallet)?;
 
                     match &params.subject {
@@ -1575,14 +1575,14 @@ impl RpcWallet {
                             let numeric: SNumeric = label.clone().try_into().unwrap();
                             let key = NumericKey::from_numeric::<Sha256>(&numeric);
                             let id = chain.get_num_id(&key)?.ok_or_else(|| {
-                                anyhow!("delegate: numeric '{}' not found", label)
+                                anyhow!("operate: numeric '{}' not found", label)
                             })?;
                             let num = match chain.get_num_info(&id)? {
-                                None => return Err(anyhow!("delegate: num '{}' not found", id)),
+                                None => return Err(anyhow!("operate: num '{}' not found", id)),
                                 Some(full)
                                     if !wallet.is_mine(full.numout.script_pubkey.clone()) =>
                                 {
-                                    return Err(anyhow!("delegate: you don't own '{}'", label))
+                                    return Err(anyhow!("operate: you don't own '{}'", label))
                                 }
                                 Some(full)
                                     if wallet
@@ -1590,7 +1590,7 @@ impl RpcWallet {
                                         .is_none() =>
                                 {
                                     return Err(anyhow!(
-                                        "delegate '{}': wallet already has a pending tx",
+                                        "operate '{}': wallet already has a pending tx",
                                         label
                                     ))
                                 }
@@ -1603,11 +1603,11 @@ impl RpcWallet {
                         }
                         Subject::NumId(id) => {
                             let num = match chain.get_num_info(id)? {
-                                None => return Err(anyhow!("delegate: num '{}' not found", id)),
+                                None => return Err(anyhow!("operate: num '{}' not found", id)),
                                 Some(full)
                                     if !wallet.is_mine(full.numout.script_pubkey.clone()) =>
                                 {
-                                    return Err(anyhow!("delegate: you don't own '{}'", id))
+                                    return Err(anyhow!("operate: you don't own '{}'", id))
                                 }
                                 Some(full)
                                     if wallet
@@ -1615,7 +1615,7 @@ impl RpcWallet {
                                         .is_none() =>
                                 {
                                     return Err(anyhow!(
-                                        "delegate '{}': wallet already has a pending tx",
+                                        "operate '{}': wallet already has a pending tx",
                                         id
                                     ))
                                 }
@@ -1631,18 +1631,18 @@ impl RpcWallet {
 
                             let full = match chain.get_space_info(&spacehash)? {
                                 None => {
-                                    return Err(anyhow!("delegate: space '{}' not found", label))
+                                    return Err(anyhow!("operate: space '{}' not found", label))
                                 }
                                 Some(full)
                                     if full.spaceout.space.is_none()
                                         || !full.spaceout.space.as_ref().unwrap().is_owned()
                                         || !wallet.is_mine(full.spaceout.script_pubkey.clone()) =>
                                 {
-                                    return Err(anyhow!("delegate: you don't own '{}'", label))
+                                    return Err(anyhow!("operate: you don't own '{}'", label))
                                 }
                                 Some(full) if wallet.get_utxo(full.outpoint()).is_none() => {
                                     return Err(anyhow!(
-                                        "delegate '{}': wallet already has a pending tx",
+                                        "operate '{}': wallet already has a pending tx",
                                         label
                                     ))
                                 }
@@ -1661,13 +1661,13 @@ impl RpcWallet {
                         }
                     }
                 }
-                RpcWalletRequest::Authorize(params) => {
+                RpcWalletRequest::Delegate(params) => {
                     let delegate_utxo = find_delegate_utxo(chain, &params.subject)?;
                     if !wallet.is_mine(delegate_utxo.numout.script_pubkey.clone()) {
-                        return Err(anyhow!("authorize: you don't own '{}'", params.subject));
+                        return Err(anyhow!("delegate: you don't own '{}'", params.subject));
                     }
                     let Some(r) = Self::resolve(network, chain, &params.to, true)? else {
-                        return Err(anyhow!("authorize: recipient '{}' not found", params.to));
+                        return Err(anyhow!("delegate: recipient '{}' not found", params.to));
                     };
                     builder = builder.add_num_transfer(NumTransfer {
                         num: delegate_utxo,
@@ -2137,7 +2137,7 @@ fn find_delegate_utxo(chain: &mut Chain, subject: &Subject) -> anyhow::Result<Fu
                 .expect("valid numeric");
             let key = NumericKey::from_numeric::<Sha256>(&numeric);
             let id = chain.get_num_id(&key)?.ok_or_else(|| {
-                anyhow!("authorize: numeric '{}' not found", label)
+                anyhow!("delegate: numeric '{}' not found", label)
             })?;
             Some(id)
         }
@@ -2146,50 +2146,50 @@ fn find_delegate_utxo(chain: &mut Chain, subject: &Subject) -> anyhow::Result<Fu
 
     let target = if let Some(num_id) = num_id {
         let Some(num_utxo) = chain.get_num_info(&num_id)? else {
-            return Err(anyhow!("authorize: num {} not found", subject));
+            return Err(anyhow!("delegate: num {} not found", subject));
         };
 
         let target = NumId::from_spk::<Sha256>(num_utxo.numout.script_pubkey);
         if target == num_id {
-            return Err(anyhow!("authorize: num has no separate delegation - call delegate first"))
+            return Err(anyhow!("delegate: num has no separate operator - call operate first"))
         }
 
         let dk = DelegatorKey::from_id::<Sha256>(target);
         let Some(delegator) = chain.get_delegator(&dk)? else {
-            return Err(anyhow!("authorize: num {} is not delegated - call delegate first", subject));
+            return Err(anyhow!("delegate: num {} is not operated - call operate first", subject));
         };
         if !delegator.is_numeric() {
-            return Err(anyhow!("authorize: num {} is delegated to {} - call delegate to switch",
+            return Err(anyhow!("delegate: num {} is delegated to {} - call operate to switch",
                 subject, delegator));
         }
         let numeric : SNumeric = delegator.clone().try_into().expect("valid numeric");
 
         if numeric != num_utxo.numout.num.name {
-            return Err(anyhow!("authorize: num {} is delegated to {} - call delegate to switch",
+            return Err(anyhow!("delegate: num {} is delegated to {} - call operate to switch",
                 subject, delegator));
         }
 
         target
     } else {
         let Subject::Label(label) = subject else {
-            return Err(anyhow!("authorize: expected a space, got {}", subject))
+            return Err(anyhow!("delegate: expected a space, got {}", subject))
         };
 
         let space_utxo = chain
             .get_space_info(&SpaceKey::from(Sha256::hash(label.as_ref())))?
-            .ok_or_else(|| anyhow!("authorize: space '{}' not found", label))?;
+            .ok_or_else(|| anyhow!("delegate: space '{}' not found", label))?;
         let Some(space) = space_utxo.spaceout.space else {
-            return Err(anyhow!("authorize: space {} not found", subject));
+            return Err(anyhow!("delegate: space {} not found", subject));
         };
 
         let target = NumId::from_spk::<Sha256>(space_utxo.spaceout.script_pubkey);
         let dk = DelegatorKey::from_id::<Sha256>(target);
         let Some(delegator) = chain.get_delegator(&dk)? else {
-            return Err(anyhow!("authorize: space {} is not delegated - call delegate first", subject));
+            return Err(anyhow!("delegate: space {} is not operated - call operate first", subject));
         };
 
         if delegator != space.name {
-            return Err(anyhow!("authorize: num {} is delegated to {} - call delegate to switch",
+            return Err(anyhow!("delegate: num {} is delegated to {} - call operate to switch",
             target, delegator)
             );
         }
@@ -2198,7 +2198,7 @@ fn find_delegate_utxo(chain: &mut Chain, subject: &Subject) -> anyhow::Result<Fu
     };
 
     let Some(num_utxo) = chain.get_num_info(&target)? else {
-        return Err(anyhow!("authorize: target '{}' not found - call delegate first", target));
+        return Err(anyhow!("delegate: target '{}' not found - call operate first", target));
     };
 
     Ok(num_utxo)
