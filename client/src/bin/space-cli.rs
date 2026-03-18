@@ -28,7 +28,7 @@ use spaces_client::{
     },
     wallets::{AddressKind, WalletResponse},
 };
-use spaces_client::rpc::{AuthorizeParams, CommitParams, CreateNumParams, DelegateParams, SetFallbackParams};
+use spaces_client::rpc::{CommitParams, CreateNumParams, DelegateParams, OperateParams, SetFallbackParams};
 use spaces_client::store::Sha256;
 use spaces_protocol::bitcoin::{Amount, FeeRate, OutPoint, Txid};
 use spaces_protocol::slabel::SLabel;
@@ -188,8 +188,8 @@ enum Commands {
         fee_rate: Option<u64>,
     },
     /// Initialize a space or numeric for operation of off-chain subspaces
-    #[command(name = "delegate")]
-    Delegate {
+    #[command(name = "operate")]
+    Operate {
         /// Space name, numeric, or num id
         subject: Subject,
         /// Fee rate to use in sat/vB
@@ -216,9 +216,9 @@ enum Commands {
         #[arg(long, short)]
         fee_rate: Option<u64>,
     },
-    /// Authorize someone else to operate a space or numeric
-    #[command(name = "authorize")]
-    Authorize {
+    /// Delegate operation of a space or numeric to someone else
+    #[command(name = "delegate")]
+    Delegate {
         /// Space name, numeric, or num id
         #[arg(display_order = 0)]
         subject: Subject,
@@ -964,9 +964,9 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
                 .map_err(|e| ClientError::Custom(e.to_string()))?;
             println!("{}", serde_json::to_string(&numout).expect("result"));
         }
-        Commands::Delegate { subject, fee_rate } => {
+        Commands::Operate { subject, fee_rate } => {
             cli.send_request(
-                Some(RpcWalletRequest::Delegate(DelegateParams {
+                Some(RpcWalletRequest::Operate(OperateParams {
                     subject,
                 })),
                 None,
@@ -974,7 +974,7 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
                 false,
             )
                 .await?;
-            println!("Delegation should be complete once tx is confirmed");
+            println!("Operate setup should be complete once tx is confirmed");
         }
         Commands::Commit { subject, root, fee_rate } => {
             cli.send_request(
@@ -1001,9 +1001,9 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
                 .await?;
             println!("Rollback transaction sent");
         }
-        Commands::Authorize { subject, to, fee_rate } => {
+        Commands::Delegate { subject, to, fee_rate } => {
             cli.send_request(
-                Some(RpcWalletRequest::Authorize(AuthorizeParams {
+                Some(RpcWalletRequest::Delegate(DelegateParams {
                     subject,
                     to,
                 })),

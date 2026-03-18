@@ -7,7 +7,7 @@ use spaces_client::{
     },
     wallets::{AddressKind, WalletResponse},
 };
-use spaces_client::rpc::{CommitParams, CreateNumParams, DelegateParams, SetFallbackParams, Subject, TransferSpacesParams};
+use spaces_client::rpc::{CommitParams, CreateNumParams, OperateParams, SetFallbackParams, Subject, TransferSpacesParams};
 use spaces_client::store::Sha256;
 use spaces_protocol::{bitcoin, bitcoin::{FeeRate}};
 use spaces_protocol::bitcoin::hashes::{sha256, Hash};
@@ -174,7 +174,7 @@ async fn it_should_commit_and_rollback(rig: &TestRig) -> anyhow::Result<()> {
     let delegate = wallet_do(
         rig,
         ALICE,
-        vec![RpcWalletRequest::Delegate(DelegateParams {
+        vec![RpcWalletRequest::Operate(OperateParams {
             subject: space_name.clone().into(),
         })],
         false,
@@ -327,7 +327,7 @@ async fn it_should_handle_multiple_commitments(rig: &TestRig) -> anyhow::Result<
         let delegate = wallet_do(
             rig,
             ALICE,
-            vec![RpcWalletRequest::Delegate(DelegateParams {
+            vec![RpcWalletRequest::Operate(OperateParams {
                 subject: space_name.clone().into(),
             })],
             false,
@@ -451,7 +451,7 @@ async fn it_should_override_pending_commitments(rig: &TestRig) -> anyhow::Result
     let delegate = wallet_do(
         rig,
         ALICE,
-        vec![RpcWalletRequest::Delegate(DelegateParams {
+        vec![RpcWalletRequest::Operate(OperateParams {
             subject: space_name.clone().into(),
         })],
         false,
@@ -1161,7 +1161,7 @@ async fn it_should_transfer_ptr_with_n_to_n_rule(rig: &TestRig) -> anyhow::Resul
 
         // Delegate to create PTR
         wallet_do(rig, ALICE, vec![
-            RpcWalletRequest::Delegate(DelegateParams { subject: space_name.clone().into() })
+            RpcWalletRequest::Operate(OperateParams { subject: space_name.clone().into() })
         ], false).await?;
         mine_and_sync(rig, 1).await?;
 
@@ -1223,7 +1223,7 @@ async fn it_should_delegate_and_commit_numeric(rig: &TestRig) -> anyhow::Result<
 
     // Delegate the numeric
     let delegate_res = wallet_do(rig, ALICE, vec![
-        RpcWalletRequest::Delegate(DelegateParams {
+        RpcWalletRequest::Operate(OperateParams {
             subject: Subject::Label(numeric_label.clone()),
         })
     ], false).await?;
@@ -1309,7 +1309,7 @@ async fn it_should_authorize_numeric_to_another_wallet(rig: &TestRig) -> anyhow:
 
     // Delegate it
     let delegate_res = wallet_do(rig, ALICE, vec![
-        RpcWalletRequest::Delegate(DelegateParams {
+        RpcWalletRequest::Operate(OperateParams {
             subject: Subject::Label(numeric_label.clone()),
         })
     ], false).await?;
@@ -1395,7 +1395,7 @@ async fn it_should_authorize_numeric_to_another_wallet(rig: &TestRig) -> anyhow:
     // Test 5: Alice re-delegates to revoke Bob's authorization
     println!("\nTest 5: Alice re-delegates to revoke Bob's authorization");
     let redelegate_res = wallet_do(rig, ALICE, vec![
-        RpcWalletRequest::Delegate(DelegateParams {
+        RpcWalletRequest::Operate(OperateParams {
             subject: Subject::Label(numeric_label.clone()),
         })
     ], false).await?;
@@ -1493,14 +1493,14 @@ async fn it_should_create_multiple_nums_same_tx(rig: &TestRig) -> anyhow::Result
     // Test 3: Delegate both and verify independent delegations
     println!("\nTest 3: Delegate both nums independently");
     wallet_do(rig, ALICE, vec![
-        RpcWalletRequest::Delegate(DelegateParams {
+        RpcWalletRequest::Operate(OperateParams {
             subject: Subject::Label(name_a.to_slabel()),
         })
     ], false).await?;
     mine_and_sync(rig, 1).await?;
 
     wallet_do(rig, ALICE, vec![
-        RpcWalletRequest::Delegate(DelegateParams {
+        RpcWalletRequest::Operate(OperateParams {
             subject: Subject::Label(name_b.to_slabel()),
         })
     ], false).await?;

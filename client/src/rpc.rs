@@ -471,12 +471,12 @@ pub enum RpcWalletRequest {
     Transfer(TransferSpacesParams),
     #[serde(rename = "createnum")]
     CreateNum(CreateNumParams),
-    #[serde(rename = "delegate")]
-    Delegate(DelegateParams),
+    #[serde(rename = "operate")]
+    Operate(OperateParams),
     #[serde(rename = "commit")]
     Commit(CommitParams),
-    #[serde(rename = "authorize")]
-    Authorize(AuthorizeParams),
+    #[serde(rename = "delegate")]
+    Delegate(DelegateParams),
     #[serde(rename = "setfallback")]
     SetFallback(SetFallbackParams),
     #[serde(rename = "send")]
@@ -502,12 +502,12 @@ pub struct CreateNumParams {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-pub struct DelegateParams {
+pub struct OperateParams {
     pub subject: Subject,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-pub struct AuthorizeParams {
+pub struct DelegateParams {
     pub subject: Subject,
     pub to: String,
 }
@@ -865,7 +865,12 @@ impl RpcServerImpl {
             let addr = listener.local_addr()?;
             info!("Listening at {addr}");
 
-            let handle = listener.start(self.clone().into_rpc());
+            let mut module = self.clone().into_rpc();
+            let methods: Vec<String> = module.method_names().map(|s| s.to_string()).collect();
+            module.register_method("rpc.discover", move |_, _| {
+                serde_json::json!({ "methods": methods })
+            }).expect("register rpc.discover");
+            let handle = listener.start(module);
 
             let mut signal = signal.subscribe();
             set.spawn(async move {
