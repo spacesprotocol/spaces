@@ -11,6 +11,11 @@ path = "src/bin/space-cli.rs"
 name = "spaced"
 path = "src/bin/spaced.rs"
 
+[[bin]]
+name = "rpc-docs"
+path = "src/bin/rpc-docs.rs"
+required-features = ["schema"]
+
 [lib]
 path = "src/lib.rs"
 
@@ -42,6 +47,10 @@ tabled = { workspace = true }
 colored = { workspace = true }
 tower = { workspace = true }
 hyper = { workspace = true }
+schemars = { version = "0.8", optional = true }
+
+[features]
+schema = ["schemars"]
 
 [dev-dependencies]
 assert_cmd = { workspace = true }

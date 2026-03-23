@@ -131,6 +131,8 @@ pub struct NumRequest {
 pub struct CommitmentRequest {
     pub numout: FullNumOut,
     pub root: Option<Hash>,
+    /// The subject (space or num) being committed for
+    pub subject: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -144,6 +146,8 @@ pub struct SpaceTransfer {
 pub struct NumTransfer {
     pub num: FullNumOut,
     pub recipient: SpaceAddress,
+    /// Whether this transfer is a delegation (authorize) rather than a regular transfer
+    pub is_delegate: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -651,6 +655,12 @@ impl Iterator for BuilderIterator<'_> {
                 }))
             }
             StackOp::Num(params) => {
+                let transfers: Vec<_> = params.transfers.iter().map(|t| {
+                    (t.num.numout.num.name.to_string(), t.recipient.script_pubkey(), t.is_delegate)
+                }).collect();
+                let binds: Vec<_> = params.binds.iter().map(|b| {
+                    b.bind_spk.clone()
+                }).collect();
                 let tx = create_num_tx(
                     self.wallet,
                     self.median_time,
@@ -661,12 +671,23 @@ impl Iterator for BuilderIterator<'_> {
                     params,
                 );
                 Some(tx.map(|tx| {
-                    let detailed = TxRecord::new(tx);
-                    // TODO: add num metadata
+                    let mut detailed = TxRecord::new(tx);
+                    for (name, spk, is_delegate) in transfers {
+                        if is_delegate {
+                            detailed.add_delegate(name, spk);
+                        } else {
+                            detailed.add_transfer_num(name, spk);
+                        }
+                    }
+                    for spk in binds {
+                        detailed.add_create_num(String::new(), spk);
+                    }
                     detailed
                 }))
             }
             StackOp::NumDelegate(d) => {
+                let num_name = d.num.numout.num.name.to_string();
+                let delegate_spk = d.unique_num_spk.clone();
                 let tx = create_num_delegate_tx(
                     self.wallet,
                     self.median_time,
@@ -676,9 +697,22 @@ impl Iterator for BuilderIterator<'_> {
                     self.force,
                     d,
                 );
-                Some(tx.map(|tx| TxRecord::new(tx)))
+                Some(tx.map(|tx| {
+                    let mut detailed = TxRecord::new(tx);
+                    detailed.add_delegate(num_name, delegate_spk);
+                    detailed
+                }))
             }
             StackOp::Commitment(commitments) => {
+                let is_rollback = commitments.iter().all(|c| c.root.is_none());
+                let event_info: Vec<_> = commitments.iter().map(|c| {
+                    let root_hex = c.root.map(|r|
+                        r.iter().map(|b| format!("{:02x}", b)).collect::<String>()
+                    );
+                    let name = c.subject.clone()
+                        .unwrap_or_else(|| c.numout.numout.num.name.to_string());
+                    (name, root_hex)
+                }).collect();
                 let tx = create_commitment_tx(
                     self.wallet,
                     self.median_time,
@@ -688,7 +722,17 @@ impl Iterator for BuilderIterator<'_> {
                     self.force,
                     commitments,
                 );
-                Some(tx.map(|tx| TxRecord::new(tx)))
+                Some(tx.map(|tx| {
+                    let mut detailed = TxRecord::new(tx);
+                    for (name, root) in event_info {
+                        if is_rollback {
+                            detailed.add_rollback_root(name);
+                        } else if let Some(root) = root {
+                            detailed.add_commit_root(name, root);
+                        }
+                    }
+                    detailed
+                }))
             }
         }
     }

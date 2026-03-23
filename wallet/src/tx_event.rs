@@ -77,6 +77,26 @@ pub struct ExecuteEventDetails {
     pub n: usize,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CreateNumEventDetails {
+    pub script_pubkey: ScriptBuf,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TransferNumEventDetails {
+    pub script_pubkey: ScriptBuf,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DelegateEventDetails {
+    pub script_pubkey: ScriptBuf,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CommitRootEventDetails {
+    pub root: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TxEventKind {
@@ -91,6 +111,11 @@ pub enum TxEventKind {
     Send,
     FeeBump,
     Buy,
+    CreateNum,
+    TransferNum,
+    Delegate,
+    CommitRoot,
+    RollbackRoot,
 }
 
 impl TxEvent {
@@ -431,6 +456,63 @@ impl TxRecord {
         });
     }
 
+    pub fn add_create_num(&mut self, num: String, to: ScriptBuf) {
+        self.events.push(TxEvent {
+            kind: TxEventKind::CreateNum,
+            space: Some(num),
+            previous_spaceout: None,
+            details: Some(
+                serde_json::to_value(CreateNumEventDetails { script_pubkey: to })
+                    .expect("json value"),
+            ),
+        });
+    }
+
+    pub fn add_transfer_num(&mut self, num: String, to: ScriptBuf) {
+        self.events.push(TxEvent {
+            kind: TxEventKind::TransferNum,
+            space: Some(num),
+            previous_spaceout: None,
+            details: Some(
+                serde_json::to_value(TransferNumEventDetails { script_pubkey: to })
+                    .expect("json value"),
+            ),
+        });
+    }
+
+    pub fn add_delegate(&mut self, num: String, to: ScriptBuf) {
+        self.events.push(TxEvent {
+            kind: TxEventKind::Delegate,
+            space: Some(num),
+            previous_spaceout: None,
+            details: Some(
+                serde_json::to_value(DelegateEventDetails { script_pubkey: to })
+                    .expect("json value"),
+            ),
+        });
+    }
+
+    pub fn add_commit_root(&mut self, num: String, root: String) {
+        self.events.push(TxEvent {
+            kind: TxEventKind::CommitRoot,
+            space: Some(num),
+            previous_spaceout: None,
+            details: Some(
+                serde_json::to_value(CommitRootEventDetails { root })
+                    .expect("json value"),
+            ),
+        });
+    }
+
+    pub fn add_rollback_root(&mut self, num: String) {
+        self.events.push(TxEvent {
+            kind: TxEventKind::RollbackRoot,
+            space: Some(num),
+            previous_spaceout: None,
+            details: None,
+        });
+    }
+
     pub fn add_bid(&mut self, wallet: &mut SpacesWallet, previous: &FullSpaceOut, amount: Amount) {
         let space = previous.spaceout.space.as_ref().expect("space not found");
         let previous_bid = match space.covenant {
@@ -540,6 +622,11 @@ impl Display for TxEventKind {
             TxEventKind::FeeBump => "fee-bump",
             TxEventKind::Buy => "buy",
             TxEventKind::Renew => "renew",
+            TxEventKind::CreateNum => "create-num",
+            TxEventKind::TransferNum => "transfer-num",
+            TxEventKind::Delegate => "delegate",
+            TxEventKind::CommitRoot => "commit-root",
+            TxEventKind::RollbackRoot => "rollback-root",
         })
     }
 }
@@ -560,6 +647,11 @@ impl FromStr for TxEventKind {
             "fee-bump" => Ok(TxEventKind::FeeBump),
             "buy" => Ok(TxEventKind::Buy),
             "renew" => Ok(TxEventKind::Renew),
+            "create-num" => Ok(TxEventKind::CreateNum),
+            "transfer-num" => Ok(TxEventKind::TransferNum),
+            "delegate" => Ok(TxEventKind::Delegate),
+            "commit-root" => Ok(TxEventKind::CommitRoot),
+            "rollback-root" => Ok(TxEventKind::RollbackRoot),
             _ => Err("invalid event kind"),
         }
     }
