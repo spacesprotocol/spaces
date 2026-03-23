@@ -184,10 +184,17 @@ impl Args {
         };
 
         let bitcoin_rpc_auth = if let Some(cookie) = args.bitcoin_rpc_cookie {
-            let cookie = std::fs::read_to_string(cookie)?;
+            let cookie = std::fs::read_to_string(&cookie).map_err(|e| {
+                anyhow!("Failed to read Bitcoin RPC cookie '{}': {}", cookie.display(), e)
+            })?;
             BitcoinRpcAuth::Cookie(cookie)
         } else if let Some(user) = args.bitcoin_rpc_user {
             BitcoinRpcAuth::UserPass(user, args.bitcoin_rpc_password.expect("password"))
+        } else if let Some(cookie) = default_bitcoin_cookie_path(&args.chain)
+            .and_then(|p| std::fs::read_to_string(&p).ok())
+        {
+            log::info!("Using Bitcoin Core cookie authentication");
+            BitcoinRpcAuth::Cookie(cookie)
         } else {
             BitcoinRpcAuth::None
         };
@@ -254,6 +261,30 @@ pub fn safe_exit(code: i32) -> ! {
     let _ = std::io::stderr().lock().flush();
 
     std::process::exit(code)
+}
+
+/// Returns the default Bitcoin Core cookie file path for the given network.
+pub fn default_bitcoin_cookie_path(network: &ExtendedNetwork) -> Option<PathBuf> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let base = if cfg!(target_os = "linux") {
+        home?.join(".bitcoin")
+    } else if cfg!(target_os = "macos") {
+        home?.join("Library/Application Support/Bitcoin")
+    } else if cfg!(target_os = "windows") {
+        std::env::var_os("APPDATA").map(PathBuf::from)?.join("Bitcoin")
+    } else {
+        return None;
+    };
+
+    let path = match network {
+        ExtendedNetwork::Mainnet => base.join(".cookie"),
+        ExtendedNetwork::Testnet => base.join("testnet3").join(".cookie"),
+        ExtendedNetwork::Testnet4 => base.join("testnet4").join(".cookie"),
+        ExtendedNetwork::Signet => base.join("signet").join(".cookie"),
+        ExtendedNetwork::Regtest => base.join("regtest").join(".cookie"),
+    };
+
+    Some(path)
 }
 
 pub fn default_bitcoin_rpc_url(network: &ExtendedNetwork) -> &'static str {

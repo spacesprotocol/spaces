@@ -134,16 +134,20 @@ impl fmt::Display for ResolvableTarget {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct TxResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<BTreeMap<String, String>>,
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub txid: Txid,
+    #[cfg_attr(feature = "schema", schemars(with = "Vec<String>"))]
     pub events: Vec<TxEvent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub raw: Option<String>,
 }
 
 #[derive(Copy, Clone, Serialize, Deserialize, Debug)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum WalletStatus {
     #[serde(rename = "header_sync")]
     HeadersSync,
@@ -168,6 +172,7 @@ pub enum WalletStatus {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct WalletProgressUpdate {
     pub status: WalletStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -181,44 +186,62 @@ impl WalletProgressUpdate {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct WalletInfoWithProgress {
     #[serde(flatten)]
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub info: WalletInfo,
     pub sync: WalletProgressUpdate,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ListSpacesResponse {
+    #[cfg_attr(feature = "schema", schemars(with = "Vec<String>"))]
     pub pending: Vec<SLabel>,
+    #[cfg_attr(feature = "schema", schemars(with = "Vec<String>"))]
     pub winning: Vec<FullSpaceOut>,
+    #[cfg_attr(feature = "schema", schemars(with = "Vec<String>"))]
     pub outbid: Vec<FullSpaceOut>,
+    #[cfg_attr(feature = "schema", schemars(with = "Vec<String>"))]
     pub owned: Vec<FullSpaceOut>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct NumEntry {
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub txid: Txid,
     #[serde(flatten)]
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub numout: NumOut,
+    #[cfg_attr(feature = "schema", schemars(with = "Option<String>"))]
     pub delegating_for: Option<SLabel>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ListNumsResponse {
     pub nums: Vec<NumEntry>,
 }
 
 #[derive(Tabled, Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[tabled(rename_all = "UPPERCASE")]
 pub struct TxInfo {
     #[tabled(display_with = "display_block_height")]
     pub block_height: Option<u32>,
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub txid: Txid,
+    #[cfg_attr(feature = "schema", schemars(with = "u64"))]
     pub sent: Amount,
+    #[cfg_attr(feature = "schema", schemars(with = "u64"))]
     pub received: Amount,
     #[tabled(display_with = "display_fee")]
+    #[cfg_attr(feature = "schema", schemars(with = "Option<u64>"))]
     pub fee: Option<Amount>,
     #[tabled(rename = "DETAILS", display_with = "display_events")]
+    #[cfg_attr(feature = "schema", schemars(with = "Vec<String>"))]
     pub events: Vec<TxEvent>,
 }
 
@@ -254,6 +277,7 @@ fn display_events(events: &Vec<TxEvent>) -> String {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct WalletResponse {
     pub result: Vec<TxResponse>,
 }
@@ -329,6 +353,7 @@ pub enum WalletCommand {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, ValueEnum)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum AddressKind {
     Coin,
     Space,
@@ -409,6 +434,7 @@ fn commit_params_to_req(
     Ok(CommitmentRequest {
         numout: num_info,
         root: p.root.map(|p| *p.as_ref()),
+        subject: Some(p.subject.to_string()),
     })
 }
 
@@ -1353,6 +1379,7 @@ impl RpcWallet {
                                 builder = builder.add_num_transfer(NumTransfer {
                                     num,
                                     recipient: recipient_addr,
+                                    is_delegate: false,
                                 });
                             }
                             Subject::Label(label) if label.is_numeric() => {
@@ -1383,6 +1410,7 @@ impl RpcWallet {
                                 builder = builder.add_num_transfer(NumTransfer {
                                     num,
                                     recipient: recipient_addr,
+                                    is_delegate: false,
                                 });
                             }
                             Subject::Label(space) => {
@@ -1672,6 +1700,7 @@ impl RpcWallet {
                     builder = builder.add_num_transfer(NumTransfer {
                         num: delegate_utxo,
                         recipient: SpaceAddress::from(r),
+                        is_delegate: true,
                     })
                 }
                 RpcWalletRequest::SetFallback(params) => match params.subject {
@@ -1728,6 +1757,7 @@ impl RpcWallet {
                             .add_num_transfer(NumTransfer {
                                 num: num_info,
                                 recipient,
+                                is_delegate: false,
                             })
                             .add_data(params.data);
                     }

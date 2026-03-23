@@ -76,8 +76,11 @@ use crate::store::spaces::RolloutEntry;
 pub(crate) type Responder<T> = oneshot::Sender<T>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ServerInfo {
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub network: ExtendedNetwork,
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub tip: ChainAnchor,
     pub chain: ChainInfo,
     pub ready: bool,
@@ -86,28 +89,37 @@ pub struct ServerInfo {
 
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ChainInfo {
     pub blocks: u32,
     pub headers: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(untagged)]
 pub enum HeightOrHash {
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
     Hash(BlockHash),
     Height(u32),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct BlockMetaWithHash {
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub hash: BlockHash,
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
     #[serde(flatten)]
     pub block_meta: BlockMeta,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct NumBlockMetaWithHash {
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub hash: BlockHash,
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
     #[serde(flatten)]
     pub block_meta: NumBlockMeta,
 }
@@ -438,20 +450,25 @@ pub trait Rpc {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct FallbackResponse {
     /// Raw data encoded as base64
     pub data: String,
     /// Parsed SIP-7 records, if data is valid
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(with = "Option<String>"))]
     pub records: Option<sip7::RecordSet>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RpcWalletTxBuilder {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bidouts: Option<u8>,
     pub requests: Vec<RpcWalletRequest>,
+    #[cfg_attr(feature = "schema", schemars(with = "Option<f64>"))]
     pub fee_rate: Option<FeeRate>,
+    #[cfg_attr(feature = "schema", schemars(with = "Option<u64>"))]
     pub dust: Option<Amount>,
     pub force: bool,
     pub confirmed_only: bool,
@@ -459,6 +476,7 @@ pub struct RpcWalletTxBuilder {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "request")]
 pub enum RpcWalletRequest {
     #[serde(rename = "open")]
@@ -484,8 +502,10 @@ pub enum RpcWalletRequest {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct TransferSpacesParams {
     /// List of spaces and/or PTRs to transfer
+    #[cfg_attr(feature = "schema", schemars(with = "Vec<String>"))]
     pub spaces: Vec<Subject>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -496,59 +516,76 @@ pub struct TransferSpacesParams {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct CreateNumParams {
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(with = "Option<String>"))]
     pub bind_spk: Option<ScriptBuf>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct OperateParams {
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub subject: Subject,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct DelegateParams {
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub subject: Subject,
     pub to: String,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct CommitParams {
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub subject: Subject,
+    #[cfg_attr(feature = "schema", schemars(with = "Option<String>"))]
     pub root: Option<sha256::Hash>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct SetFallbackParams {
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub subject: Subject,
     pub data: Vec<u8>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct SendCoinsParams {
+    #[cfg_attr(feature = "schema", schemars(with = "u64"))]
     pub amount: Amount,
     pub to: String,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct OpenParams {
     pub name: String,
     pub amount: u64,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct BidParams {
     pub name: String,
     pub amount: u64,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct TransferParams {
     pub name: String,
     pub to: String,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RegisterParams {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -566,20 +603,24 @@ pub struct RpcServerImpl {
 /// Combined proof result for a chain proof request containing subtrees from both
 /// spaces and ptrs trees at the same snapshot height.
 #[derive(Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ChainProofResult {
     /// The block anchor these proofs are generated against
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub block: ChainAnchor,
     /// Spaces tree root
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub spaces_root: Bytes,
-    /// Subtree proof for the spaces tree
+    /// Subtree proof for the spaces tree (base64)
     #[serde(
         serialize_with = "serialize_base64",
         deserialize_with = "deserialize_base64"
     )]
     pub spaces_proof: Vec<u8>,
     /// PTRs tree root
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub ptrs_root: Bytes,
-    /// Subtree proof for the ptrs tree
+    /// Subtree proof for the ptrs tree (base64)
     #[serde(
         serialize_with = "serialize_base64",
         deserialize_with = "deserialize_base64"
@@ -870,6 +911,15 @@ impl RpcServerImpl {
             module.register_method("rpc.discover", move |_, _| {
                 serde_json::json!({ "methods": methods })
             }).expect("register rpc.discover");
+
+            #[cfg(feature = "schema")]
+            {
+                let spec = crate::rpc_schema::full_spec();
+                module.register_method("rpc.schema", move |_, _| {
+                    spec.clone()
+                }).expect("register rpc.schema");
+            }
+
             let handle = listener.start(module);
 
             let mut signal = signal.subscribe();

@@ -15,6 +15,8 @@ pub mod client;
 pub mod config;
 pub mod format;
 pub mod rpc;
+#[cfg(feature = "schema")]
+pub mod rpc_schema;
 pub mod source;
 pub mod store;
 pub mod wallets;
