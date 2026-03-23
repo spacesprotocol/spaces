@@ -680,7 +680,7 @@ impl Iterator for BuilderIterator<'_> {
                         }
                     }
                     for spk in binds {
-                        detailed.add_create_num(String::new(), spk);
+                        detailed.add_create_num(spk);
                     }
                     detailed
                 }))
