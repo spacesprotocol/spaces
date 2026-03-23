@@ -456,10 +456,10 @@ impl TxRecord {
         });
     }
 
-    pub fn add_create_num(&mut self, num: String, to: ScriptBuf) {
+    pub fn add_create_num(&mut self, to: ScriptBuf) {
         self.events.push(TxEvent {
             kind: TxEventKind::CreateNum,
-            space: Some(num),
+            space: None,
             previous_spaceout: None,
             details: Some(
                 serde_json::to_value(CreateNumEventDetails { script_pubkey: to })
