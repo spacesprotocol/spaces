@@ -48,6 +48,7 @@ colored = { workspace = true }
 tower = { workspace = true }
 hyper = { workspace = true }
 schemars = { version = "0.8", optional = true }
+rusqlite = { version = "0.31", features = ["bundled"] }
 
 [features]
 schema = ["schemars"]

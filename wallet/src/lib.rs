@@ -46,7 +46,7 @@ use spaces_protocol::{
     slabel::SLabel,
     Covenant, FullSpaceOut, Space,
 };
-use spaces_nums::{NumericKey, NumSource, num_id::{NumId, NUM_HRP}};
+use spaces_nums::{NumSource, num_id::{NumId, NUM_HRP}};
 use spaces_nums::snumeric::SNumeric;
 
 use crate::{
@@ -475,8 +475,7 @@ impl SpacesWallet {
         let outpoint = match &subject {
             Subject::Label(label) if label.is_numeric() => {
                 let numeric: SNumeric = label.clone().try_into().unwrap();
-                let key = NumericKey::from_numeric::<H>(&numeric);
-                let id = src.get_num_id(&key)?
+                let id = src.get_num_id(&numeric)?
                     .ok_or_else(|| anyhow::anyhow!("Numeric '{}' not found", numeric))?;
                 src.get_num_outpoint_by_id(&id)?
                     .ok_or_else(|| anyhow::anyhow!("Num id not found"))?
@@ -516,8 +515,7 @@ impl SpacesWallet {
         let script_pubkey = match &subject {
             Subject::Label(label) if label.is_numeric() => {
                 let numeric: SNumeric = label.clone().try_into().unwrap();
-                let key = NumericKey::from_numeric::<H>(&numeric);
-                let id = src.get_num_id(&key)?
+                let id = src.get_num_id(&numeric)?
                     .ok_or_else(|| anyhow::anyhow!("Numeric '{}' not found", numeric))?;
                 let outpoint = src.get_num_outpoint_by_id(&id)?
                     .ok_or_else(|| anyhow::anyhow!("Num id not found"))?;
@@ -584,8 +582,7 @@ impl SpacesWallet {
         let outpoint = match &subject {
             Subject::Label(label) if label.is_numeric() => {
                 let numeric: SNumeric = label.clone().try_into().unwrap();
-                let key = NumericKey::from_numeric::<H>(&numeric);
-                let id = src.get_num_id(&key)?
+                let id = src.get_num_id(&numeric)?
                     .ok_or_else(|| anyhow::anyhow!("Numeric '{}' not found", numeric))?;
                 src.get_num_outpoint_by_id(&id)?
                     .ok_or_else(|| anyhow::anyhow!("Num id not found"))?
@@ -633,8 +630,7 @@ impl SpacesWallet {
         let script_pubkey = match &subject {
             Subject::Label(label) if label.is_numeric() => {
                 let numeric: SNumeric = label.clone().try_into().unwrap();
-                let key = NumericKey::from_numeric::<H>(&numeric);
-                let id = src.get_num_id(&key)?
+                let id = src.get_num_id(&numeric)?
                     .ok_or_else(|| anyhow::anyhow!("Numeric '{}' not found", numeric))?;
                 let outpoint = src.get_num_outpoint_by_id(&id)?
                     .ok_or_else(|| anyhow::anyhow!("Num id not found"))?;

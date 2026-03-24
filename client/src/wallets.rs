@@ -46,7 +46,7 @@ use crate::{
 };
 use spaces_nums::num_id::{NumId, NumIdParseError, NUM_HRP};
 use spaces_nums::snumeric::SNumeric;
-use spaces_nums::{FullNumOut, NumericKey};
+use spaces_nums::FullNumOut;
 use spaces_nums::{DelegatorKey, NumOut, NumSource};
 use spaces_protocol::bitcoin::address::ParseError;
 use spaces_protocol::bitcoin::{Network, ScriptBuf};
@@ -380,9 +380,8 @@ fn resolve_subject_to_num_id<H: KeyHasher>(
         Subject::NumId(id) => Ok(*id),
         Subject::Label(label) if label.is_numeric() => {
             let numeric: SNumeric = label.clone().try_into().unwrap();
-            let key = NumericKey::from_numeric::<H>(&numeric);
             chain
-                .get_num_id(&key)?
+                .get_num_id(&numeric)?
                 .ok_or_else(|| anyhow!("numeric '{}' not found", numeric))
         }
         Subject::Label(label) => Err(anyhow!(
@@ -401,9 +400,8 @@ fn commit_params_to_req(
     let spk_id = match &p.subject {
         Subject::Label(label) if label.is_numeric() => {
             let numeric: SNumeric = label.clone().try_into().unwrap();
-            let key = NumericKey::from_numeric::<Sha256>(&numeric);
             let num_id = chain
-                .get_num_id(&key)?
+                .get_num_id(&numeric)?
                 .ok_or_else(|| anyhow!("commit: numeric '{}' not found", label))?;
             let num_info = chain
                 .get_num_info(&num_id)?
@@ -748,9 +746,8 @@ impl RpcWallet {
                 .clone()
                 .try_into()
                 .map_err(|e| anyhow::anyhow!("invalid numeric label: {}", e))?;
-            let key = NumericKey::from_numeric::<Sha256>(&numeric);
             let num_id = chain
-                .get_num_id(&key)?
+                .get_num_id(&numeric)?
                 .ok_or_else(|| anyhow::anyhow!("Numeric not found: {}", label))?;
             let num_info = chain
                 .get_num_info(&num_id)?
@@ -1264,8 +1261,7 @@ impl RpcWallet {
                 Address::from_script(script_pubkey.as_script(), network.fallback_network())?
             }
             ResolvableTarget::Numeric(numeric) => {
-                let key = NumericKey::from_numeric::<Sha256>(&numeric);
-                let snum = match chain.get_num_id(&key)? {
+                let snum = match chain.get_num_id(&numeric)? {
                     None => return Ok(None),
                     Some(snum) => snum,
                 };
@@ -1384,8 +1380,7 @@ impl RpcWallet {
                             }
                             Subject::Label(label) if label.is_numeric() => {
                                 let numeric: SNumeric = label.clone().try_into().unwrap();
-                                let key = NumericKey::from_numeric::<Sha256>(&numeric);
-                                let id = chain.get_num_id(&key)?.ok_or_else(|| {
+                                let id = chain.get_num_id(&numeric)?.ok_or_else(|| {
                                     anyhow!("transfer: numeric '{}' not found", numeric)
                                 })?;
                                 let num = match chain.get_num_info(&id)? {
@@ -1601,8 +1596,7 @@ impl RpcWallet {
                     match &params.subject {
                         Subject::Label(label) if label.is_numeric() => {
                             let numeric: SNumeric = label.clone().try_into().unwrap();
-                            let key = NumericKey::from_numeric::<Sha256>(&numeric);
-                            let id = chain.get_num_id(&key)?.ok_or_else(|| {
+                            let id = chain.get_num_id(&numeric)?.ok_or_else(|| {
                                 anyhow!("operate: numeric '{}' not found", label)
                             })?;
                             let num = match chain.get_num_info(&id)? {
@@ -2165,8 +2159,7 @@ fn find_delegate_utxo(chain: &mut Chain, subject: &Subject) -> anyhow::Result<Fu
                 .clone()
                 .try_into()
                 .expect("valid numeric");
-            let key = NumericKey::from_numeric::<Sha256>(&numeric);
-            let id = chain.get_num_id(&key)?.ok_or_else(|| {
+            let id = chain.get_num_id(&numeric)?.ok_or_else(|| {
                 anyhow!("delegate: numeric '{}' not found", label)
             })?;
             Some(id)

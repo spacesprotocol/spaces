@@ -51,7 +51,7 @@ use tokio::{
 };
 use spaces_protocol::bitcoin::ScriptBuf;
 use spaces_protocol::hasher::Hash;
-use spaces_nums::{NumSource, FullNumOut, NumericKey, NumOut, Commitment, CommitmentTipKey, CommitmentKey, DelegatorKey, NumOutpointKey, RootAnchor, ChainProofRequest, NumKeyKind};
+use spaces_nums::{NumSource, FullNumOut, NumOut, Commitment, CommitmentTipKey, CommitmentKey, DelegatorKey, NumOutpointKey, RootAnchor, ChainProofRequest, NumKeyKind};
 use spaces_nums::snumeric::SNumeric;
 use spaces_nums::num_id::NumId;
 use spaces_wallet::bitcoin::hashes::sha256;
@@ -1829,8 +1829,7 @@ impl AsyncChainState {
         for key in request.nums {
             match key {
                 NumKeyKind::Num(numeric) => {
-                    let key = NumericKey::from_numeric::<Sha256>(&numeric);
-                    let id = state.get_num_id(&key)?;
+                    let id = state.get_num_id(&numeric)?;
                     if let Some(id) = id {
                         let fpt = state.get_num_info(&id)?
                             .expect("num id must exist if numeric exists");
@@ -1853,9 +1852,6 @@ impl AsyncChainState {
                             num_tree_keys.insert(operator_id.into());
                         }
 
-                    } else {
-                        // non-existence proof
-                        num_tree_keys.insert(key.into());
                     }
                 }
                 NumKeyKind::Id(id) => {
@@ -2190,8 +2186,7 @@ fn resolve_num_id(state: &mut Chain, subject: &Subject) -> anyhow::Result<NumId>
         Subject::NumId(id) => Ok(*id),
         Subject::Label(label) if label.is_numeric() => {
             let numeric: SNumeric = label.clone().try_into().unwrap();
-            let key = NumericKey::from_numeric::<Sha256>(&numeric);
-            state.get_num_id(&key)?
+            state.get_num_id(&numeric)?
                 .ok_or_else(|| anyhow!("numeric '{}' not found", numeric))
         }
         Subject::Label(_) => Err(anyhow!("expected a num id or numeric, not a space")),
@@ -2273,8 +2268,7 @@ fn get_delegation(state: &mut Chain, subject: &Subject) -> anyhow::Result<Option
     let (id, label) = match subject {
         Subject::Label(num) if num.is_numeric() => {
             let numeric: SNumeric = num.clone().try_into().expect("is_numeric");
-            let key = NumericKey::from_numeric::<Sha256>(&numeric);
-            let Some(num_id) = state.get_num_id(&key)? else {
+            let Some(num_id) = state.get_num_id(&numeric)? else {
                 return Ok(None);
             };
             let Some(num_info) = state.get_num_info(&num_id)? else {

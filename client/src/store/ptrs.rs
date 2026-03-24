@@ -1,6 +1,5 @@
 use std::{
     collections::{BTreeMap},
-    fs::OpenOptions,
     io,
     io::ErrorKind,
     mem,
@@ -12,9 +11,8 @@ use anyhow::{anyhow, Context, Result};
 use borsh::{BorshDeserialize, BorshSerialize};
 use spacedb::{
     db::{Database, SnapshotIterator},
-    fs::FileBackend,
     tx::{ReadTransaction, WriteTransaction},
-    Configuration, Hash, Sha256Hasher,
+    Hash, Sha256Hasher,
 };
 use spaces_protocol::{
     bitcoin::{BlockHash, OutPoint},
@@ -22,9 +20,10 @@ use spaces_protocol::{
     hasher::{KeyHash},
 };
 use spaces_protocol::slabel::SLabel;
-use spaces_nums::{Commitment, CommitmentKey, FullNumOut, NumericKey, NumOut, NumSource, CommitmentTipKey, DelegatorKey, NumOutpointKey};
+use spaces_nums::{Commitment, CommitmentKey, FullNumOut, NumOut, NumSource, CommitmentTipKey, DelegatorKey, NumOutpointKey};
+use spaces_nums::snumeric::SNumeric;
 use spaces_nums::num_id::NumId;
-use crate::store::{EncodableOutpoint, Sha256};
+use crate::store::{open_db, EncodableOutpoint, Sha256};
 
 type SpaceDb = Database<Sha256Hasher>;
 type ReadTx = ReadTransaction<Sha256Hasher>;
@@ -56,25 +55,14 @@ pub struct Staged {
 }
 
 impl NumStore {
-    pub fn open(path: PathBuf) -> Result<Self> {
-        let db = Self::open_db(path)?;
+    pub fn open(path: PathBuf, auto_hash_index: bool) -> Result<Self> {
+        let db = open_db(path, auto_hash_index)?;
         Ok(Self(db))
     }
 
     pub fn memory() -> Result<Self> {
         let db = Database::memory()?;
         Ok(Self(db))
-    }
-
-    fn open_db(path_buf: PathBuf) -> anyhow::Result<Database<Sha256Hasher>> {
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .open(path_buf)?;
-
-        let config = Configuration::new().with_cache_size(1000000 /* 1MB */);
-        Ok(Database::new(Box::new(FileBackend::new(file)?), config)?)
     }
 
     pub fn iter(&self) -> SnapshotIterator<'_, Sha256Hasher> {
@@ -115,7 +103,6 @@ pub trait NumChainState {
     fn remove_commitment_tip(&self, key: CommitmentTipKey);
     fn insert_delegator(&self, key: DelegatorKey, space: SLabel);
     fn insert_num_outpoint(&self, key: NumId, outpoint: EncodableOutpoint);
-    fn insert_num(&self, key: NumericKey, id: NumId);
 
     #[allow(dead_code)]
     fn get_num_info(
@@ -147,10 +134,6 @@ impl NumChainState for NumLiveSnapshot {
 
     fn insert_num_outpoint(&self, key: NumId, outpoint: EncodableOutpoint) {
         self.insert(key, outpoint)
-    }
-
-    fn insert_num(&self, key: NumericKey, id: NumId) {
-        self.insert(key, id)
     }
 
     fn get_num_info(&mut self, hash: &NumId) -> Result<Option<FullNumOut>> {
@@ -354,10 +337,7 @@ impl NumSource for NumLiveSnapshot {
         Ok(result)
     }
 
-    fn get_num_id(&mut self, key: &NumericKey) -> spaces_protocol::errors::Result<Option<NumId>> {
-        let result = self.get(*key).map_err(|err| {
-            spaces_protocol::errors::Error::IO(format!("getnumeric: {}", err.to_string()))
-        })?;
-        Ok(result)
+    fn get_num_id(&mut self, _snum: &SNumeric) -> spaces_protocol::errors::Result<Option<NumId>> {
+        panic!("not supported call chain.get_num_id")
     }
 }

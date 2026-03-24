@@ -48,7 +48,7 @@ pub trait NumSource {
         outpoint: &OutPoint,
     ) -> spaces_protocol::errors::Result<Option<NumOut>>;
 
-    fn get_num_id(&mut self, key: &NumericKey) -> spaces_protocol::errors::Result<Option<NumId>>;
+    fn get_num_id(&mut self, _snum: &SNumeric) -> spaces_protocol::errors::Result<Option<NumId>>;
 }
 
 #[derive(Debug, Clone)]

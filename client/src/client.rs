@@ -15,7 +15,7 @@ use spaces_protocol::{
     validate::{TxChangeSet, UpdateKind, Validator},
     Bytes, Covenant, FullSpaceOut, RevokeReason, SpaceOut,
 };
-use spaces_nums::{CommitmentKey, NumericKey, CommitmentTipKey, DelegatorKey, NumOutpointKey};
+use spaces_nums::{CommitmentKey, CommitmentTipKey, DelegatorKey, NumOutpointKey};
 use spaces_wallet::bitcoin::{Network, Transaction};
 
 use crate::{
@@ -352,8 +352,7 @@ impl Client {
 
             // Num => Outpoint + Numeric => NumId
             state.insert_num_outpoint(create.num.id, outpoint.into());
-            let numeric_key = NumericKey::from_numeric::<Sha256>(&create.num.name);
-            state.insert_num(numeric_key, create.num.id);
+            state.insert_num(&create.num.name, create.num.id);
 
             // Outpoint => PtrOut
             let outpoint_key = NumOutpointKey::from_outpoint::<Sha256>(outpoint);
