@@ -133,19 +133,27 @@ impl Chain {
         Ok(self.cached_snapshot.as_mut().unwrap())
     }
 
-    pub fn load(_network: Network, genesis: ChainAnchor, nums_genesis: ChainAnchor, dir: &Path, index_spaces: bool, index_ptrs: bool) -> anyhow::Result<Self> {
+    pub fn load(
+        _network: Network,
+        genesis: ChainAnchor,
+        nums_genesis: ChainAnchor,
+        dir: &Path,
+        index_spaces: bool,
+        index_ptrs: bool,
+        index_hashes: bool,
+    ) -> anyhow::Result<Self> {
         let proto_db_path = dir.join("root.sdb");
         let nums_db_path = dir.join("nums.sdb");
         let initial_sp_sync = !proto_db_path.exists();
         let initial_num_sync = !nums_db_path.exists();
 
-        let sp_store = SpStore::open(proto_db_path)?;
+        let sp_store = SpStore::open(proto_db_path, index_hashes)?;
         let sp = SpLiveStore {
             state: sp_store.begin(&genesis)?,
             store: sp_store,
         };
 
-        let num_store = NumStore::open(nums_db_path)?;
+        let num_store = NumStore::open(nums_db_path, index_hashes)?;
         let num = NumLiveStore {
             state: num_store.begin(&nums_genesis)?,
             store: num_store,
@@ -605,7 +613,7 @@ fn load_sp_index(dir: &Path, genesis: ChainAnchor, tip: ChainAnchor, initial_syn
                     "Block index must be enabled from the initial sync."
                 ));
     }
-    let block_store = SpStore::open(block_db_path)?;
+    let block_store = SpStore::open(block_db_path, false)?;
     let index = SpLiveStore {
         state: block_store.begin(&genesis).expect("begin block index"),
         store: block_store,
@@ -628,7 +636,7 @@ fn load_num_index(dir: &Path, genesis: ChainAnchor, tip: ChainAnchor, initial_sy
                     "Num Block index must be enabled from the initial sync."
                 ));
     }
-    let block_store = NumStore::open(block_db_path)?;
+    let block_store = NumStore::open(block_db_path, false)?;
     let index = NumLiveStore {
         state: block_store.begin(&genesis).expect("begin block index"),
         store: block_store,

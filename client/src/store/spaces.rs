@@ -1,7 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     fs,
-    fs::OpenOptions,
     io,
     io::ErrorKind,
     mem,
@@ -15,9 +14,8 @@ use jsonrpsee::core::Serialize;
 use serde::Deserialize;
 use spacedb::{
     db::{Database, SnapshotIterator},
-    fs::FileBackend,
     tx::KeyIterator,
-    Configuration, Hash, Sha256Hasher,
+    Hash, Sha256Hasher,
 };
 use spaces_protocol::{
     bitcoin::{BlockHash, OutPoint},
@@ -27,7 +25,7 @@ use spaces_protocol::{
     Covenant, FullSpaceOut, SpaceOut,
 };
 use spaces_nums::RootAnchor;
-use crate::store::{EncodableOutpoint, ReadTx, Sha256, SpaceDb, WriteMemory, WriteTx};
+use crate::store::{open_db, EncodableOutpoint, ReadTx, Sha256, SpaceDb, WriteMemory, WriteTx};
 
 #[derive(Clone)]
 pub struct SpStore(SpaceDb);
@@ -60,25 +58,14 @@ pub struct Staged {
 }
 
 impl SpStore {
-    pub fn open(path: PathBuf) -> Result<Self> {
-        let db = Self::open_db(path)?;
+    pub fn open(path: PathBuf, auto_hash_index: bool) -> Result<Self> {
+        let db = open_db(path, auto_hash_index)?;
         Ok(Self(db))
     }
 
     pub fn memory() -> Result<Self> {
         let db = Database::memory()?;
         Ok(Self(db))
-    }
-
-    fn open_db(path_buf: PathBuf) -> anyhow::Result<Database<Sha256Hasher>> {
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .open(path_buf)?;
-
-        let config = Configuration::new().with_cache_size(1000000 /* 1MB */);
-        Ok(Database::new(Box::new(FileBackend::new(file)?), config)?)
     }
 
     pub fn iter(&self) -> SnapshotIterator<'_, Sha256Hasher> {

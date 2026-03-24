@@ -1,7 +1,8 @@
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use borsh::{BorshDeserialize, BorshSerialize};
 use spacedb::db::Database;
-use spacedb::{Hash, NodeHasher, Sha256Hasher};
+use spacedb::{Configuration, Hash, NodeHasher, Sha256Hasher};
 use spacedb::tx::{ReadTransaction, WriteTransaction};
 use spaces_protocol::bitcoin::OutPoint;
 
@@ -42,4 +43,10 @@ impl spaces_protocol::hasher::KeyHasher for Sha256 {
     fn hash(data: &[u8]) -> spaces_protocol::hasher::Hash {
         Sha256Hasher::hash(data)
     }
+}
+
+fn open_db(path_buf: PathBuf, auto_hash_index: bool) -> anyhow::Result<Database<Sha256Hasher>> {
+    let mut config = Configuration::standard();
+    config.auto_hash_index = auto_hash_index;
+    Ok(Database::open_with_config(path_buf.to_str().unwrap(), config)?)
 }

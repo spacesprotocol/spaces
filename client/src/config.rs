@@ -88,6 +88,11 @@ pub struct Args {
     /// Specify the number of anchors spaced will calculate for /root-anchors endpoint
     #[arg(long, env = "SPACED_NUM_ANCHORS")]
     num_anchors: Option<u32>,
+
+    /// Index internal node hashes for spaces & nums tree for
+    /// faster merkle proof generation (with build_chain_proof rpc)
+    #[arg(long, env = "SPACED_INDEX_NODE_HASHES", default_value = "false")]
+    index_node_hashes: bool,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug, ValueEnum, Serialize, Deserialize)]
@@ -214,7 +219,8 @@ impl Args {
             ptr_genesis,
             &data_dir,
             args.block_index || args.block_index_full,
-            args.block_index || args.block_index_full, // TODO: option to index ptrs
+            args.block_index || args.block_index_full, // TODO: option to index ptrs,
+            args.index_node_hashes
         )?;
 
         let anchors_path = match args.skip_anchors {
