@@ -219,8 +219,7 @@ impl Args {
             ptr_genesis,
             &data_dir,
             args.block_index || args.block_index_full,
-            args.block_index || args.block_index_full, // TODO: option to index ptrs,
-            args.index_node_hashes
+            args.index_node_hashes,
         )?;
 
         let anchors_path = match args.skip_anchors {

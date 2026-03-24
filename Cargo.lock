@@ -2627,7 +2627,7 @@ dependencies = [
 [[package]]
 name = "spacedb"
 version = "0.0.12"
-source = "git+https://github.com/spacesprotocol/spacedb#d89676f5fb356e82e34032afaa4a5f16956ec712"
+source = "git+https://github.com/spacesprotocol/spacedb#43f23e78e4e5fffb8d89661a4b7f39ab43a5a644"
 dependencies = [
  "bincode",
  "borsh",
@@ -2658,6 +2658,7 @@ dependencies = [
  "predicates",
  "rand 0.8.5",
  "reqwest",
+ "rusqlite",
  "schemars",
  "serde",
  "serde_json",

@@ -1,20 +1,23 @@
 use std::path::Path;
+use std::sync::Arc;
 use anyhow::{anyhow, Context};
 use log::info;
 use spacedb::Hash;
 use spaces_protocol::bitcoin::{BlockHash, OutPoint};
 use spaces_protocol::bitcoin::hashes::Hash as HashUtil;
 use spaces_protocol::constants::ChainAnchor;
-use spaces_protocol::hasher::{BaseHash, BidKey, OutpointKey, SpaceKey};
+use spaces_protocol::hasher::{BidKey, OutpointKey, SpaceKey};
 use spaces_protocol::prepare::SpacesSource;
 use spaces_protocol::{FullSpaceOut, SpaceOut};
 use spaces_protocol::slabel::SLabel;
-use spaces_nums::{Commitment, CommitmentKey, FullNumOut, NumericKey, NumOut, NumSource, CommitmentTipKey, DelegatorKey, NumOutpointKey, RootAnchor};
+use spaces_nums::{Commitment, CommitmentKey, FullNumOut, NumOut, NumSource, CommitmentTipKey, DelegatorKey, NumOutpointKey, RootAnchor};
 use spaces_nums::num_id::NumId;
+use spaces_nums::snumeric::SNumeric;
 use spaces_wallet::bitcoin::Network;
 use crate::client::{BlockMeta, NumBlockMeta};
 use crate::rpc::{BlockMetaWithHash, NumBlockMetaWithHash};
 use crate::store::{EncodableOutpoint, ReadTx, Sha256};
+use crate::store::index::SqliteIndex;
 use crate::store::ptrs::{NumChainState, NumLiveStore, NumStore};
 use crate::store::spaces::{RolloutEntry, RolloutIterator, SpLiveStore, SpStore, SpStoreUtils, SpacesState};
 
@@ -68,8 +71,8 @@ pub struct LiveStore {
 
 #[derive(Clone)]
 pub struct LiveIndex {
-    sp: Option<SpLiveStore>,
-    num: Option<NumLiveStore>,
+    block_index: bool,
+    db: Arc<SqliteIndex>,
 }
 
 impl SpacesSource for Chain {
@@ -103,8 +106,10 @@ impl NumSource for Chain {
         self.db.num.state.get_numout(outpoint)
     }
 
-    fn get_num_id(&mut self, key: &NumericKey) -> spaces_protocol::errors::Result<Option<NumId>> {
-        self.db.num.state.get_num_id(key)
+    fn get_num_id(&mut self, snum: &SNumeric) -> spaces_protocol::errors::Result<Option<NumId>> {
+        self.idx.db.get_snumeric(snum).map_err(|e| {
+            spaces_protocol::errors::Error::IO(format!("get_num_id: {}", e))
+        })
     }
 }
 
@@ -138,13 +143,11 @@ impl Chain {
         genesis: ChainAnchor,
         nums_genesis: ChainAnchor,
         dir: &Path,
-        index_spaces: bool,
-        index_ptrs: bool,
+        block_index: bool,
         index_hashes: bool,
     ) -> anyhow::Result<Self> {
         let proto_db_path = dir.join("root.sdb");
         let nums_db_path = dir.join("nums.sdb");
-        let initial_sp_sync = !proto_db_path.exists();
         let initial_num_sync = !nums_db_path.exists();
 
         let sp_store = SpStore::open(proto_db_path, index_hashes)?;
@@ -159,23 +162,14 @@ impl Chain {
             store: num_store,
         };
 
-
-        let mut sp_idx = None;
-
-        if index_spaces {
-            let current_tip = sp.state.tip.read().expect("tip");
-            sp_idx = Some(load_sp_index(dir, genesis, *current_tip, initial_sp_sync)?)
-        }
-
-        let mut num_idx = None;
-        if index_ptrs {
-            let current_tip = num.state.tip.read().expect("tip");
-            num_idx = Some(load_num_index(dir, nums_genesis, *current_tip, initial_num_sync)?)
-        }
+        let sqlite_index = SqliteIndex::open(dir)?;
 
         let chain = Chain {
             db: LiveStore { sp, num },
-            idx: LiveIndex { sp: sp_idx, num: num_idx },
+            idx: LiveIndex {
+                block_index,
+                db: Arc::new(sqlite_index),
+            },
             nums_genesis,
             cached_snapshot: None,
         };
@@ -209,8 +203,8 @@ impl Chain {
         block_hash: BlockHash,
         block: BlockMeta,
     ) -> anyhow::Result<()> {
-        if let Some(idx) = &self.idx.sp {
-            idx.state.insert(BaseHash::from_slice(block_hash.as_ref()), block);
+        if self.idx.block_index {
+            self.idx.db.insert_spaces_block(block_hash, block.height, block);
         }
         Ok(())
     }
@@ -220,8 +214,8 @@ impl Chain {
         block_hash: BlockHash,
         block: NumBlockMeta,
     ) -> anyhow::Result<()> {
-        if let Some(idx) = &self.idx.num {
-            idx.state.insert(BaseHash::from_slice(block_hash.as_ref()), block);
+        if self.idx.block_index {
+            self.idx.db.insert_nums_block(block_hash, block.height, block);
         }
         Ok(())
     }
@@ -237,17 +231,8 @@ impl Chain {
         self.db.sp.state.commit(checkpoint.clone(), spaces_batch)?;
         self.db.num.state.commit(checkpoint.clone(), ptrs_batch)?;
 
-        let sp_index_writer = self.idx.sp.clone();
-        if let Some(index) = sp_index_writer {
-            let tx = index.store.write().expect("write handle");
-            index.state.commit(checkpoint, tx)?;
-        }
+        self.idx.db.commit()?;
 
-        let pt_index_writer = self.idx.num.clone();
-        if let Some(index) = pt_index_writer {
-            let tx = index.store.write().expect("write handle");
-            index.state.commit(checkpoint, tx)?;
-        }
         Ok(true)
     }
 
@@ -260,11 +245,11 @@ impl Chain {
     }
 
     pub fn has_spaces_index(&self) -> bool {
-        self.idx.sp.is_some()
+        self.idx.block_index
     }
 
     pub fn has_nums_index(&self) -> bool {
-        self.idx.num.is_some()
+        self.idx.block_index
     }
 
     pub fn rollout_iter(&self) -> anyhow::Result<(RolloutIterator, ReadTx)> {
@@ -331,8 +316,8 @@ impl Chain {
         self.db.num.state.insert_num_outpoint(key, outpoint)
     }
 
-    pub(crate) fn insert_num(&self, key: NumericKey, id: NumId) {
-        self.db.num.state.insert_num(key, id)
+    pub(crate) fn insert_num(&self, snum: &SNumeric, id: NumId) {
+        self.idx.db.insert_snumeric(snum, id)
     }
 
     pub(crate) fn insert_delegator(&self, key: DelegatorKey, space: SLabel) {
@@ -381,34 +366,22 @@ impl Chain {
         self.db.sp.state.remove(key)
     }
 
-    pub fn get_spaces_block(&mut self, hash: BlockHash) -> anyhow::Result<Option<BlockMetaWithHash>> {
-        let idx = match &mut self.idx.sp  {
-            None => return Err(anyhow!("spaces index must be enabled")),
-            Some(idx) => idx
-        };
-        let key = BaseHash::from_slice(hash.as_ref());
-        let block = idx.state.get(key).context("could not retrieve block meta")?;
-        Ok(block.map(|b| {
-           BlockMetaWithHash {
-               hash,
-               block_meta: b,
-           }
-        }))
+    pub fn get_spaces_block(&self, hash: BlockHash) -> anyhow::Result<Option<BlockMetaWithHash>> {
+        if !self.idx.block_index {
+            return Err(anyhow!("spaces index must be enabled"));
+        }
+        let block = self.idx.db.get_spaces_block(&hash)
+            .context("could not retrieve block meta")?;
+        Ok(block.map(|b| BlockMetaWithHash { hash, block_meta: b }))
     }
 
-    pub fn get_nums_block(&mut self, hash: BlockHash) -> anyhow::Result<Option<NumBlockMetaWithHash>> {
-        let idx = match &mut self.idx.num {
-            None => return Err(anyhow!("ptrs index must be enabled")),
-            Some(idx) => idx
-        };
-        let key = BaseHash::from_slice(hash.as_ref());
-        let block = idx.state.get(key).context("could not retrieve num block meta")?;
-        Ok(block.map(|b| {
-           NumBlockMetaWithHash {
-               hash,
-               block_meta: b,
-           }
-        }))
+    pub fn get_nums_block(&self, hash: BlockHash) -> anyhow::Result<Option<NumBlockMetaWithHash>> {
+        if !self.idx.block_index {
+            return Err(anyhow!("ptrs index must be enabled"));
+        }
+        let block = self.idx.db.get_nums_block(&hash)
+            .context("could not retrieve num block meta")?;
+        Ok(block.map(|b| NumBlockMetaWithHash { hash, block_meta: b }))
     }
 
     pub fn restore<F>(&self, get_block_hash: F) -> anyhow::Result<()>
@@ -423,50 +396,27 @@ impl Chain {
         let iter = self.db.num.store.iter();
 
         let mut restore_point = None;
-        for (idx, snapshot) in iter.enumerate() {
+        for (_idx, snapshot) in iter.enumerate() {
             let snapshot = snapshot?;
             let anchor: ChainAnchor = snapshot.metadata().try_into()?;
             if anchor == required_checkpoint {
-                restore_point = Some((idx, snapshot, anchor));
+                restore_point = Some(snapshot);
                 break;
             }
         }
 
-        let (snapshot_idx, snapshot, checkpoint) =
-            match restore_point {
-                None => return Err(anyhow!("Could not restore nums to height = {}", required_checkpoint.height)),
-                Some(rp) => rp,
-            };
+        let snapshot = match restore_point {
+            None => return Err(anyhow!("Could not restore nums to height = {}", required_checkpoint.height)),
+            Some(s) => s,
+        };
 
-        info!("Restoring nums block={} height={}", checkpoint.hash, checkpoint.height);
-
-        if let Some(num_idx) = self.idx.num.as_ref() {
-            let idx = num_idx.store
-                .iter().skip(snapshot_idx).next();
-            if idx.is_none() {
-                return Err(anyhow!(
-                        "Could not restore num block index due to missing snapshot"
-                    ));
-            }
-            let idx = idx.unwrap()?;
-            let idx_checkpoint: ChainAnchor = idx.metadata().try_into()?;
-            if idx_checkpoint != checkpoint {
-                return Err(anyhow!(
-                        "num block index checkpoint does not match the num's checkpoint"
-                    ));
-            }
-            idx.rollback()
-                .context("could not rollback num block index snapshot")?;
-        }
+        info!("Restoring nums block={} height={}", required_checkpoint.hash, required_checkpoint.height);
 
         snapshot
             .rollback()
             .context("could not rollback num snapshot")?;
 
-        self.db.num.state.restore(checkpoint.clone());
-        if let Some(idx) = self.idx.num.as_ref() {
-            idx.state.restore(checkpoint);
-        }
+        self.db.num.state.restore(required_checkpoint);
 
         Ok(())
     }
@@ -476,7 +426,7 @@ impl Chain {
         F: Fn(u32) -> anyhow::Result<BlockHash>,
     {
         let chain_iter = self.db.sp.store.iter();
-        for (snapshot_index, snapshot) in chain_iter.enumerate() {
+        for (_snapshot_index, snapshot) in chain_iter.enumerate() {
             let chain_snapshot = snapshot?;
             let chain_checkpoint: ChainAnchor = chain_snapshot.metadata().try_into()?;
             if let Some(restore_to_height) = restore_to_height {
@@ -499,33 +449,12 @@ impl Chain {
                 chain_checkpoint.hash, chain_checkpoint.height
             );
 
-            if let Some(block_index) = self.idx.sp.as_ref() {
-                let index_snapshot = block_index.store.iter().skip(snapshot_index).next();
-                if index_snapshot.is_none() {
-                    return Err(anyhow!(
-                        "Could not restore block index due to missing snapshot"
-                    ));
-                }
-                let index_snapshot = index_snapshot.unwrap()?;
-                let index_checkpoint: ChainAnchor = index_snapshot.metadata().try_into()?;
-                if index_checkpoint != chain_checkpoint {
-                    return Err(anyhow!(
-                        "block index checkpoint does not match the chain's checkpoint"
-                    ));
-                }
-                index_snapshot
-                    .rollback()
-                    .context("could not rollback block index snapshot")?;
-            }
-
             chain_snapshot
                 .rollback()
                 .context("could not rollback chain snapshot")?;
 
             self.db.sp.state.restore(chain_checkpoint.clone());
-            if let Some(block_index) = self.idx.sp.as_ref() {
-                block_index.state.restore(chain_checkpoint)
-            }
+            self.idx.db.restore(chain_checkpoint.height)?;
             return Ok(chain_checkpoint);
         }
 
@@ -606,48 +535,3 @@ impl Chain {
 }
 
 
-fn load_sp_index(dir: &Path, genesis: ChainAnchor, tip: ChainAnchor, initial_sync: bool) -> anyhow::Result<SpLiveStore> {
-    let block_db_path = dir.join("block_index.sdb");
-    if !initial_sync && !block_db_path.exists() {
-        return Err(anyhow::anyhow!(
-                    "Block index must be enabled from the initial sync."
-                ));
-    }
-    let block_store = SpStore::open(block_db_path, false)?;
-    let index = SpLiveStore {
-        state: block_store.begin(&genesis).expect("begin block index"),
-        store: block_store,
-    };
-    {
-        let idx_tip = index.state.tip.read().expect("index");
-        if idx_tip.height != tip.height || idx_tip.hash != tip.hash {
-            return Err(anyhow::anyhow!(
-                        "Protocol and block index states don't match."
-                    ));
-        }
-    }
-    Ok(index)
-}
-
-fn load_num_index(dir: &Path, genesis: ChainAnchor, tip: ChainAnchor, initial_sync: bool) -> anyhow::Result<NumLiveStore> {
-    let block_db_path = dir.join("nums_block_index.sdb");
-    if !initial_sync && !block_db_path.exists() {
-        return Err(anyhow::anyhow!(
-                    "Num Block index must be enabled from the initial sync."
-                ));
-    }
-    let block_store = NumStore::open(block_db_path, false)?;
-    let index = NumLiveStore {
-        state: block_store.begin(&genesis).expect("begin block index"),
-        store: block_store,
-    };
-    {
-        let idx_tip = index.state.tip.read().expect("index");
-        if idx_tip.height != tip.height || idx_tip.hash != tip.hash {
-            return Err(anyhow::anyhow!(
-                        "Nums tip and block index states don't match."
-                    ));
-        }
-    }
-    Ok(index)
-}

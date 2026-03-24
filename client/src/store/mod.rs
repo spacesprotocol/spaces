@@ -5,10 +5,12 @@ use spacedb::db::Database;
 use spacedb::{Configuration, Hash, NodeHasher, Sha256Hasher};
 use spacedb::tx::{ReadTransaction, WriteTransaction};
 use spaces_protocol::bitcoin::OutPoint;
+use crate::store::chain::ROOT_ANCHORS_COUNT;
 
 pub mod spaces;
 pub mod ptrs;
 pub mod chain;
+pub mod index;
 
 type SpaceDb = Database<Sha256Hasher>;
 type ReadTx = ReadTransaction<Sha256Hasher>;
@@ -46,7 +48,9 @@ impl spaces_protocol::hasher::KeyHasher for Sha256 {
 }
 
 fn open_db(path_buf: PathBuf, auto_hash_index: bool) -> anyhow::Result<Database<Sha256Hasher>> {
-    let mut config = Configuration::standard();
-    config.auto_hash_index = auto_hash_index;
+    let  config = Configuration::standard()
+        .with_auto_hash_index(auto_hash_index)
+        .with_hash_index_pruning(Some(ROOT_ANCHORS_COUNT as _));
+    
     Ok(Database::open_with_config(path_buf.to_str().unwrap(), config)?)
 }

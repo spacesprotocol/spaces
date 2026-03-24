@@ -14,6 +14,8 @@ pub struct NumId(pub(crate) [u8; 32]);
 
 impl NumId {
     #[inline]
+    pub fn from_bytes(bytes: [u8; 32]) -> Self { Self(bytes) }
+    #[inline]
     pub fn as_slice(&self) -> &[u8] { &self.0 }
     #[inline]
     pub fn to_bytes(self) -> [u8; 32] { self.0 }
