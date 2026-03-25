@@ -460,7 +460,7 @@ impl BlockFetcher {
         };
 
         if start.height > tip.height {
-            return Err(BlockFetchError::BlockMismatch);
+            return Ok(SyncStatus::Waiting(tip.height));
         }
 
         // Ensure start block is still in the best chain
