@@ -17,6 +17,9 @@ use crate::{
 };
 use crate::store::chain::{Chain};
 
+/// Number of blocks to keep from tip when pruning
+const PRUNING_BUFFER: u32 = 120;
+
 pub struct Spaced {
     pub network: ExtendedNetwork,
     pub chain: Chain,
@@ -30,6 +33,7 @@ pub struct Spaced {
     pub synced: bool,
     pub cbf: bool,
     pub num_anchors: u32,
+    pub enable_pruning: bool,
 }
 
 impl Spaced {
@@ -54,6 +58,21 @@ impl Spaced {
         info!("Updating root anchors ...");
         self.chain.update_anchors(anchors_path, self.num_anchors)?;
         Ok(())
+    }
+
+    fn prune(&self, source: &BitcoinBlockSource, height: u32) {
+        let prune_height = height.saturating_sub(PRUNING_BUFFER);
+        if prune_height == 0 {
+            return;
+        }
+        match source.prune_blockchain(prune_height) {
+            Ok(pruned_up_to) => {
+                info!("Pruned blocks up to height {}", pruned_up_to);
+            }
+            Err(e) => {
+                warn!("Failed to prune: {} (is Bitcoin Core started with -prune=1?)", e);
+            }
+        }
     }
 
     pub fn handle_block(
@@ -92,6 +111,7 @@ impl Spaced {
     ) -> anyhow::Result<()> {
         let start_block = self.chain.tip();
         let mut node = Client::new(self.block_index_full);
+        let mut last_idle_prune = std::time::Instant::now();
 
         info!(
             "Start block={} height={}",
@@ -122,9 +142,18 @@ impl Spaced {
                             self.update_anchors()?;
                         }
                     }
+                    BlockEvent::Waiting(bitcoind_height) => {
+                        if self.enable_pruning && last_idle_prune.elapsed() >= Duration::from_secs(60) {
+                            self.prune(&source, bitcoind_height);
+                            last_idle_prune = std::time::Instant::now();
+                        }
+                    }
                     BlockEvent::Block(id, block) => {
                         self.handle_block(&mut node, id, block)?;
                         info!("block={} height={}", id.hash, id.height);
+                        if self.enable_pruning && id.height % PRUNING_BUFFER == 0 {
+                            self.prune(&source, id.height);
+                        }
                     }
                     BlockEvent::Error(e) if matches!(e, BlockFetchError::BlockMismatch) => {
                         if let Err(e) = self.restore(&source) {

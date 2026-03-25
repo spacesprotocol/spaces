@@ -47,9 +47,25 @@ pub struct BlockFetcher {
 }
 
 pub enum BlockEvent {
+    /// Fully caught up with Bitcoin Core
     Tip(ChainAnchor),
     Block(ChainAnchor, Block),
     Error(BlockFetchError),
+    /// Bitcoin Core is still syncing; carries its current block height
+    Waiting(u32),
+}
+
+pub enum BestChain {
+    Tip(ChainAnchor),
+    /// Bitcoin Core is syncing, still below our height
+    Waiting(u32),
+    None,
+}
+
+enum SyncStatus {
+    NewTip(ChainAnchor),
+    AtTip,
+    Waiting(u32),
 }
 
 pub enum BitcoinRpcAuth {
@@ -179,6 +195,11 @@ impl BitcoinRpc {
     pub fn get_blockchain_info(&self) -> BitcoinRpcRequest {
         let params = serde_json::json!([]);
         self.make_request("getblockchaininfo", params)
+    }
+
+    pub fn prune_blockchain(&self, height: u32) -> BitcoinRpcRequest {
+        let params = serde_json::json!([height]);
+        self.make_request("pruneblockchain", params)
     }
     pub fn get_block_filter_by_height(&self, height: u32) -> BitcoinRpcRequest {
         let params = serde_json::json!([height]);
@@ -431,10 +452,11 @@ impl BlockFetcher {
         expected_chain: Network,
         source: &BitcoinBlockSource,
         start: ChainAnchor,
-    ) -> Result<Option<ChainAnchor>, BlockFetchError> {
+    ) -> Result<SyncStatus, BlockFetchError> {
         let tip = match source.get_best_chain(Some(start.height), expected_chain)? {
-            Some(tip) => tip,
-            None => return Ok(None),
+            BestChain::Tip(tip) => tip,
+            BestChain::Waiting(height) => return Ok(SyncStatus::Waiting(height)),
+            BestChain::None => return Ok(SyncStatus::AtTip),
         };
 
         if start.height > tip.height {
@@ -449,10 +471,10 @@ impl BlockFetcher {
 
         // If the chain didn't advance and the hashes match, no rescan is needed
         if tip.height == start.height && tip.hash == start.hash {
-            return Ok(None);
+            return Ok(SyncStatus::AtTip);
         }
 
-        Ok(Some(tip))
+        Ok(SyncStatus::NewTip(tip))
     }
 
     pub fn restart(&self, checkpoint: ChainAnchor, drain_receiver: &Receiver<BlockEvent>) {
@@ -484,8 +506,8 @@ impl BlockFetcher {
                 }
                 last_check = Instant::now();
 
-                let tip = match BlockFetcher::should_sync(chain, &task_src, checkpoint) {
-                    Ok(t) => t,
+                let status = match BlockFetcher::should_sync(chain, &task_src, checkpoint) {
+                    Ok(s) => s,
                     Err(e) => {
                         _ = task_sender.send(BlockEvent::Error(e));
                         std_wait(
@@ -496,37 +518,43 @@ impl BlockFetcher {
                     }
                 };
 
-                if let Some(tip) = tip {
-                    let res = Self::run_workers(
-                        job_id,
-                        current_task.clone(),
-                        task_src.clone(),
-                        task_sender.clone(),
-                        checkpoint,
-                        tip.height,
-                        num_workers,
-                    );
+                match status {
+                    SyncStatus::NewTip(tip) => {
+                        let res = Self::run_workers(
+                            job_id,
+                            current_task.clone(),
+                            task_src.clone(),
+                            task_sender.clone(),
+                            checkpoint,
+                            tip.height,
+                            num_workers,
+                        );
 
-                    match res {
-                        Ok(new_tip) => {
-                            checkpoint = new_tip;
-                        }
-                        Err(e) if matches!(e, BlockFetchError::RpcError(_)) => {
-                            _ = task_sender.send(BlockEvent::Error(e));
-                            std_wait(
-                                || current_task.load(Ordering::SeqCst) != job_id,
-                                Duration::from_secs(1),
-                            );
-                            continue;
-                        }
-                        Err(e) => {
-                            _ = task_sender.send(BlockEvent::Error(e));
-                            current_task.fetch_add(1, Ordering::SeqCst);
-                            return;
+                        match res {
+                            Ok(new_tip) => {
+                                checkpoint = new_tip;
+                            }
+                            Err(e) if matches!(e, BlockFetchError::RpcError(_)) => {
+                                _ = task_sender.send(BlockEvent::Error(e));
+                                std_wait(
+                                    || current_task.load(Ordering::SeqCst) != job_id,
+                                    Duration::from_secs(1),
+                                );
+                                continue;
+                            }
+                            Err(e) => {
+                                _ = task_sender.send(BlockEvent::Error(e));
+                                current_task.fetch_add(1, Ordering::SeqCst);
+                                return;
+                            }
                         }
                     }
-                } else {
-                    _ = task_sender.send(BlockEvent::Tip(checkpoint));
+                    SyncStatus::AtTip => {
+                        _ = task_sender.send(BlockEvent::Tip(checkpoint));
+                    }
+                    SyncStatus::Waiting(height) => {
+                        _ = task_sender.send(BlockEvent::Waiting(height));
+                    }
                 }
             }
         });
@@ -898,6 +926,11 @@ impl BitcoinBlockSource {
         let client = reqwest::blocking::Client::new();
         Self { client, rpc }
     }
+
+    pub fn prune_blockchain(&self, height: u32) -> Result<u64, BitcoinRpcError> {
+        self.rpc
+            .send_json_blocking(&self.client, &self.rpc.prune_blockchain(height))
+    }
 }
 
 impl BlockSource for BitcoinBlockSource {
@@ -954,7 +987,7 @@ impl BlockSource for BitcoinBlockSource {
             .send_json_blocking(&self.client, &self.rpc.get_block_count())?)
     }
 
-    fn get_best_chain(&self, tip: Option<u32>, expected_chain: Network) -> Result<Option<ChainAnchor>, BitcoinRpcError> {
+    fn get_best_chain(&self, tip: Option<u32>, expected_chain: Network) -> Result<BestChain, BitcoinRpcError> {
         #[derive(Deserialize)]
         struct Info {
             pub chain: String,
@@ -981,7 +1014,7 @@ impl BlockSource for BitcoinBlockSource {
         }
         if info.chain != expected_chain {
             warn!("Invalid chain from connected rpc node - expected {}, got {}", expected_chain, info.chain);
-            return Ok(None);
+            return Ok(BestChain::None);
         }
 
         let synced = info.headers == info.blocks;
@@ -1000,10 +1033,10 @@ impl BlockSource for BitcoinBlockSource {
 
         // If the source is still syncing, and we have a higher tip, wait.
         if !synced && tip.is_some_and(|tip| tip > info.blocks) {
-            return Ok(None);
+            return Ok(BestChain::Waiting(info.blocks));
         }
 
-        Ok(Some(best_chain))
+        Ok(BestChain::Tip(best_chain))
     }
 
     fn get_blockchain_info(&self) -> anyhow::Result<crate::client::BlockchainInfo, BitcoinRpcError> {
