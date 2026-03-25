@@ -145,18 +145,19 @@ impl Chain {
         dir: &Path,
         block_index: bool,
         index_hashes: bool,
+        cache_size: Option<usize>,
     ) -> anyhow::Result<Self> {
         let proto_db_path = dir.join("root.sdb");
         let nums_db_path = dir.join("nums.sdb");
         let initial_num_sync = !nums_db_path.exists();
 
-        let sp_store = SpStore::open(proto_db_path, index_hashes)?;
+        let sp_store = SpStore::open(proto_db_path, index_hashes, cache_size)?;
         let sp = SpLiveStore {
             state: sp_store.begin(&genesis)?,
             store: sp_store,
         };
 
-        let num_store = NumStore::open(nums_db_path, index_hashes)?;
+        let num_store = NumStore::open(nums_db_path, index_hashes, cache_size)?;
         let num = NumLiveStore {
             state: num_store.begin(&nums_genesis)?,
             store: num_store,

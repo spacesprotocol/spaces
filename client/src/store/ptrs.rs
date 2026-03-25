@@ -55,8 +55,8 @@ pub struct Staged {
 }
 
 impl NumStore {
-    pub fn open(path: PathBuf, auto_hash_index: bool) -> Result<Self> {
-        let db = open_db(path, auto_hash_index)?;
+    pub fn open(path: PathBuf, auto_hash_index: bool, cache_size: Option<usize>) -> Result<Self> {
+        let db = open_db(path, auto_hash_index, cache_size)?;
         Ok(Self(db))
     }
 
