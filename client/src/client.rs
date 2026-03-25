@@ -19,7 +19,7 @@ use spaces_nums::{CommitmentKey, CommitmentTipKey, DelegatorKey, NumOutpointKey}
 use spaces_wallet::bitcoin::{Network, Transaction};
 
 use crate::{
-    source::BitcoinRpcError,
+    source::{BitcoinRpcError, BestChain},
 };
 use crate::source::BlockQueueResult;
 use crate::store::chain::{Chain};
@@ -31,7 +31,7 @@ pub trait BlockSource {
     fn get_median_time(&self) -> Result<u64, BitcoinRpcError>;
     fn in_mempool(&self, txid: &Txid, height: u32) -> Result<bool, BitcoinRpcError>;
     fn get_block_count(&self) -> Result<u64, BitcoinRpcError>;
-    fn get_best_chain(&self, tip: Option<u32>, expected_chain: Network) -> Result<Option<ChainAnchor>, BitcoinRpcError>;
+    fn get_best_chain(&self, tip: Option<u32>, expected_chain: Network) -> Result<BestChain, BitcoinRpcError>;
     fn get_blockchain_info(&self) -> Result<BlockchainInfo, BitcoinRpcError>;
     fn get_block_filter_by_height(&self, height: u32) -> Result<Option<BlockFilterRpc>, BitcoinRpcError>;
     fn queue_blocks(&self, heights: Vec<u32>) -> Result<(), BitcoinRpcError>;

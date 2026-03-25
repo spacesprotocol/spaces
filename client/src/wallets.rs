@@ -40,7 +40,7 @@ use crate::{
     config::ExtendedNetwork,
     rpc::{RpcWalletRequest, RpcWalletTxBuilder, WalletLoadRequest},
     source::{
-        BitcoinBlockSource, BitcoinRpc, BitcoinRpcError, BlockEvent, BlockFetchError, BlockFetcher,
+        BestChain, BitcoinBlockSource, BitcoinRpc, BitcoinRpcError, BlockEvent, BlockFetchError, BlockFetcher,
     },
     std_wait,
 };
@@ -593,7 +593,7 @@ impl RpcWallet {
 
                 let best_chain =
                     source.get_best_chain(Some(wallet_info.info.tip), wallet.config.network);
-                if let Ok(Some(best_chain)) = best_chain {
+                if let Ok(BestChain::Tip(best_chain)) = best_chain {
                     wallet_info.info.progress = calc_progress(
                         wallet.config.start_block,
                         wallet_info.info.tip,
@@ -959,13 +959,14 @@ impl RpcWallet {
                             wallet.commit()?;
                         }
                     }
+                    BlockEvent::Waiting(_) => {}
                     BlockEvent::Error(e) if matches!(e, BlockFetchError::BlockMismatch) => {
                         let mut checkpoint_in_chain = None;
                         let best_chain = match source
                             .get_best_chain(Some(wallet_tip.height), network.fallback_network())
                         {
-                            Ok(Some(best)) => best,
-                            Ok(None) => {
+                            Ok(BestChain::Tip(best)) => best,
+                            Ok(BestChain::Waiting(_)) | Ok(BestChain::None) => {
                                 warn!("Waiting for source to sync");
                                 fetcher.restart(wallet_tip, &receiver);
                                 continue;

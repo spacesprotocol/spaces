@@ -93,6 +93,12 @@ pub struct Args {
     /// faster merkle proof generation (with build_chain_proof rpc)
     #[arg(long, env = "SPACED_INDEX_NODE_HASHES", default_value = "false")]
     index_node_hashes: bool,
+
+    /// Enable manual pruning of Bitcoin Core blocks after they have been
+    /// processed by spaced. Calls `pruneblockchain` RPC periodically,
+    /// keeping a buffer of blocks from tip to handle reorgs.
+    #[arg(long, env = "SPACED_ENABLE_PRUNING", default_value = "false")]
+    enable_pruning: bool,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug, ValueEnum, Serialize, Deserialize)]
@@ -240,6 +246,7 @@ impl Args {
             synced: false,
             cbf: args.bitcoin_rpc_light,
             num_anchors: args.num_anchors.unwrap_or(ROOT_ANCHORS_COUNT),
+            enable_pruning: args.enable_pruning,
         })
     }
 }
