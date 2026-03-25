@@ -182,10 +182,6 @@ impl Chain {
                 info!("spaces tip = {} > nums genesis = {} - rescanning to index nums",
                     sp_tip.height, nums_genesis.height
                 );
-                assert_eq!(
-                    nums_genesis.height % COMMIT_BLOCK_INTERVAL, 0,
-                    "nums genesis must align with commit interval"
-                );
                 chain.restore_spaces(|_| {
                     return Ok(BlockHash::from_slice(&[0u8; 32]).expect("hash"));
                 }, Some(nums_genesis.height))?;
@@ -422,7 +418,7 @@ impl Chain {
         Ok(())
     }
 
-    pub fn restore_spaces<F>(&self, get_block_hash: F, restore_to_height: Option<u32>) -> anyhow::Result<ChainAnchor>
+    pub fn restore_spaces<F>(&self, get_block_hash: F, nums_genesis_height: Option<u32>) -> anyhow::Result<ChainAnchor>
     where
         F: Fn(u32) -> anyhow::Result<BlockHash>,
     {
@@ -430,8 +426,8 @@ impl Chain {
         for (_snapshot_index, snapshot) in chain_iter.enumerate() {
             let chain_snapshot = snapshot?;
             let chain_checkpoint: ChainAnchor = chain_snapshot.metadata().try_into()?;
-            if let Some(restore_to_height) = restore_to_height {
-                if restore_to_height != chain_checkpoint.height {
+            if let Some(max_height) = nums_genesis_height {
+                if chain_checkpoint.height > max_height {
                     continue;
                 }
             } else {
