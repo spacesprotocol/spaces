@@ -202,10 +202,11 @@ impl Spaced {
         }
     }
 
-    pub fn ptr_genesis(network: ExtendedNetwork) -> ChainAnchor {
+    pub fn nums_genesis(network: ExtendedNetwork) -> ChainAnchor {
         match network {
-            ExtendedNetwork::Testnet4 => ChainAnchor::PTR_TESTNET4(),
-            ExtendedNetwork::Regtest => ChainAnchor::PTR_REGTEST(),
+            ExtendedNetwork::Mainnet => spaces_nums::constants::NUMS_MAINNET(),
+            ExtendedNetwork::Testnet4 => spaces_nums::constants::NUMS_TESTNET4(),
+            ExtendedNetwork::Regtest => ChainAnchor::NUMS_REGTEST(),
             _ => panic!("unsupported network"),
         }
     }

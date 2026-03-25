@@ -83,19 +83,7 @@ impl ChainAnchor {
             50_000,
         )
     };
-
-    pub const PTR_TESTNET4: fn() -> Self = || {
-        Self::new(
-            [
-                0x94, 0x94, 0xe5, 0x15, 0x75, 0xaa, 0xcf, 0x09,
-                0x45, 0xc1, 0x7a, 0x30, 0xf3, 0x53, 0x20, 0xe8,
-                0x1d, 0x2b, 0xd0, 0xed, 0x6a, 0xaa, 0xb3, 0xc3,
-                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            ],
-            100_008,
-        )
-    };
-
+    
     // Testnet activation block
     pub const TESTNET: fn() -> Self = || {
         Self::new(
@@ -122,7 +110,7 @@ impl ChainAnchor {
         )
     };
 
-    pub const PTR_REGTEST: fn() -> Self = || {
+    pub const NUMS_REGTEST: fn() -> Self = || {
         Self::new(
             [
                 0x06, 0x22, 0x6e, 0x46, 0x11, 0x1a, 0x0b, 0x59,

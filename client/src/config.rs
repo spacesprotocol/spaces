@@ -221,7 +221,7 @@ impl Args {
         );
 
         let genesis = Spaced::genesis(args.chain);
-        let ptr_genesis = Spaced::ptr_genesis(args.chain);
+        let ptr_genesis = Spaced::nums_genesis(args.chain);
 
         let chain = Chain::load(
             args.chain.fallback_network(),

@@ -1,16 +1,27 @@
-use bitcoin::Network;
-
-pub const PTR_MAINNET_HEIGHT : u32 = 922_777;
-pub const PTR_TESTNET4_HEIGHT : u32 = 100_008;
-pub const PTR_REGTEST_HEIGHT : u32 = 0;
+use spaces_protocol::constants::ChainAnchor;
 
 pub const COMMITMENT_FINALITY_INTERVAL : u32 = 144;
 
-pub fn ptrs_start_height(network: &Network) -> u32 {
-    match network {
-        Network::Bitcoin => PTR_MAINNET_HEIGHT,
-        Network::Testnet => PTR_TESTNET4_HEIGHT,
-        Network::Regtest => PTR_REGTEST_HEIGHT,
-        _ => panic!("unsupported network {}", network)
-    }
-}
+pub const NUMS_TESTNET4: fn() -> ChainAnchor = || {
+    ChainAnchor::new(
+        [
+            0x6c, 0x95, 0xe6, 0x8f, 0x41, 0x46, 0x90, 0xe8,
+            0x96, 0xfc, 0xc7, 0x2e, 0x13, 0x9a, 0xbf, 0xa9,
+            0x4e, 0xa1, 0x2e, 0xcc, 0xaf, 0xae, 0x80, 0x62,
+            0xb7, 0x34, 0xfe, 0x06, 0x00, 0x00, 0x00, 0x00,
+        ],
+        122_222,
+    )
+};
+
+pub const NUMS_MAINNET: fn() -> ChainAnchor = || {
+    ChainAnchor::new(
+        [
+            0xd5, 0x01, 0x39, 0x2b, 0xd5, 0x8a, 0xd3, 0x23,
+            0xfa, 0x4a, 0xaa, 0xf1, 0x2d, 0x0c, 0xfa, 0x8f,
+            0xcd, 0x20, 0x64, 0x43, 0xa3, 0xea, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ],
+        941_222,
+    )
+};
