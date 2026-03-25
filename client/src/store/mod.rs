@@ -7,6 +7,8 @@ use spacedb::tx::{ReadTransaction, WriteTransaction};
 use spaces_protocol::bitcoin::OutPoint;
 use crate::store::chain::ROOT_ANCHORS_COUNT;
 
+const DEFAULT_CACHE_SIZE: usize = 50 * 1024 * 1024; /* 50MB */
+
 pub mod spaces;
 pub mod ptrs;
 pub mod chain;
@@ -47,10 +49,11 @@ impl spaces_protocol::hasher::KeyHasher for Sha256 {
     }
 }
 
-fn open_db(path_buf: PathBuf, auto_hash_index: bool) -> anyhow::Result<Database<Sha256Hasher>> {
+fn open_db(path_buf: PathBuf, auto_hash_index: bool, cache_size: Option<usize>) -> anyhow::Result<Database<Sha256Hasher>> {
     let  config = Configuration::standard()
         .with_auto_hash_index(auto_hash_index)
-        .with_hash_index_pruning(Some(ROOT_ANCHORS_COUNT as _));
-    
+        .with_hash_index_pruning(Some(ROOT_ANCHORS_COUNT as _))
+        .with_cache_size(cache_size.unwrap_or(DEFAULT_CACHE_SIZE));
+
     Ok(Database::open_with_config(path_buf.to_str().unwrap(), config)?)
 }

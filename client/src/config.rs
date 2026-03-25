@@ -99,6 +99,10 @@ pub struct Args {
     /// keeping a buffer of blocks from tip to handle reorgs.
     #[arg(long, env = "SPACED_ENABLE_PRUNING", default_value = "false")]
     enable_pruning: bool,
+
+    /// Cache size in bytes for the spacedb database
+    #[arg(long, env = "SPACED_CACHE_SIZE")]
+    cache_size: Option<usize>,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug, ValueEnum, Serialize, Deserialize)]
@@ -226,6 +230,7 @@ impl Args {
             &data_dir,
             args.block_index || args.block_index_full,
             args.index_node_hashes,
+            args.cache_size,
         )?;
 
         let anchors_path = match args.skip_anchors {
