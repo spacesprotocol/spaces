@@ -79,7 +79,7 @@ fn main() -> anyhow::Result<()> {
         s3_cp(&output, &format!("{}/{}", bucket, filename), args.endpoint_url.as_deref(), args.profile.as_deref())?;
 
         // Write and upload latest.json
-        let latest = spaces_checkpoint::LatestCheckpoint {
+        let latest = spaces_checkpoint::Checkpoint {
             height,
             block_hash: block_hash.clone(),
             digest: hex::encode(digest),
