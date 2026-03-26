@@ -1,0 +1,27 @@
+[package]
+name = "spaces-checkpoint"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "checkpoint-builder"
+path = "src/builder.rs"
+required-features = ["cli"]
+
+[dependencies]
+tracing = "0.1"
+sha2 = "0.10"
+tar = "0.4"
+flate2 = "1"
+ureq = "3"
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = { version = "1", optional = true }
+clap = { version = "4", features = ["derive"], optional = true }
+spacedb = { workspace = true, optional = true }
+spaces_protocol = { path = "../protocol", features = ["std"], optional = true }
+
+[features]
+default = ["cli"]
+cli = ["dep:clap", "dep:anyhow", "dep:spacedb", "dep:spaces_protocol"]
