@@ -7,7 +7,7 @@ Fast-sync for spaced nodes by downloading a verified snapshot of the database st
 Run from the workspace root with a fully synced spaced data directory:
 
 ```bash
-cargo run -p spaces-checkpoint --bin checkpoint-builder -- --data-dir /path/to/spaced/mainnet
+cargo run -p spaces_checkpoint --bin checkpoint-builder -- --data-dir /path/to/spaced/mainnet
 ```
 
 This will:
@@ -26,7 +26,8 @@ checkpoint-builder --data-dir ./mainnet --upload s3://my-bucket/
 
 # Cloudflare R2
 checkpoint-builder --data-dir ./mainnet --upload s3://my-bucket/ \
-  --endpoint-url https://ACCOUNT_ID.r2.cloudflarestorage.com
+  --endpoint-url https://ACCOUNT_ID.r2.cloudflarestorage.com \
+  --profile r2
 ```
 
 Requires the [AWS CLI](https://aws.amazon.com/cli/) to be installed and configured.
@@ -34,6 +35,12 @@ Requires the [AWS CLI](https://aws.amazon.com/cli/) to be installed and configur
 This uploads both `checkpoint-<height>.tar.gz` and `latest.json` to the bucket. `latest.json` contains the height, block hash, and digest so consumers can check for newer checkpoints without downloading the full archive.
 
 ## Usage
+
+Add to your `Cargo.toml` (without the CLI tools):
+
+```toml
+spaces_checkpoint = { path = "../checkpoint", default-features = false }
+```
 
 Three functions, you control the flow:
 
@@ -43,31 +50,24 @@ use spaces_checkpoint::{
     integrity, CHECKPOINT_BASE_URL,
 };
 
-// 1. Check if a checkpoint is needed
 if needs_checkpoint(&data_dir) {
+    let default = integrity::checkpoint();
 
-    // 2. Optionally check for a newer checkpoint than the hardcoded one
-    let (url, digest) = if let Ok(Some(latest)) = fetch_latest(CHECKPOINT_BASE_URL) {
-        if latest.height > integrity::CHECKPOINT.height {
-            // A newer checkpoint is available — let the user decide
-            (latest.url(CHECKPOINT_BASE_URL), latest.digest_bytes().unwrap())
-        } else {
-            // Use hardcoded
-            let url = format!("{}/checkpoint-{}.tar.gz",
-                CHECKPOINT_BASE_URL, integrity::CHECKPOINT.height);
-            (url, integrity::CHECKPOINT.digest)
+    // Optionally check for a newer checkpoint
+    let checkpoint = match fetch_latest(CHECKPOINT_BASE_URL) {
+        Ok(Some(latest)) if latest.height > default.height => {
+            // Show user, let them decide
+            latest
         }
-    } else {
-        // Server unreachable, use hardcoded
-        let url = format!("{}/checkpoint-{}.tar.gz",
-            CHECKPOINT_BASE_URL, integrity::CHECKPOINT.height);
-        (url, integrity::CHECKPOINT.digest)
+        _ => default,
     };
 
-    // 3. Download and apply
+    let digest = checkpoint.digest_bytes()?;
+    let url = checkpoint.url(CHECKPOINT_BASE_URL);
     let applied = ensure_checkpoint(&data_dir, &url, &digest, None)?;
+
     if !applied {
-        // Server unreachable after retries, sync from scratch
+        // Server unreachable after retries, sync from genesis
     }
 }
 ```
@@ -80,6 +80,6 @@ if needs_checkpoint(&data_dir) {
 - `Err(CheckpointError)` — local filesystem error
 
 `fetch_latest` returns:
-- `Ok(Some(LatestCheckpoint))` — latest checkpoint metadata from server
+- `Ok(Some(Checkpoint))` — latest checkpoint metadata from server
 - `Ok(None)` — server unreachable
 - `Err(CheckpointError)` — invalid response
