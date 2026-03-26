@@ -1,5 +1,5 @@
 [package]
-name = "spaces-checkpoint"
+name = "spaces_checkpoint"
 version = "0.1.0"
 edition = "2024"
 
