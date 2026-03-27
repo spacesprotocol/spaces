@@ -291,6 +291,14 @@ enum Commands {
         #[arg(long)]
         skip_anchor: bool,
     },
+    /// Export a space's Nostr nsec key
+    #[command(name = "exportspacensec")]
+    ExportSpaceNsec {
+        /// The space to use for exporting the Nostr nsec key
+        space: String,
+        /// Destination path to export nsec key file
+        path: PathBuf,
+    },
     /// Updates the Merkle trust path for space-anchored Nostr events
     #[command(name = "refreshanchor")]
     RefreshAnchor {
@@ -428,6 +436,35 @@ impl SpaceCli {
 
         Ok(result)
     }
+
+    async fn export_space_nsec(
+        &self,
+        space: String,
+        event: NostrEvent,
+        anchor: bool,
+        most_recent: bool,
+    ) -> Result<NostrEvent, ClientError> {
+        let mut result = self
+            .client
+            .wallet_sign_event(&self.wallet, &space, event)
+            .await?;
+
+        if anchor {
+            result = self.add_anchor(result, most_recent).await?
+        }
+
+        Ok(result)
+    }
+
+    async fn get_space_nsec_keys(&self, space: String) -> Result<(String, String), ClientError> {
+        let result = self
+            .client
+            .wallet_get_space_nsec_keys(&self.wallet, &space)
+            .await?;
+        
+        Ok(result)
+    }
+
     async fn add_anchor(
         &self,
         mut event: NostrEvent,
@@ -902,9 +939,20 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
         } => {
             let update = encode_dns_update(&space, input)
                 .map_err(|e| ClientError::Custom(format!("Parse error: {}", e)))?;
-            let result = cli.sign_event(space, update, !skip_anchor, false).await?;
+            let result = cli.export_space_nsec(space, update, !skip_anchor, false).await?;
 
             println!("{}", serde_json::to_string(&result).expect("result"));
+        }
+        Commands::ExportSpaceNsec {
+            space,
+            path,
+        } => {
+            let (secret_hex, nsec) = cli.get_space_nsec_keys(space).await?;
+            
+            let content = format!("secret_hex: {}\nnsec: {}", secret_hex, nsec);
+            fs::write(path, content).map_err(|e| {
+                ClientError::Custom(format!("Could not save to path: {}", e.to_string()))
+            })?;
         }
         Commands::RefreshAnchor {
             input,

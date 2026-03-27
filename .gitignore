@@ -2,3 +2,6 @@ target
 .idea
 .DS_store
 .zone
+
+NOTES.md
+temp/
