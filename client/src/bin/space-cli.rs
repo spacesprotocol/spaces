@@ -360,7 +360,7 @@ enum Commands {
     /// Examples:
     ///   space-cli setfallback @alice --txt btc=bc1q... --txt nostr=npub1...
     ///   space-cli setfallback @alice --raw SGVsbG8=
-    ///   echo '[{"type":"txt","key":"btc","value":"bc1q..."}]' | space-cli setfallback @alice --stdin
+    ///   echo '[{"type":"txt","key":"btc","value":["bc1q..."]}]' | space-cli setfallback @alice --stdin
     #[command(name = "setfallback")]
     SetFallback {
         /// Space name, numeric, or num id
