@@ -103,7 +103,7 @@ impl Veritas {
 }
 
 impl Proof {
-    pub fn iter(&self) -> ProofIter {
+    pub fn iter(&self) -> ProofIter<'_> {
         ProofIter {
             inner: self.inner.iter(),
         }

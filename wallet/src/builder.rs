@@ -405,7 +405,6 @@ impl Builder {
             if !coin_transfers.is_empty() {
                 for coin in coin_transfers {
                     builder.add_send(coin)?;
-                    vout += 1;
                 }
             }
 
@@ -720,7 +719,7 @@ impl Builder {
         wallet: &mut SpacesWallet,
         unspendables: Vec<OutPoint>,
         confirmed_only: bool,
-    ) -> anyhow::Result<BuilderIterator> {
+    ) -> anyhow::Result<BuilderIterator<'_>> {
         let fee_rate = self
             .fee_rate
             .as_ref()

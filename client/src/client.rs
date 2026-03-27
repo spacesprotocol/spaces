@@ -279,7 +279,12 @@ impl Client {
                             // Space => Outpoint mapping will be removed
                             // since this type of revocation only happens when an
                             // expired space is being re-opened for auction.
-                            // No bids here so only remove Outpoint -> Spaceout
+                            // Remove both Space -> Outpoint and Outpoint -> Spaceout mappings
+                            if let Some(space) = update.output.spaceout.space.as_ref() {
+                                let base_hash = Sha256::hash(space.name.as_ref());
+                                let space_key = SpaceKey::from(base_hash);
+                                state.remove(space_key);
+                            }
                             let hash =
                                 OutpointKey::from_outpoint::<Sha256>(update.output.outpoint());
                             state.remove(hash);

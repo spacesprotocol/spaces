@@ -2332,7 +2332,7 @@ dependencies = [
 
 [[package]]
 name = "spaces_client"
-version = "0.0.7"
+version = "0.0.9"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -2366,7 +2366,7 @@ dependencies = [
 
 [[package]]
 name = "spaces_protocol"
-version = "0.0.7"
+version = "0.0.9"
 dependencies = [
  "bincode",
  "bitcoin",
@@ -2390,7 +2390,7 @@ dependencies = [
 
 [[package]]
 name = "spaces_veritas"
-version = "0.0.7"
+version = "0.0.9"
 dependencies = [
  "base64 0.22.1",
  "bincode",
@@ -2408,7 +2408,7 @@ dependencies = [
 
 [[package]]
 name = "spaces_wallet"
-version = "0.0.7"
+version = "0.0.9"
 dependencies = [
  "anyhow",
  "bdk_wallet",

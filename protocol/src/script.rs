@@ -148,10 +148,18 @@ impl SpaceScript {
             let existing = src.get_space_outpoint(&spacehash)?;
             match existing {
                 None => OpenHistory::NewSpace(name.to_owned()),
-                Some(outpoint) => OpenHistory::ExistingSpace(FullSpaceOut {
-                    txid: outpoint.txid,
-                    spaceout: src.get_spaceout(&outpoint)?.expect("spaceout exists"),
-                }),
+                Some(outpoint) => {
+                    // Handle data inconsistency: if spaceout doesn't exist, treat as new space
+                    // This can happen if the space was revoked but the space->outpoint mapping
+                    // wasn't cleaned up properly
+                    match src.get_spaceout(&outpoint)? {
+                        Some(spaceout) => OpenHistory::ExistingSpace(FullSpaceOut {
+                            txid: outpoint.txid,
+                            spaceout,
+                        }),
+                        None => OpenHistory::NewSpace(name.to_owned()),
+                    }
+                }
             }
         };
         let open = Ok(kind);
