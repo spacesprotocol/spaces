@@ -27,7 +27,7 @@ pub enum Error {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Record {
     Seq(u64),
-    Txt { key: String, value: String },
+    Txt { key: String, value: Vec<String> },
     Blob { key: String, value: Vec<u8> },
     Unknown { rtype: u8, rdata: Vec<u8> },
 }
@@ -38,11 +38,19 @@ impl Record {
         Record::Seq(version)
     }
 
-    /// Creates a TXT record.
+    /// Creates a TXT record with a single value.
     pub fn txt(key: &str, value: &str) -> Self {
         Record::Txt {
             key: String::from(key),
-            value: String::from(value),
+            value: alloc::vec![String::from(value)],
+        }
+    }
+
+    /// Creates a TXT record with multiple values.
+    pub fn txts(key: &str, values: Vec<String>) -> Self {
+        Record::Txt {
+            key: String::from(key),
+            value: values,
         }
     }
 
@@ -94,12 +102,19 @@ impl Record {
             }
             TYPE_TXT => {
                 let (key, val_bytes) = parse_kv(rdata)?;
-                let value =
-                    core::str::from_utf8(val_bytes).map_err(|_| Error::InvalidUtf8)?;
-                Record::Txt {
-                    key,
-                    value: String::from(value),
+                let mut values = Vec::new();
+                let mut vpos = 0;
+                while vpos < val_bytes.len() {
+                    let slen = read_compact_size(val_bytes, &mut vpos)? as usize;
+                    if vpos + slen > val_bytes.len() {
+                        return Err(Error::UnexpectedEof);
+                    }
+                    let s = core::str::from_utf8(&val_bytes[vpos..vpos + slen])
+                        .map_err(|_| Error::InvalidUtf8)?;
+                    values.push(String::from(s));
+                    vpos += slen;
                 }
+                Record::Txt { key, value: values }
             }
             TYPE_BLOB => {
                 let (key, val_bytes) = parse_kv(rdata)?;
@@ -129,11 +144,17 @@ impl Record {
             Record::Txt { key, value } => {
                 validate_key(key)?;
                 buf.push(TYPE_TXT);
-                let data_len = 1 + key.len() + value.len();
+                // Build value portion: <compact_len><text><compact_len><text>...
+                let mut val_buf = Vec::new();
+                for s in value {
+                    write_compact_size(&mut val_buf, s.len() as u64);
+                    val_buf.extend_from_slice(s.as_bytes());
+                }
+                let data_len = 1 + key.len() + val_buf.len();
                 write_compact_size(buf, data_len as u64);
                 buf.push(key.len() as u8);
                 buf.extend_from_slice(key.as_bytes());
-                buf.extend_from_slice(value.as_bytes());
+                buf.extend_from_slice(&val_buf);
             }
             Record::Blob { key, value } => {
                 validate_key(key)?;
@@ -380,7 +401,7 @@ mod serde_impl {
     #[derive(Serialize, Deserialize)]
     struct TxtJson {
         key: String,
-        value: String,
+        value: Vec<String>,
     }
 
     #[derive(Serialize, Deserialize)]
@@ -434,7 +455,7 @@ mod serde_impl {
         fn try_from(j: RecordJson) -> Result<Self, Self::Error> {
             match j {
                 RecordJson::Seq(s) => Ok(Record::seq(s.version)),
-                RecordJson::Txt(t) => Ok(Record::txt(&t.key, &t.value)),
+                RecordJson::Txt(t) => Ok(Record::txts(&t.key, t.value)),
                 RecordJson::Blob(b) => {
                     let value = BASE64_STANDARD
                         .decode(&b.value)
@@ -621,7 +642,7 @@ mod tests {
             records[0],
             Record::Txt {
                 key: String::from("btc"),
-                value: String::from("bc1qtest"),
+                value: vec![String::from("bc1qtest")],
             }
         );
     }
@@ -704,13 +725,35 @@ mod tests {
     }
 
     #[test]
+    fn multi_value_txt() {
+        let rs = RecordSet::pack(vec![
+            Record::txts("ns", vec![
+                String::from("ns1.example.com"),
+                String::from("ns2.example.com"),
+                String::from("ns3.example.com"),
+            ]),
+        ]).unwrap();
+        let records = rs.unpack().unwrap();
+        match &records[0] {
+            Record::Txt { key, value } => {
+                assert_eq!(key, "ns");
+                assert_eq!(value.len(), 3);
+                assert_eq!(value[0], "ns1.example.com");
+                assert_eq!(value[1], "ns2.example.com");
+                assert_eq!(value[2], "ns3.example.com");
+            }
+            _ => panic!("expected txt"),
+        }
+    }
+
+    #[test]
     fn empty_txt_value() {
         let rs = RecordSet::pack(vec![Record::txt("btc", "")]).unwrap();
         let records = rs.unpack().unwrap();
         match &records[0] {
             Record::Txt { key, value } => {
                 assert_eq!(key, "btc");
-                assert_eq!(value, "");
+                assert_eq!(value, &vec![String::from("")]);
             }
             _ => panic!("expected txt"),
         }
@@ -738,7 +781,7 @@ mod tests {
             first,
             Record::Txt {
                 key: String::from("a"),
-                value: String::from("1"),
+                value: vec![String::from("1")],
             }
         );
     }
@@ -771,7 +814,7 @@ mod tests {
     fn pack_rejects_invalid_key() {
         let bad = Record::Txt {
             key: String::from("INVALID"),
-            value: String::from("v"),
+            value: vec![String::from("v")],
         };
         assert_eq!(bad.pack().unwrap_err(), Error::InvalidKey);
     }
@@ -780,7 +823,7 @@ mod tests {
     fn recordset_pack_rejects_invalid_key() {
         let bad = Record::Txt {
             key: String::from("BAD_KEY"),
-            value: String::from("v"),
+            value: vec![String::from("v")],
         };
         assert_eq!(RecordSet::pack(vec![bad]).unwrap_err(), Error::InvalidKey);
     }
@@ -847,6 +890,22 @@ mod tests {
         }
 
         #[test]
+        fn json_round_trip_multi_value_txt() {
+            let rs = RecordSet::pack(vec![
+                Record::txts("ns", vec![
+                    String::from("ns1.example.com"),
+                    String::from("ns2.example.com"),
+                ]),
+            ]).unwrap();
+
+            let json = serde_json::to_string(&rs).unwrap();
+            assert!(json.contains(r#""value":["ns1.example.com","ns2.example.com"]"#));
+
+            let decoded: RecordSet = serde_json::from_str(&json).unwrap();
+            assert_eq!(rs.unpack().unwrap(), decoded.unpack().unwrap());
+        }
+
+        #[test]
         fn json_round_trip_blob() {
             let rs = RecordSet::pack(vec![
                 Record::blob("avatar", vec![0x89, 0x50, 0x4E, 0x47]),
@@ -876,7 +935,7 @@ mod tests {
         fn json_matches_spec_format() {
             let json = r#"[
                 {"type":"seq","version":1},
-                {"type":"txt","key":"btc","value":"bc1q..."},
+                {"type":"txt","key":"btc","value":["bc1q..."]},
                 {"type":"blob","key":"some-data","value":"aGVsbG8="},
                 {"type":"unknown","rtype":42,"rdata":"AQID"}
             ]"#;
@@ -889,7 +948,7 @@ mod tests {
             match &records[1] {
                 Record::Txt { key, value } => {
                     assert_eq!(key, "btc");
-                    assert_eq!(value, "bc1q...");
+                    assert_eq!(value, &vec![String::from("bc1q...")]);
                 }
                 _ => panic!("expected txt"),
             }
