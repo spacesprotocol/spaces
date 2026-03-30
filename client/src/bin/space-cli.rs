@@ -765,7 +765,7 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
                 for txt in &txt_records {
                     let (key, value) = txt.split_once('=').ok_or_else(||
                         ClientError::Custom(format!("Invalid --txt format '{}': expected key=value", txt)))?;
-                    records.push(sip7::Record::txt(key, value));
+                    records.push(sip7::Record::txt(key, &[value]));
                 }
                 for blob in &blob_records {
                     let (key, b64_value) = blob.split_once('=').ok_or_else(||

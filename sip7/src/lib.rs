@@ -5,10 +5,12 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
+use spaces_protocol::sname::{SName, SNameRef, NameLike};
 
 const TYPE_SEQ: u8 = 0x00;
 const TYPE_TXT: u8 = 0x01;
 const TYPE_BLOB: u8 = 0x02;
+const TYPE_SIG: u8 = 0x04;
 
 /// Errors that can occur during record parsing or construction.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -29,6 +31,7 @@ pub enum Record {
     Seq(u64),
     Txt { key: String, value: Vec<String> },
     Blob { key: String, value: Vec<u8> },
+    Sig { signer: SName, rev: SName, sig: Vec<u8> },
     Unknown { rtype: u8, rdata: Vec<u8> },
 }
 
@@ -38,19 +41,11 @@ impl Record {
         Record::Seq(version)
     }
 
-    /// Creates a TXT record with a single value.
-    pub fn txt(key: &str, value: &str) -> Self {
+    /// Creates a TXT record.
+    pub fn txt(key: &str, values: &[&str]) -> Self {
         Record::Txt {
             key: String::from(key),
-            value: alloc::vec![String::from(value)],
-        }
-    }
-
-    /// Creates a TXT record with multiple values.
-    pub fn txts(key: &str, values: Vec<String>) -> Self {
-        Record::Txt {
-            key: String::from(key),
-            value: values,
+            value: values.iter().map(|s| String::from(*s)).collect(),
         }
     }
 
@@ -60,6 +55,11 @@ impl Record {
             key: String::from(key),
             value,
         }
+    }
+
+    /// Creates a SIG record.
+    pub fn sig(signer: SName, rev: SName, sig: Vec<u8>) -> Self {
+        Record::Sig { signer, rev, sig }
     }
 
     /// Creates an unknown record type (preserved for round-tripping).
@@ -123,6 +123,19 @@ impl Record {
                     value: val_bytes.to_vec(),
                 }
             }
+            TYPE_SIG => {
+                let signer_ref = SNameRef::try_from(rdata)
+                    .map_err(|_| Error::InvalidUtf8)?;
+                let after_signer = &rdata[signer_ref.to_bytes().len()..];
+                let rev_ref = SNameRef::try_from(after_signer)
+                    .map_err(|_| Error::InvalidUtf8)?;
+                let after_rev = &after_signer[rev_ref.to_bytes().len()..];
+                Record::Sig {
+                    signer: signer_ref.to_owned(),
+                    rev: rev_ref.to_owned(),
+                    sig: after_rev.to_vec(),
+                }
+            }
             _ => Record::Unknown {
                 rtype,
                 rdata: rdata.to_vec(),
@@ -164,6 +177,16 @@ impl Record {
                 buf.push(key.len() as u8);
                 buf.extend_from_slice(key.as_bytes());
                 buf.extend_from_slice(value);
+            }
+            Record::Sig { signer, rev, sig } => {
+                buf.push(TYPE_SIG);
+                let signer_bytes = signer.to_bytes();
+                let rev_bytes = rev.to_bytes();
+                let data_len = signer_bytes.len() + rev_bytes.len() + sig.len();
+                write_compact_size(buf, data_len as u64);
+                buf.extend_from_slice(signer_bytes);
+                buf.extend_from_slice(rev_bytes);
+                buf.extend_from_slice(sig);
             }
             Record::Unknown { rtype, rdata } => {
                 buf.push(*rtype);
@@ -411,6 +434,14 @@ mod serde_impl {
     }
 
     #[derive(Serialize, Deserialize)]
+    struct SigJson {
+        signer: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
+        sig: String,
+    }
+
+    #[derive(Serialize, Deserialize)]
     struct UnknownJson {
         rtype: u8,
         rdata: String,
@@ -425,6 +456,8 @@ mod serde_impl {
         Txt(TxtJson),
         #[serde(rename = "blob")]
         Blob(BlobJson),
+        #[serde(rename = "sig")]
+        Sig(SigJson),
         #[serde(rename = "unknown")]
         Unknown(UnknownJson),
     }
@@ -441,6 +474,18 @@ mod serde_impl {
                     key: key.clone(),
                     value: BASE64_STANDARD.encode(value),
                 }),
+                Record::Sig { signer, rev, sig } => {
+                    let rev_str = if rev.is_empty() {
+                        None
+                    } else {
+                        Some(alloc::string::ToString::to_string(&rev))
+                    };
+                    RecordJson::Sig(SigJson {
+                        signer: alloc::string::ToString::to_string(signer),
+                        rev: rev_str,
+                        sig: hex::encode(sig),
+                    })
+                }
                 Record::Unknown { rtype, rdata } => RecordJson::Unknown(UnknownJson {
                     rtype: *rtype,
                     rdata: BASE64_STANDARD.encode(rdata),
@@ -455,12 +500,23 @@ mod serde_impl {
         fn try_from(j: RecordJson) -> Result<Self, Self::Error> {
             match j {
                 RecordJson::Seq(s) => Ok(Record::seq(s.version)),
-                RecordJson::Txt(t) => Ok(Record::txts(&t.key, t.value)),
+                RecordJson::Txt(t) => Ok(Record::Txt { key: t.key, value: t.value }),
                 RecordJson::Blob(b) => {
                     let value = BASE64_STANDARD
                         .decode(&b.value)
                         .map_err(|_| "invalid base64 in blob value")?;
                     Ok(Record::blob(&b.key, value))
+                }
+                RecordJson::Sig(s) => {
+                    let signer = SName::try_from(s.signer)
+                        .map_err(|_| "invalid signer sname")?;
+                    let rev = match s.rev {
+                        Some(r) => SName::try_from(r).map_err(|_| "invalid rev sname")?,
+                        None => SName::empty(),
+                    };
+                    let sig = hex::decode(&s.sig)
+                        .map_err(|_| "invalid hex in sig")?;
+                    Ok(Record::sig(signer, rev, sig))
                 }
                 RecordJson::Unknown(u) => {
                     let rdata = BASE64_STANDARD
@@ -548,7 +604,7 @@ mod tests {
     fn pack_unpack_seq() {
         let rs = RecordSet::pack(vec![
             Record::seq(1),
-            Record::txt("btc", "bc1qtest"),
+            Record::txt("btc", &["bc1qtest"]),
         ]).unwrap();
 
         let records = rs.unpack().unwrap();
@@ -573,7 +629,7 @@ mod tests {
     #[test]
     fn seq_must_be_first_pack() {
         let err = RecordSet::pack(vec![
-            Record::txt("btc", "bc1q"),
+            Record::txt("btc", &["bc1q"]),
             Record::seq(1),
         ]).unwrap_err();
         assert_eq!(err, Error::SeqNotFirst);
@@ -582,7 +638,7 @@ mod tests {
     #[test]
     fn seq_must_be_first_unpack() {
         // Manually craft bytes: TXT record then SEQ record
-        let mut data = Record::txt("a", "b").pack().unwrap();
+        let mut data = Record::txt("a", &["b"]).pack().unwrap();
         data.extend_from_slice(&Record::seq(1).pack().unwrap());
         let rs = RecordSet::new(data);
         assert_eq!(rs.unpack(), Err(Error::SeqNotFirst));
@@ -610,7 +666,7 @@ mod tests {
     fn seq_helper_returns_version() {
         let rs = RecordSet::pack(vec![
             Record::seq(42),
-            Record::txt("btc", "bc1q"),
+            Record::txt("btc", &["bc1q"]),
         ]).unwrap();
         assert_eq!(rs.seq(), Some(42));
     }
@@ -618,7 +674,7 @@ mod tests {
     #[test]
     fn no_seq_returns_none() {
         let rs = RecordSet::pack(vec![
-            Record::txt("btc", "bc1q"),
+            Record::txt("btc", &["bc1q"]),
         ]).unwrap();
         assert_eq!(rs.seq(), None);
     }
@@ -632,8 +688,8 @@ mod tests {
     #[test]
     fn pack_unpack_txt() {
         let rs = RecordSet::pack(vec![
-            Record::txt("btc", "bc1qtest"),
-            Record::txt("nostr", "npub1abc"),
+            Record::txt("btc", &["bc1qtest"]),
+            Record::txt("nostr", &["npub1abc"]),
         ]).unwrap();
 
         let records = rs.unpack().unwrap();
@@ -645,6 +701,50 @@ mod tests {
                 value: vec![String::from("bc1qtest")],
             }
         );
+    }
+
+    #[test]
+    fn pack_unpack_sig() {
+        use core::str::FromStr;
+        let signer = SName::from_str("@bitcoin").unwrap();
+        let rev = SName::from_str("alice@bitcoin").unwrap();
+        let sig_bytes = vec![0xDE, 0xAD, 0xBE, 0xEF];
+
+        let rs = RecordSet::pack(vec![
+            Record::sig(signer.clone(), rev.clone(), sig_bytes.clone()),
+        ]).unwrap();
+
+        let records = rs.unpack().unwrap();
+        match &records[0] {
+            Record::Sig { signer: s, rev: r, sig } => {
+                assert_eq!(s, &signer);
+                assert_eq!(r, &rev);
+                assert_eq!(sig, &sig_bytes);
+            }
+            _ => panic!("expected sig"),
+        }
+    }
+
+    #[test]
+    fn pack_unpack_sig_empty_rev() {
+        use core::str::FromStr;
+        let signer = SName::from_str("@bitcoin").unwrap();
+        let empty_rev = SName::empty();
+        let sig_bytes = vec![0x01, 0x02, 0x03];
+
+        let rs = RecordSet::pack(vec![
+            Record::sig(signer.clone(), empty_rev.clone(), sig_bytes.clone()),
+        ]).unwrap();
+
+        let records = rs.unpack().unwrap();
+        match &records[0] {
+            Record::Sig { signer: s, rev: r, sig } => {
+                assert_eq!(s, &signer);
+                assert_eq!(r.label_count(), 0, "rev should be empty");
+                assert_eq!(sig, &sig_bytes);
+            }
+            _ => panic!("expected sig"),
+        }
     }
 
     #[test]
@@ -681,10 +781,10 @@ mod tests {
     fn pack_unpack_mixed() {
         let rs = RecordSet::pack(vec![
             Record::seq(1),
-            Record::txt("btc", "bc1qtest"),
+            Record::txt("btc", &["bc1qtest"]),
             Record::blob("data", vec![0xFF, 0x00]),
             Record::unknown(0x10, vec![0xAB]),
-            Record::txt("email", "alice@example.com"),
+            Record::txt("email", &["alice@example.com"]),
         ]).unwrap();
 
         let records = rs.unpack().unwrap();
@@ -708,7 +808,7 @@ mod tests {
 
     #[test]
     fn single_record_pack_is_valid_record_set() {
-        let record = Record::txt("btc", "bc1qtest");
+        let record = Record::txt("btc", &["bc1qtest"]);
         let bytes = record.pack().unwrap();
         let rs = RecordSet::new(bytes);
         let records = rs.unpack().unwrap();
@@ -727,11 +827,7 @@ mod tests {
     #[test]
     fn multi_value_txt() {
         let rs = RecordSet::pack(vec![
-            Record::txts("ns", vec![
-                String::from("ns1.example.com"),
-                String::from("ns2.example.com"),
-                String::from("ns3.example.com"),
-            ]),
+            Record::txt("ns", &["ns1.example.com", "ns2.example.com", "ns3.example.com"]),
         ]).unwrap();
         let records = rs.unpack().unwrap();
         match &records[0] {
@@ -748,7 +844,7 @@ mod tests {
 
     #[test]
     fn empty_txt_value() {
-        let rs = RecordSet::pack(vec![Record::txt("btc", "")]).unwrap();
+        let rs = RecordSet::pack(vec![Record::txt("btc", &[""])]).unwrap();
         let records = rs.unpack().unwrap();
         match &records[0] {
             Record::Txt { key, value } => {
@@ -761,7 +857,7 @@ mod tests {
 
     #[test]
     fn new_wraps_raw_bytes() {
-        let original = RecordSet::pack(vec![Record::txt("btc", "bc1qtest")]).unwrap();
+        let original = RecordSet::pack(vec![Record::txt("btc", &["bc1qtest"])]).unwrap();
         let bytes = original.to_bytes();
         let restored = RecordSet::new(bytes.clone());
         assert_eq!(restored.as_slice(), &bytes);
@@ -771,9 +867,9 @@ mod tests {
     #[test]
     fn lazy_iter() {
         let rs = RecordSet::pack(vec![
-            Record::txt("a", "1"),
-            Record::txt("b", "2"),
-            Record::txt("c", "3"),
+            Record::txt("a", &["1"]),
+            Record::txt("b", &["2"]),
+            Record::txt("c", &["3"]),
         ]).unwrap();
 
         let first = rs.iter().next().unwrap().unwrap();
@@ -788,26 +884,26 @@ mod tests {
 
     #[test]
     fn reject_uppercase_key() {
-        assert_eq!(Record::txt("BTC", "bc1q").pack().unwrap_err(), Error::InvalidKey);
+        assert_eq!(Record::txt("BTC", &["bc1q"]).pack().unwrap_err(), Error::InvalidKey);
     }
 
     #[test]
     fn reject_invalid_key_chars() {
-        assert_eq!(Record::txt("my_key", "v").pack().unwrap_err(), Error::InvalidKey);
-        assert_eq!(Record::txt("my.key", "v").pack().unwrap_err(), Error::InvalidKey);
-        assert_eq!(Record::txt("my key", "v").pack().unwrap_err(), Error::InvalidKey);
+        assert_eq!(Record::txt("my_key", &["v"]).pack().unwrap_err(), Error::InvalidKey);
+        assert_eq!(Record::txt("my.key", &["v"]).pack().unwrap_err(), Error::InvalidKey);
+        assert_eq!(Record::txt("my key", &["v"]).pack().unwrap_err(), Error::InvalidKey);
     }
 
     #[test]
     fn reject_empty_key() {
-        assert_eq!(Record::txt("", "v").pack().unwrap_err(), Error::InvalidKey);
+        assert_eq!(Record::txt("", &["v"]).pack().unwrap_err(), Error::InvalidKey);
     }
 
     #[test]
     fn allow_valid_key_chars() {
-        Record::txt("my-key-123", "v").pack().unwrap();
-        Record::txt("a", "v").pack().unwrap();
-        Record::txt("abc-def", "v").pack().unwrap();
+        Record::txt("my-key-123", &["v"]).pack().unwrap();
+        Record::txt("a", &["v"]).pack().unwrap();
+        Record::txt("abc-def", &["v"]).pack().unwrap();
     }
 
     #[test]
@@ -843,7 +939,7 @@ mod tests {
     #[test]
     fn compact_size_boundary() {
         let long_value = "x".repeat(248);
-        let rs = RecordSet::pack(vec![Record::txt("btc", &long_value)]).unwrap();
+        let rs = RecordSet::pack(vec![Record::txt("btc", &[&long_value])]).unwrap();
         let records = rs.unpack().unwrap();
         assert_eq!(records.len(), 1);
     }
@@ -851,7 +947,7 @@ mod tests {
     #[test]
     fn compact_size_multi_byte() {
         let long_value = "x".repeat(300);
-        let rs = RecordSet::pack(vec![Record::txt("btc", &long_value)]).unwrap();
+        let rs = RecordSet::pack(vec![Record::txt("btc", &[&long_value])]).unwrap();
         assert_eq!(rs.as_slice()[1], 0xFD);
         let records = rs.unpack().unwrap();
         assert_eq!(records.len(), 1);
@@ -866,7 +962,7 @@ mod tests {
         fn json_round_trip_seq() {
             let rs = RecordSet::pack(vec![
                 Record::seq(1),
-                Record::txt("btc", "bc1qtest"),
+                Record::txt("btc", &["bc1qtest"]),
             ]).unwrap();
 
             let json = serde_json::to_string(&rs).unwrap();
@@ -880,8 +976,8 @@ mod tests {
         #[test]
         fn json_round_trip_txt() {
             let rs = RecordSet::pack(vec![
-                Record::txt("btc", "bc1qtest"),
-                Record::txt("nostr", "npub1abc"),
+                Record::txt("btc", &["bc1qtest"]),
+                Record::txt("nostr", &["npub1abc"]),
             ]).unwrap();
 
             let json = serde_json::to_string(&rs).unwrap();
@@ -892,10 +988,7 @@ mod tests {
         #[test]
         fn json_round_trip_multi_value_txt() {
             let rs = RecordSet::pack(vec![
-                Record::txts("ns", vec![
-                    String::from("ns1.example.com"),
-                    String::from("ns2.example.com"),
-                ]),
+                Record::txt("ns", &["ns1.example.com", "ns2.example.com"]),
             ]).unwrap();
 
             let json = serde_json::to_string(&rs).unwrap();
@@ -973,8 +1066,8 @@ mod tests {
         #[test]
         fn json_pretty_output() {
             let rs = RecordSet::pack(vec![
-                Record::txt("nostr", "npub1abc"),
-                Record::txt("btc", "bc1q..."),
+                Record::txt("nostr", &["npub1abc"]),
+                Record::txt("btc", &["bc1q..."]),
                 Record::blob("some-data", b"hello".to_vec()),
             ]).unwrap();
 
