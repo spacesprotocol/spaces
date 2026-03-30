@@ -32,6 +32,7 @@ pub mod prepare;
 pub mod script;
 pub mod slabel;
 pub mod validate;
+pub mod sname;
 
 #[derive(Clone, PartialEq, Debug)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]

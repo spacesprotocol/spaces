@@ -2573,8 +2573,10 @@ name = "sip7"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "hex",
  "serde",
  "serde_json",
+ "spaces_protocol",
 ]
 
 [[package]]

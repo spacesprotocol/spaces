@@ -917,8 +917,8 @@ async fn it_should_set_and_get_space_fallback(rig: &TestRig) -> anyhow::Result<(
     // Test 1: Set SIP-7 fallback data on the space
     println!("\nTest 1: Set SIP-7 fallback data on space");
     let records = sip7::RecordSet::pack(vec![
-        sip7::Record::txt("btc", "bc1qtest"),
-        sip7::Record::txt("nostr", "npub1abc"),
+        sip7::Record::txt("btc", &["bc1qtest"]),
+        sip7::Record::txt("nostr", &["npub1abc"]),
     ]).unwrap();
     let wire_data = records.as_slice().to_vec();
 
@@ -986,7 +986,7 @@ async fn it_should_set_and_get_space_fallback(rig: &TestRig) -> anyhow::Result<(
     // Test 3: Bob can overwrite the fallback data
     println!("\nTest 3: Bob overwrites fallback data");
     let new_records = sip7::RecordSet::pack(vec![
-        sip7::Record::txt("eth", "0xdeadbeef"),
+        sip7::Record::txt("eth", &["0xdeadbeef"]),
     ]).unwrap();
     let new_wire = new_records.as_slice().to_vec();
 
