@@ -225,6 +225,10 @@ impl Display for SName {
             .map(|label| core::str::from_utf8(label).unwrap())
             .collect();
 
+        if labels.is_empty() {
+            return Ok(());
+        }
+
         let last_label = labels.last().unwrap();
         let all_but_last = &labels[..labels.len() - 1];
         if last_label.starts_with('#') {
@@ -539,6 +543,7 @@ mod tests {
         assert!(empty.is_empty());
         assert_eq!(empty.label_count(), 0);
         assert_eq!(empty, SName::empty());
+        assert_eq!(empty.to_string(), "");
         assert!(SName::from_str("bitcoin").is_err());
         assert!(SName::from_str("@").is_err());
         assert!(SName::from_str("hey..bob@bitcoin").is_err());
