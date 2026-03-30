@@ -1159,16 +1159,16 @@ pub fn signal_num_tracking_lock_time(median_time: u64) -> LockTime {
 
 pub fn num_utxo_dust(amount: Amount) -> Amount {
     let amount = amount.to_sat();
-    Amount::from_sat(amount - (amount % 10) + 7)
+    Amount::from_sat(amount - (amount % 100) + 77)
 }
 
 pub fn num_utxo_delegate_dust(amount: Amount) -> Amount {
     let amount = amount.to_sat();
-    Amount::from_sat(amount - (amount % 10) + 8)
+    Amount::from_sat(amount - (amount % 100) + 78)
 }
 
 pub fn is_num_utxo_delegate_dust(amount: Amount) -> bool {
-    amount.to_sat() % 10 == 8
+    amount.to_sat() % 100 == 78
 }
 
 pub fn signal_space_utxo_tracking_lock_time(median_time: u64) -> LockTime {

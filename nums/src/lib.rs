@@ -739,7 +739,7 @@ impl Validator {
         if !has_spaces {
             for created in &changeset.creates {
                 // Here we are only concerned with the main num that wants to delegate....
-                if created.value.to_sat() % 10 != 8 {
+                if created.value.to_sat() % 100 != 78 {
                     continue;
                 }
 
@@ -911,7 +911,7 @@ pub trait PtrTrackableOutput {
 
 impl PtrTrackableOutput for TxOut {
     fn is_ptr_output(&self) -> bool {
-        self.value.to_sat() % 10 == 7
+        self.value.to_sat() % 100 == 77
     }
 }
 

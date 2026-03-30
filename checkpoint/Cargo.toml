@@ -22,6 +22,9 @@ clap = { version = "4", features = ["derive"], optional = true }
 spacedb = { workspace = true, optional = true }
 spaces_protocol = { path = "../protocol", features = ["std"], optional = true }
 
+[dev-dependencies]
+tempfile = "3"
+
 [features]
 default = ["cli"]
 cli = ["dep:clap", "dep:anyhow", "dep:spacedb", "dep:spaces_protocol"]

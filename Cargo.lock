@@ -2652,6 +2652,7 @@ dependencies = [
  "spacedb",
  "spaces_protocol",
  "tar",
+ "tempfile",
  "tracing",
  "ureq",
 ]

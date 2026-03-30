@@ -278,6 +278,50 @@ pub fn checkpoint() -> super::Checkpoint {{
     )
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+
+    #[test]
+    fn download_reports_progress() {
+        let cp = integrity::checkpoint();
+        let url = cp.url(CHECKPOINT_BASE_URL);
+        let digest = cp.digest_bytes().unwrap();
+
+        let last_downloaded = Arc::new(AtomicU64::new(0));
+        let last_total = Arc::new(AtomicU64::new(0));
+        let call_count = Arc::new(AtomicU64::new(0));
+
+        let ld = last_downloaded.clone();
+        let lt = last_total.clone();
+        let cc = call_count.clone();
+        let progress: Box<ProgressFn> = Box::new(move |downloaded, total| {
+            ld.store(downloaded, Ordering::SeqCst);
+            lt.store(total, Ordering::SeqCst);
+            cc.fetch_add(1, Ordering::SeqCst);
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let applied = ensure_checkpoint(dir.path(), &url, &digest, Some(&*progress)).unwrap();
+
+        assert!(applied, "checkpoint should be applied");
+        assert!(call_count.load(Ordering::SeqCst) > 1, "progress should be called multiple times");
+
+        let total = last_total.load(Ordering::SeqCst);
+        assert!(total > 0, "total bytes should be reported from content-length");
+
+        let downloaded = last_downloaded.load(Ordering::SeqCst);
+        assert_eq!(downloaded, total, "final downloaded should equal total");
+
+        // Verify the files were extracted
+        for name in CHECKPOINT_FILES {
+            assert!(dir.path().join(name).exists(), "{} should exist", name);
+        }
+    }
+}
+
 #[cfg(feature = "cli")]
 const INTEGRITY_PATH: &str = "checkpoint/src/integrity.rs";
 
