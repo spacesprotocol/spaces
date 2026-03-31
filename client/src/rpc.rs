@@ -40,7 +40,7 @@ use spaces_protocol::{
 use spaces_wallet::{
     bdk_wallet as bdk, bdk_wallet::template::Bip86, bitcoin::hashes::Hash as BitcoinHash,
     bitcoin::secp256k1::schnorr,
-    export::WalletExport, Balance, DoubleUtxo, Listing, SpacesWallet,
+    export::WalletExport, nostr::NostrEvent, Balance, DoubleUtxo, Listing, SpacesWallet,
     WalletConfig, WalletDescriptors, WalletOutput,
 };
 pub use spaces_wallet::Subject;
@@ -316,6 +316,14 @@ pub trait Rpc {
         subject: Subject,
         message: Bytes,
     ) -> Result<Bytes, ErrorObjectOwned>;
+
+    #[method(name = "walletsignevent")]
+    async fn wallet_sign_event(
+        &self,
+        wallet: &str,
+        subject: Subject,
+        event: NostrEvent,
+    ) -> Result<NostrEvent, ErrorObjectOwned>;
 
     #[method(name = "verifyschnorr")]
     async fn verify_schnorr(
@@ -1163,6 +1171,19 @@ impl RpcServer for RpcServerImpl {
         self.wallet(&wallet)
             .await?
             .send_can_operate(subject)
+            .await
+            .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
+    }
+
+    async fn wallet_sign_event(
+        &self,
+        wallet: &str,
+        subject: Subject,
+        event: NostrEvent,
+    ) -> Result<NostrEvent, ErrorObjectOwned> {
+        self.wallet(&wallet)
+            .await?
+            .send_sign_event(subject, event)
             .await
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
     }

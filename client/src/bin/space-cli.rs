@@ -2,7 +2,7 @@ extern crate core;
 
 use std::{
     fs, io,
-    io::Write,
+    io::{BufRead, IsTerminal, Write},
     path::PathBuf,
 };
 use std::str::FromStr;
@@ -33,7 +33,7 @@ use spaces_client::store::Sha256;
 use spaces_protocol::bitcoin::{Amount, FeeRate, OutPoint, Txid};
 use spaces_protocol::slabel::SLabel;
 use spaces_nums::num_id::NumId;
-use spaces_wallet::{bitcoin::secp256k1::schnorr::Signature, export::WalletExport, Listing};
+use spaces_wallet::{bitcoin::secp256k1::schnorr::Signature, export::WalletExport, nostr::NostrEvent, Listing};
 use spaces_wallet::bitcoin::hashes::sha256;
 use spaces_wallet::bitcoin::ScriptBuf;
 
@@ -361,6 +361,7 @@ enum Commands {
     ///   space-cli setfallback @alice --txt btc=bc1q... --txt nostr=npub1...
     ///   space-cli setfallback @alice --raw SGVsbG8=
     ///   echo '[{"type":"txt","key":"btc","value":["bc1q..."]}]' | space-cli setfallback @alice --stdin
+    ///   space-cli setfallback @alice --txt btc=bc1q... --dry-run
     #[command(name = "setfallback")]
     SetFallback {
         /// Space name, numeric, or num id
@@ -380,12 +381,25 @@ enum Commands {
         /// Fee rate to use in sat/vB
         #[arg(long, short)]
         fee_rate: Option<u64>,
+        /// Print hex of the OP_RETURN data payload (SIP-7 bytes) and exit (no RPC / no transaction).
+        /// SUBJECT is still required by the parser but ignored.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Get on-chain fallback record data for a space or num.
     #[command(name = "getfallback")]
     GetFallback {
         /// Space name, numeric, or num id
         subject: Subject,
+    },
+    /// Sign a Nostr event using the space's private key
+    #[command(name = "signevent")]
+    SignEvent {
+        /// Space name (e.g., @example)
+        space: String,
+        /// Path to a Nostr event JSON file (omit for stdin)
+        #[arg(short, long)]
+        input: Option<PathBuf>,
     },
     /// List last transactions
     #[command(name = "listtransactions")]
@@ -745,6 +759,7 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
             raw,
             stdin,
             fee_rate,
+            dry_run,
         } => {
             use base64::Engine;
             let data = if let Some(raw_b64) = raw {
@@ -783,19 +798,35 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
                 ));
             };
 
-            cli.send_request(
-                Some(RpcWalletRequest::SetFallback(SetFallbackParams { subject, data })),
-                None,
-                fee_rate,
-                false,
-            )
-            .await?;
+            if dry_run {
+                println!("{}", hex::encode(&data));
+            } else {
+                cli.send_request(
+                    Some(RpcWalletRequest::SetFallback(SetFallbackParams { subject, data })),
+                    None,
+                    fee_rate,
+                    false,
+                )
+                .await?;
+            }
         }
         Commands::GetFallback {
             subject,
         } => {
             let response = cli.client.get_fallback(subject).await?;
             println!("{}", serde_json::to_string_pretty(&response)?);
+        }
+        Commands::SignEvent { mut space, input } => {
+            let event = read_event(input)
+                .map_err(|e| ClientError::Custom(format!("input error: {}", e)))?;
+            space = normalize_space(&space);
+            let subject = Subject::from_str(&space)
+                .map_err(|e| ClientError::Custom(e.to_string()))?;
+            let result = cli
+                .client
+                .wallet_sign_event(&cli.wallet, subject, event)
+                .await?;
+            println!("{}", serde_json::to_string(&result).expect("result"));
         }
         Commands::ListUnspent => {
             let utxos = cli.client.wallet_list_unspent(&cli.wallet).await?;
@@ -1044,5 +1075,24 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
 
 fn default_rpc_url(chain: &ExtendedNetwork) -> String {
     format!("http://127.0.0.1:{}", default_spaces_rpc_port(chain))
+}
+
+fn read_event(file: Option<PathBuf>) -> anyhow::Result<NostrEvent> {
+    let content = get_input(file)?;
+    let event: NostrEvent = serde_json::from_str(&content)?;
+    Ok(event)
+}
+
+fn get_input(input: Option<PathBuf>) -> anyhow::Result<String> {
+    Ok(match input {
+        Some(file) => fs::read_to_string(file)?,
+        None => {
+            let stdin = io::stdin();
+            if stdin.is_terminal() {
+                return Err(anyhow!("no input provided: specify a file path or pipe via stdin"));
+            }
+            stdin.lock().lines().collect::<Result<String, _>>()?
+        }
+    })
 }
 

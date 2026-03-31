@@ -25,6 +25,7 @@ use spaces_wallet::{
     bitcoin::{secp256k1::schnorr, Address, Amount, FeeRate, OutPoint},
     builder::{CoinTransfer, SpaceTransfer, SpacesAwareCoinSelection},
     tx_event::{TxEvent, TxEventKind, TxRecord},
+    nostr::NostrEvent,
     Balance, DoubleUtxo, Listing, SpacesWallet, Subject, WalletInfo, WalletOutput,
 };
 
@@ -349,6 +350,11 @@ pub enum WalletCommand {
     CanOperate {
         subject: Subject,
         resp: crate::rpc::Responder<anyhow::Result<bool>>,
+    },
+    SignEvent {
+        subject: Subject,
+        event: NostrEvent,
+        resp: crate::rpc::Responder<anyhow::Result<NostrEvent>>,
     },
 }
 
@@ -718,6 +724,13 @@ impl RpcWallet {
             WalletCommand::CanOperate { subject, resp } => {
                 let result = Self::can_operate(wallet, chain, &subject);
                 _ = resp.send(result);
+            }
+            WalletCommand::SignEvent {
+                subject,
+                event,
+                resp,
+            } => {
+                _ = resp.send(wallet.sign_event::<Sha256, _>(chain, subject, event));
             }
         }
         Ok(())
@@ -2098,6 +2111,22 @@ impl RpcWallet {
         let (resp, resp_rx) = oneshot::channel();
         self.sender
             .send(WalletCommand::CanOperate { subject, resp })
+            .await?;
+        resp_rx.await?
+    }
+
+    pub async fn send_sign_event(
+        &self,
+        subject: Subject,
+        event: NostrEvent,
+    ) -> anyhow::Result<NostrEvent> {
+        let (resp, resp_rx) = oneshot::channel();
+        self.sender
+            .send(WalletCommand::SignEvent {
+                subject,
+                event,
+                resp,
+            })
             .await?;
         resp_rx.await?
     }
