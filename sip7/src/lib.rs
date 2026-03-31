@@ -11,6 +11,7 @@ const TYPE_SEQ: u8 = 0x00;
 const TYPE_TXT: u8 = 0x01;
 const TYPE_BLOB: u8 = 0x02;
 const TYPE_SIG: u8 = 0x04;
+const TYPE_ADDR: u8 = 0x05;
 
 /// Errors that can occur during record parsing or construction.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -32,6 +33,7 @@ pub enum Record {
     Txt { key: String, value: Vec<String> },
     Blob { key: String, value: Vec<u8> },
     Sig { signer: SName, rev: SName, sig: Vec<u8> },
+    Addr { key: String, value: Vec<String> },
     Unknown { rtype: u8, rdata: Vec<u8> },
 }
 
@@ -54,6 +56,14 @@ impl Record {
         Record::Blob {
             key: String::from(key),
             value,
+        }
+    }
+
+    /// Creates an ADDR record (same wire format as TXT, indexed for reverse lookups).
+    pub fn addr(key: &str, values: &[&str]) -> Self {
+        Record::Addr {
+            key: String::from(key),
+            value: values.iter().map(|s| String::from(*s)).collect(),
         }
     }
 
@@ -123,6 +133,22 @@ impl Record {
                     value: val_bytes.to_vec(),
                 }
             }
+            TYPE_ADDR => {
+                let (key, val_bytes) = parse_kv(rdata)?;
+                let mut values = Vec::new();
+                let mut vpos = 0;
+                while vpos < val_bytes.len() {
+                    let slen = read_compact_size(val_bytes, &mut vpos)? as usize;
+                    if vpos + slen > val_bytes.len() {
+                        return Err(Error::UnexpectedEof);
+                    }
+                    let s = core::str::from_utf8(&val_bytes[vpos..vpos + slen])
+                        .map_err(|_| Error::InvalidUtf8)?;
+                    values.push(String::from(s));
+                    vpos += slen;
+                }
+                Record::Addr { key, value: values }
+            }
             TYPE_SIG => {
                 let signer_ref = SNameRef::try_from(rdata)
                     .map_err(|_| Error::InvalidUtf8)?;
@@ -177,6 +203,20 @@ impl Record {
                 buf.push(key.len() as u8);
                 buf.extend_from_slice(key.as_bytes());
                 buf.extend_from_slice(value);
+            }
+            Record::Addr { key, value } => {
+                validate_key(key)?;
+                buf.push(TYPE_ADDR);
+                let mut val_buf = Vec::new();
+                for s in value {
+                    write_compact_size(&mut val_buf, s.len() as u64);
+                    val_buf.extend_from_slice(s.as_bytes());
+                }
+                let data_len = 1 + key.len() + val_buf.len();
+                write_compact_size(buf, data_len as u64);
+                buf.push(key.len() as u8);
+                buf.extend_from_slice(key.as_bytes());
+                buf.extend_from_slice(&val_buf);
             }
             Record::Sig { signer, rev, sig } => {
                 buf.push(TYPE_SIG);
@@ -458,6 +498,8 @@ mod serde_impl {
         Blob(BlobJson),
         #[serde(rename = "sig")]
         Sig(SigJson),
+        #[serde(rename = "addr")]
+        Addr(TxtJson),
         #[serde(rename = "unknown")]
         Unknown(UnknownJson),
     }
@@ -473,6 +515,10 @@ mod serde_impl {
                 Record::Blob { key, value } => RecordJson::Blob(BlobJson {
                     key: key.clone(),
                     value: BASE64_STANDARD.encode(value),
+                }),
+                Record::Addr { key, value } => RecordJson::Addr(TxtJson {
+                    key: key.clone(),
+                    value: value.clone(),
                 }),
                 Record::Sig { signer, rev, sig } => {
                     let rev_str = if rev.is_empty() {
@@ -501,6 +547,7 @@ mod serde_impl {
             match j {
                 RecordJson::Seq(s) => Ok(Record::seq(s.version)),
                 RecordJson::Txt(t) => Ok(Record::Txt { key: t.key, value: t.value }),
+                RecordJson::Addr(a) => Ok(Record::Addr { key: a.key, value: a.value }),
                 RecordJson::Blob(b) => {
                     let value = BASE64_STANDARD
                         .decode(&b.value)
@@ -701,6 +748,21 @@ mod tests {
                 value: vec![String::from("bc1qtest")],
             }
         );
+    }
+
+    #[test]
+    fn pack_unpack_addr() {
+        let rs = RecordSet::pack(vec![
+            Record::addr("btc", &["bc1qtest", "bc1qother"]),
+        ]).unwrap();
+        let records = rs.unpack().unwrap();
+        match &records[0] {
+            Record::Addr { key, value } => {
+                assert_eq!(key, "btc");
+                assert_eq!(value, &vec![String::from("bc1qtest"), String::from("bc1qother")]);
+            }
+            _ => panic!("expected addr"),
+        }
     }
 
     #[test]
