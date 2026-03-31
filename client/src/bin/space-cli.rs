@@ -401,6 +401,15 @@ enum Commands {
         #[arg(short, long)]
         input: Option<PathBuf>,
     },
+    /// Verify a signed Nostr event against the space's or numeric's public key
+    #[command(name = "verifyevent")]
+    VerifyEvent {
+        /// Space or numeric subject (e.g., @example)
+        space: String,
+        /// Path to a signed Nostr event JSON file (omit for stdin)
+        #[arg(short, long)]
+        input: Option<PathBuf>,
+    },
     /// List last transactions
     #[command(name = "listtransactions")]
     ListTransactions {
@@ -827,6 +836,19 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
                 .wallet_sign_event(&cli.wallet, subject, event)
                 .await?;
             println!("{}", serde_json::to_string(&result).expect("result"));
+        }
+        Commands::VerifyEvent { mut space, input } => {
+            let event = read_event(input)
+                .map_err(|e| ClientError::Custom(format!("input error: {}", e)))?;
+            space = normalize_space(&space);
+            let subject = Subject::from_str(&space)
+                .map_err(|e| ClientError::Custom(e.to_string()))?;
+            let event = cli
+                .client
+                .verify_event(subject, event)
+                .await
+                .map_err(|e| ClientError::Custom(e.to_string()))?;
+            println!("{}", serde_json::to_string(&event).expect("result"));
         }
         Commands::ListUnspent => {
             let utxos = cli.client.wallet_list_unspent(&cli.wallet).await?;

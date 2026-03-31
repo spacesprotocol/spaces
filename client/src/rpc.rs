@@ -199,6 +199,11 @@ pub enum ChainStateCommand {
         signature: Vec<u8>,
         resp: Responder<anyhow::Result<()>>,
     },
+    VerifyEvent {
+        subject: Subject,
+        event: NostrEvent,
+        resp: Responder<anyhow::Result<NostrEvent>>,
+    },
     BuildChainProof {
         request: ChainProofRequest,
         prefer_recent: bool,
@@ -321,6 +326,13 @@ pub trait Rpc {
     async fn wallet_sign_event(
         &self,
         wallet: &str,
+        subject: Subject,
+        event: NostrEvent,
+    ) -> Result<NostrEvent, ErrorObjectOwned>;
+
+    #[method(name = "verifyevent")]
+    async fn verify_event(
+        &self,
         subject: Subject,
         event: NostrEvent,
     ) -> Result<NostrEvent, ErrorObjectOwned>;
@@ -1201,6 +1213,17 @@ impl RpcServer for RpcServerImpl {
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
     }
 
+    async fn verify_event(
+        &self,
+        subject: Subject,
+        event: NostrEvent,
+    ) -> Result<NostrEvent, ErrorObjectOwned> {
+        self.store
+            .verify_event(subject, event)
+            .await
+            .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
+    }
+
     async fn wallet_get_info(
         &self,
         wallet: &str,
@@ -1719,6 +1742,9 @@ impl AsyncChainState {
                 })();
                 _ = resp.send(result);
             }
+            ChainStateCommand::VerifyEvent { subject, event, resp } => {
+                _ = resp.send(SpacesWallet::verify_event::<Sha256, _>(state, subject, event));
+            }
             ChainStateCommand::BuildChainProof {
                 request,
                 prefer_recent,
@@ -2030,6 +2056,14 @@ impl AsyncChainState {
                 signature,
                 resp,
             })
+            .await?;
+        resp_rx.await?
+    }
+
+    pub async fn verify_event(&self, subject: Subject, event: NostrEvent) -> anyhow::Result<NostrEvent> {
+        let (resp, resp_rx) = oneshot::channel();
+        self.sender
+            .send(ChainStateCommand::VerifyEvent { subject, event, resp })
             .await?;
         resp_rx.await?
     }
