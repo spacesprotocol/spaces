@@ -290,6 +290,10 @@ impl RecordSet {
         Self(data)
     }
 
+    pub fn empty() -> Self {
+        Self(Vec::new())
+    }
+
     /// Packs a collection of records into a record set.
     ///
     /// If a `Seq` record is present it must be the first element
