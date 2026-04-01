@@ -24,6 +24,8 @@ pub enum Error {
     InvalidUtf8,
     SeqNotFirst,
     DuplicateSeq,
+    DuplicateSig,
+    SigNotLast,
 }
 
 /// Marks the signed zone as primary
@@ -67,9 +69,9 @@ pub struct SigData {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Signable {
-    pub record_set: Vec<u8>,
-    pub sigs: Vec<SigData>,
+pub struct Signable<'a> {
+    pub bytes: &'a[u8],
+    pub sig: Option<SigData>,
 }
 
 impl Record {
@@ -185,21 +187,12 @@ impl Record {
                 Record::Addr { key, value: values }
             }
             TYPE_SIG => {
-                if rdata.is_empty() {
-                    return Err(Error::UnexpectedEof);
-                }
-                let flags = rdata[0];
-                let rest = &rdata[1..];
-                let canonical_ref = SNameRef::try_from(rest).map_err(|_| Error::InvalidUtf8)?;
-                let after_canonical = &rest[canonical_ref.to_bytes().len()..];
-                let handle_ref =
-                    SNameRef::try_from(after_canonical).map_err(|_| Error::InvalidUtf8)?;
-                let after_handle = &after_canonical[handle_ref.to_bytes().len()..];
+                let (sig_data, _) = parse_sig_rdata(rdata)?;
                 Record::Sig {
-                    flags,
-                    canonical: canonical_ref.to_owned(),
-                    handle: handle_ref.to_owned(),
-                    sig: after_handle.to_vec(),
+                    flags: sig_data.flags,
+                    canonical: sig_data.canonical,
+                    handle: sig_data.handle,
+                    sig: sig_data.sig,
                 }
             }
             _ => Record::Unknown {
@@ -302,10 +295,12 @@ impl RecordSet {
     /// If a `Seq` record is present it must be the first element
     /// and there must be at most one.
     pub fn pack(records: impl IntoIterator<Item = Record>) -> Result<Self, Error> {
+        let records: Vec<Record> = records.into_iter().collect();
         let mut data = Vec::new();
         let mut seen_seq = false;
-        let mut index = 0usize;
-        for record in records {
+        let mut seen_sig = false;
+        let len = records.len();
+        for (index, record) in records.into_iter().enumerate() {
             if matches!(record, Record::Seq(_)) {
                 if seen_seq {
                     return Err(Error::DuplicateSeq);
@@ -315,8 +310,16 @@ impl RecordSet {
                 }
                 seen_seq = true;
             }
+            if matches!(record, Record::Sig { .. }) {
+                if seen_sig {
+                    return Err(Error::DuplicateSig);
+                }
+                if index != len - 1 {
+                    return Err(Error::SigNotLast);
+                }
+                seen_sig = true;
+            }
             record.pack_into(&mut data)?;
-            index += 1;
         }
         Ok(Self(data))
     }
@@ -332,6 +335,7 @@ impl RecordSet {
             data: self.0.as_slice(),
             index: 0,
             seen_seq: false,
+            seen_sig: false,
         }
     }
 
@@ -359,45 +363,38 @@ impl RecordSet {
         }
     }
 
-    pub fn sigs(&self) -> Result<Vec<SigData>, Error> {
-        let mut sigs = Vec::new();
-        for r in self.iter() {
-            match r? {
-                Record::Sig { flags, canonical, handle, sig } => {
-                    sigs.push(SigData { flags, canonical, handle, sig, })
-                }
-                _ => continue,
-            }
-        }
-        Ok(sigs)
+    pub fn sig(&self) -> Option<SigData> {
+        self.signable().sig
     }
 
-    pub fn signable(&self) -> Result<Signable, Error> {
-        let mut buf = Vec::with_capacity(self.0.len());
-        let records = self.unpack()?;
-        let mut sigs = Vec::new();
-        for mut r in records {
-            if let Record::Sig {
-                flags,
-                canonical,
-                handle,
-                sig } = &mut r {
-                sigs.push(SigData {
-                    flags: *flags,
-                    canonical: canonical.clone(),
-                    handle: handle.clone(),
-                    // Extract signature bytes and zero them in the record
-                    // so the packed output is the canonical signable form
-                    sig: sig.drain(..).collect(),
-                });
+    /// Returns the signable bytes and the SIG data if present.
+    /// Signable bytes include all records plus SIG metadata
+    /// (flags, canonical, handle) but exclude the raw signature.
+    pub fn signable(&self) -> Signable<'_> {
+        let data = self.0.as_slice();
+        let mut pos = 0;
+
+        while pos < data.len() {
+            let rtype = data[pos];
+            let mut rpos = pos + 1;
+            let Ok(rlen) = read_compact_size(data, &mut rpos) else { break };
+            let rlen = rlen as usize;
+            if rpos + rlen > data.len() {
+                break;
             }
-            r.pack_into(&mut buf)?;
+            if rtype == TYPE_SIG {
+                if let Ok((sig_data, sig_offset)) = parse_sig_rdata(&data[rpos..rpos + rlen]) {
+                    return Signable {
+                        bytes: &data[..rpos + sig_offset],
+                        sig: Some(sig_data),
+                    };
+                }
+                break;
+            }
+            pos = rpos + rlen;
         }
 
-        Ok(Signable {
-            record_set: buf,
-            sigs,
-        })
+        Signable { bytes: data, sig: None }
     }
 }
 
@@ -406,6 +403,7 @@ pub struct RecordIter<'a> {
     data: &'a [u8],
     index: usize,
     seen_seq: bool,
+    seen_sig: bool,
 }
 
 impl<'a> Iterator for RecordIter<'a> {
@@ -427,6 +425,14 @@ impl<'a> Iterator for RecordIter<'a> {
                         return Some(Err(Error::SeqNotFirst));
                     }
                     self.seen_seq = true;
+                }
+                if self.seen_sig {
+                    // Previous record was a SIG but there's more data
+                    self.data = &[];
+                    return Some(Err(Error::SigNotLast));
+                }
+                if matches!(record, Record::Sig { .. }) {
+                    self.seen_sig = true;
                 }
                 self.data = &self.data[consumed..];
                 self.index += 1;
@@ -452,6 +458,8 @@ impl fmt::Display for Error {
             Error::InvalidUtf8 => write!(f, "invalid UTF-8 in text value"),
             Error::SeqNotFirst => write!(f, "seq record must be the first record"),
             Error::DuplicateSeq => write!(f, "only one seq record is allowed"),
+            Error::DuplicateSig => write!(f, "only one sig record is allowed"),
+            Error::SigNotLast => write!(f, "sig record must be the last record"),
         }
     }
 }
@@ -520,6 +528,27 @@ fn write_compact_size(buf: &mut Vec<u8>, value: u64) {
         buf.push(0xFF);
         buf.extend_from_slice(&value.to_le_bytes());
     }
+}
+
+/// Parses SIG rdata into a SigData. Returns the SigData and the byte
+/// offset within rdata where the raw signature begins.
+fn parse_sig_rdata(rdata: &[u8]) -> Result<(SigData, usize), Error> {
+    if rdata.is_empty() {
+        return Err(Error::UnexpectedEof);
+    }
+    let flags = rdata[0];
+    let rest = &rdata[1..];
+    let canonical_ref = SNameRef::try_from(rest).map_err(|_| Error::InvalidUtf8)?;
+    let after_canonical = canonical_ref.to_bytes().len();
+    let handle_ref = SNameRef::try_from(&rest[after_canonical..]).map_err(|_| Error::InvalidUtf8)?;
+    let sig_offset = 1 + after_canonical + handle_ref.to_bytes().len();
+    let sig_bytes = &rdata[sig_offset..];
+    Ok((SigData {
+        flags,
+        canonical: canonical_ref.to_owned(),
+        handle: handle_ref.to_owned(),
+        sig: sig_bytes.to_vec(),
+    }, sig_offset))
 }
 
 fn parse_kv(data: &[u8]) -> Result<(String, &[u8]), Error> {
@@ -915,6 +944,93 @@ mod tests {
             }
             _ => panic!("expected sig"),
         }
+    }
+
+    #[test]
+    fn signable_with_sig() {
+        use core::str::FromStr;
+        let canonical = SName::from_str("@bitcoin").unwrap();
+        let handle = SName::from_str("alice@bitcoin").unwrap();
+        let sig_bytes = vec![0xDE, 0xAD, 0xBE, 0xEF];
+
+        let rs = RecordSet::pack(vec![
+            Record::txt("btc", &["bc1qtest"]),
+            Record::sig(canonical.clone(), handle.clone(), sig_bytes.clone(), 0),
+        ]).unwrap();
+
+        let signable = rs.signable();
+
+        // signable bytes should not contain the raw signature
+        assert!(!signable.bytes.is_empty());
+        assert!(signable.bytes.len() < rs.as_slice().len(),
+            "signable should be shorter than full record set");
+
+        // sig data should be present
+        let sig = signable.sig.expect("should have sig");
+        assert_eq!(sig.flags, 0);
+        assert_eq!(sig.canonical, canonical);
+        assert_eq!(sig.handle, handle);
+        assert_eq!(sig.sig, sig_bytes);
+
+        // signable bytes should include TXT record + SIG header (flags, canonical, handle)
+        // but not the signature itself
+        let full = rs.as_slice();
+        assert_eq!(&full[..signable.bytes.len()], signable.bytes,
+            "signable should be a prefix of the full record set");
+        assert_eq!(&full[signable.bytes.len()..], &sig_bytes,
+            "remainder should be exactly the sig bytes");
+    }
+
+    #[test]
+    fn signable_without_sig() {
+        let rs = RecordSet::pack(vec![
+            Record::txt("btc", &["bc1qtest"]),
+            Record::txt("nostr", &["npub1abc"]),
+        ]).unwrap();
+
+        let signable = rs.signable();
+        assert_eq!(signable.bytes, rs.as_slice(), "no SIG means signable == full record set");
+        assert!(signable.sig.is_none());
+    }
+
+    #[test]
+    fn sig_helper() {
+        use core::str::FromStr;
+        let canonical = SName::from_str("@bitcoin").unwrap();
+        let handle = SName::empty();
+        let sig_bytes = vec![0x01, 0x02];
+
+        let rs = RecordSet::pack(vec![
+            Record::sig(canonical.clone(), handle.clone(), sig_bytes.clone(), 0),
+        ]).unwrap();
+
+        let sig = rs.sig().expect("should have sig");
+        assert_eq!(sig.canonical, canonical);
+        assert!(sig.handle.is_empty());
+        assert_eq!(sig.sig, sig_bytes);
+    }
+
+    #[test]
+    fn sig_not_last_rejected() {
+        use core::str::FromStr;
+        let canonical = SName::from_str("@bitcoin").unwrap();
+        let err = RecordSet::pack(vec![
+            Record::sig(canonical, SName::empty(), vec![0x01], 0),
+            Record::txt("btc", &["bc1q"]),
+        ]).unwrap_err();
+        assert_eq!(err, Error::SigNotLast);
+    }
+
+    #[test]
+    fn duplicate_sig_rejected() {
+        use core::str::FromStr;
+        let canonical = SName::from_str("@bitcoin").unwrap();
+        // First SIG isn't last, so SigNotLast fires before DuplicateSig
+        let err = RecordSet::pack(vec![
+            Record::sig(canonical.clone(), SName::empty(), vec![0x01], 0),
+            Record::sig(canonical, SName::empty(), vec![0x02], 0),
+        ]).unwrap_err();
+        assert_eq!(err, Error::SigNotLast);
     }
 
     #[test]
