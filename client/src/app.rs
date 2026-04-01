@@ -4,6 +4,7 @@ use anyhow::anyhow;
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::{JoinHandle, JoinSet};
 use crate::config::Args;
+use crate::callbacks::CallbackRegistry;
 use crate::rpc::{AsyncChainState, RpcServerImpl, WalletLoadRequest, WalletManager};
 use crate::source::{BitcoinBlockSource, BitcoinRpc};
 use crate::spaces::Spaced;
@@ -41,7 +42,7 @@ impl App {
         });
     }
 
-    async fn setup_rpc_services(&mut self, spaced: &Spaced) {
+    async fn setup_rpc_services(&mut self, spaced: &Spaced, callback_registry: CallbackRegistry) {
         let (wallet_loader_tx, wallet_loader_rx) = mpsc::channel(1);
 
         let wallet_manager = WalletManager {
@@ -66,7 +67,7 @@ impl App {
                 .await
                 .map_err(|e| anyhow!("Chain state error: {}", e))
         });
-        let rpc_server = RpcServerImpl::new(async_chain_state.clone(), wallet_manager);
+        let rpc_server = RpcServerImpl::new_with_callbacks(async_chain_state.clone(), wallet_manager, callback_registry);
 
         let bind = spaced.bind.clone();
         let auth_token = spaced.auth_token.clone();
@@ -82,7 +83,7 @@ impl App {
         self.setup_rpc_wallet(spaced, wallet_loader_rx, spaced.cbf).await;
     }
 
-    async fn setup_sync_service(&mut self, mut spaced: Spaced) {
+    async fn setup_sync_service(&mut self, mut spaced: Spaced, callback_registry: CallbackRegistry) {
         let (spaced_sender, spaced_receiver) = tokio::sync::oneshot::channel();
 
         let shutdown = self.shutdown.clone();
@@ -90,7 +91,7 @@ impl App {
 
         std::thread::spawn(move || {
             let source = BitcoinBlockSource::new(rpc);
-            _ = spaced_sender.send(spaced.protocol_sync(source, shutdown));
+            _ = spaced_sender.send(spaced.protocol_sync(source, shutdown, callback_registry));
         });
 
         self.services.spawn(async move {
@@ -102,8 +103,9 @@ impl App {
 
     pub async fn run(&mut self, args: Vec<String>) -> anyhow::Result<()> {
         let spaced = Args::configure(args).await?;
-        self.setup_rpc_services(&spaced).await;
-        self.setup_sync_service(spaced).await;
+        let callback_registry = CallbackRegistry::new();
+        self.setup_rpc_services(&spaced, callback_registry.clone()).await;
+        self.setup_sync_service(spaced, callback_registry).await;
 
         while let Some(res) = self.services.join_next().await {
             res??

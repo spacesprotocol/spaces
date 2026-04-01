@@ -10,6 +10,7 @@ use base64::Engine;
 use serde::{Deserialize, Deserializer, Serializer};
 
 pub mod auth;
+pub mod callbacks;
 mod checker;
 pub mod client;
 pub mod config;

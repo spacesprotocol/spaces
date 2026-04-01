@@ -297,6 +297,21 @@ pub trait Rpc {
     #[method(name = "gettxmeta")]
     async fn get_tx_meta(&self, txid: Txid) -> Result<Option<TxEntry>, ErrorObjectOwned>;
 
+    #[method(name = "registertxcallback")]
+    async fn register_tx_callback(&self, client_id: String, callback_url: String) -> Result<(), ErrorObjectOwned>;
+
+    #[method(name = "unregistertxcallback")]
+    async fn unregister_tx_callback(&self, client_id: String) -> Result<bool, ErrorObjectOwned>;
+
+    #[method(name = "updatetxwatches")]
+    async fn update_tx_watches(&self, client_id: String, txids: Vec<Txid>) -> Result<bool, ErrorObjectOwned>;
+
+    #[method(name = "gettxcallback")]
+    async fn get_tx_callback(&self, client_id: String) -> Result<Option<crate::callbacks::CallbackClient>, ErrorObjectOwned>;
+
+    #[method(name = "listtxcallbacks")]
+    async fn list_tx_callbacks(&self) -> Result<Vec<crate::callbacks::CallbackClient>, ErrorObjectOwned>;
+
     #[method(name = "listwallets")]
     async fn list_wallets(&self) -> Result<Vec<String>, ErrorObjectOwned>;
 
@@ -617,6 +632,7 @@ pub struct RpcServerImpl {
     wallet_manager: WalletManager,
     store: AsyncChainState,
     client: reqwest::Client,
+    callback_registry: crate::callbacks::CallbackRegistry,
 }
 
 
@@ -879,11 +895,24 @@ impl WalletManager {
 
 impl RpcServerImpl {
     pub fn new(store: AsyncChainState, wallet_manager: WalletManager) -> Self {
+        Self::new_with_callbacks(store, wallet_manager, crate::callbacks::CallbackRegistry::new())
+    }
+
+    pub fn new_with_callbacks(
+        store: AsyncChainState,
+        wallet_manager: WalletManager,
+        callback_registry: crate::callbacks::CallbackRegistry,
+    ) -> Self {
         RpcServerImpl {
             wallet_manager,
             store,
             client: reqwest::Client::new(),
+            callback_registry,
         }
+    }
+
+    pub fn callback_registry(&self) -> &crate::callbacks::CallbackRegistry {
+        &self.callback_registry
     }
 
     async fn wallet(&self, wallet: &str) -> Result<RpcWallet, ErrorObjectOwned> {
@@ -1222,6 +1251,48 @@ impl RpcServer for RpcServerImpl {
             .verify_event(subject, event)
             .await
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
+    }
+
+    async fn register_tx_callback(
+        &self,
+        client_id: String,
+        callback_url: String,
+    ) -> Result<(), ErrorObjectOwned> {
+        self.callback_registry
+            .register_client(client_id, callback_url)
+            .await
+            .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
+    }
+
+    async fn unregister_tx_callback(&self, client_id: String) -> Result<bool, ErrorObjectOwned> {
+        self.callback_registry
+            .unregister_client(&client_id)
+            .await
+            .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
+    }
+
+    async fn update_tx_watches(
+        &self,
+        client_id: String,
+        txids: Vec<Txid>,
+    ) -> Result<bool, ErrorObjectOwned> {
+        self.callback_registry
+            .update_watched_txids(&client_id, txids)
+            .await
+            .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
+    }
+
+    async fn get_tx_callback(
+        &self,
+        client_id: String,
+    ) -> Result<Option<crate::callbacks::CallbackClient>, ErrorObjectOwned> {
+        Ok(self.callback_registry.get_client(&client_id).await)
+    }
+
+    async fn list_tx_callbacks(
+        &self,
+    ) -> Result<Vec<crate::callbacks::CallbackClient>, ErrorObjectOwned> {
+        Ok(self.callback_registry.list_clients().await)
     }
 
     async fn wallet_get_info(
