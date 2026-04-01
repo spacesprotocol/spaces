@@ -5,7 +5,7 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
-use spaces_protocol::sname::{NameLike, SName, SNameRef};
+use spaces_protocol::sname::{SName, SNameRef, NameLike};
 
 const TYPE_SEQ: u8 = 0x00;
 const TYPE_TXT: u8 = 0x01;
@@ -26,50 +26,15 @@ pub enum Error {
     DuplicateSeq,
 }
 
-/// Marks the signed zone as primary
-/// creates a reverse mapping for num id -> name
-pub const SIG_PRIMARY_ZONE: u8 = 0x01;
-
 /// A single record in a SIP-7 record set.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Record {
     Seq(u64),
-    Txt {
-        key: String,
-        value: Vec<String>,
-    },
-    Blob {
-        key: String,
-        value: Vec<u8>,
-    },
-    Sig {
-        flags: u8,
-        canonical: SName,
-        handle: SName,
-        sig: Vec<u8>,
-    },
-    Addr {
-        key: String,
-        value: Vec<String>,
-    },
-    Unknown {
-        rtype: u8,
-        rdata: Vec<u8>,
-    },
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SigData {
-    pub flags: u8,
-    pub canonical: SName,
-    pub handle: SName,
-    pub sig: Vec<u8>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Signable {
-    pub record_set: Vec<u8>,
-    pub sigs: Vec<SigData>,
+    Txt { key: String, value: Vec<String> },
+    Blob { key: String, value: Vec<u8> },
+    Sig { signer: SName, rev: SName, sig: Vec<u8> },
+    Addr { key: String, value: Vec<String> },
+    Unknown { rtype: u8, rdata: Vec<u8> },
 }
 
 impl Record {
@@ -103,8 +68,8 @@ impl Record {
     }
 
     /// Creates a SIG record.
-    pub fn sig(canonical: SName, handle: SName, sig: Vec<u8>, flags: u8) -> Self {
-        Record::Sig { flags, canonical, handle, sig }
+    pub fn sig(signer: SName, rev: SName, sig: Vec<u8>) -> Self {
+        Record::Sig { signer, rev, sig }
     }
 
     /// Creates an unknown record type (preserved for round-tripping).
@@ -185,21 +150,16 @@ impl Record {
                 Record::Addr { key, value: values }
             }
             TYPE_SIG => {
-                if rdata.is_empty() {
-                    return Err(Error::UnexpectedEof);
-                }
-                let flags = rdata[0];
-                let rest = &rdata[1..];
-                let canonical_ref = SNameRef::try_from(rest).map_err(|_| Error::InvalidUtf8)?;
-                let after_canonical = &rest[canonical_ref.to_bytes().len()..];
-                let handle_ref =
-                    SNameRef::try_from(after_canonical).map_err(|_| Error::InvalidUtf8)?;
-                let after_handle = &after_canonical[handle_ref.to_bytes().len()..];
+                let signer_ref = SNameRef::try_from(rdata)
+                    .map_err(|_| Error::InvalidUtf8)?;
+                let after_signer = &rdata[signer_ref.to_bytes().len()..];
+                let rev_ref = SNameRef::try_from(after_signer)
+                    .map_err(|_| Error::InvalidUtf8)?;
+                let after_rev = &after_signer[rev_ref.to_bytes().len()..];
                 Record::Sig {
-                    flags,
-                    canonical: canonical_ref.to_owned(),
-                    handle: handle_ref.to_owned(),
-                    sig: after_handle.to_vec(),
+                    signer: signer_ref.to_owned(),
+                    rev: rev_ref.to_owned(),
+                    sig: after_rev.to_vec(),
                 }
             }
             _ => Record::Unknown {
@@ -258,20 +218,14 @@ impl Record {
                 buf.extend_from_slice(key.as_bytes());
                 buf.extend_from_slice(&val_buf);
             }
-            Record::Sig {
-                flags,
-                canonical,
-                handle,
-                sig,
-            } => {
+            Record::Sig { signer, rev, sig } => {
                 buf.push(TYPE_SIG);
-                let canonical_bytes = canonical.to_bytes();
-                let handle_bytes = handle.to_bytes();
-                let data_len = 1 + canonical_bytes.len() + handle_bytes.len() + sig.len();
+                let signer_bytes = signer.to_bytes();
+                let rev_bytes = rev.to_bytes();
+                let data_len = signer_bytes.len() + rev_bytes.len() + sig.len();
                 write_compact_size(buf, data_len as u64);
-                buf.push(*flags);
-                buf.extend_from_slice(canonical_bytes);
-                buf.extend_from_slice(handle_bytes);
+                buf.extend_from_slice(signer_bytes);
+                buf.extend_from_slice(rev_bytes);
                 buf.extend_from_slice(sig);
             }
             Record::Unknown { rtype, rdata } => {
@@ -357,47 +311,6 @@ impl RecordSet {
             Ok(Some((Record::Seq(version), _))) => Some(version),
             _ => None,
         }
-    }
-
-    pub fn sigs(&self) -> Result<Vec<SigData>, Error> {
-        let mut sigs = Vec::new();
-        for r in self.iter() {
-            match r? {
-                Record::Sig { flags, canonical, handle, sig } => {
-                    sigs.push(SigData { flags, canonical, handle, sig, })
-                }
-                _ => continue,
-            }
-        }
-        Ok(sigs)
-    }
-
-    pub fn signable(&self) -> Result<Signable, Error> {
-        let mut buf = Vec::with_capacity(self.0.len());
-        let records = self.unpack()?;
-        let mut sigs = Vec::new();
-        for mut r in records {
-            if let Record::Sig {
-                flags,
-                canonical,
-                handle,
-                sig } = &mut r {
-                sigs.push(SigData {
-                    flags: *flags,
-                    canonical: canonical.clone(),
-                    handle: handle.clone(),
-                    // Extract signature bytes and zero them in the record
-                    // so the packed output is the canonical signable form
-                    sig: sig.drain(..).collect(),
-                });
-            }
-            r.pack_into(&mut buf)?;
-        }
-
-        Ok(Signable {
-            record_set: buf,
-            sigs,
-        })
     }
 }
 
@@ -562,12 +475,10 @@ mod serde_impl {
 
     #[derive(Serialize, Deserialize)]
     struct SigJson {
-        canonical: String,
+        signer: String,
         #[serde(skip_serializing_if = "Option::is_none")]
-        handle: Option<String>,
+        rev: Option<String>,
         sig: String,
-        #[serde(default)]
-        flags: u8,
     }
 
     #[derive(Serialize, Deserialize)]
@@ -609,22 +520,16 @@ mod serde_impl {
                     key: key.clone(),
                     value: value.clone(),
                 }),
-                Record::Sig {
-                    flags,
-                    canonical,
-                    handle,
-                    sig,
-                } => {
-                    let handle_str = if handle.is_empty() {
+                Record::Sig { signer, rev, sig } => {
+                    let rev_str = if rev.is_empty() {
                         None
                     } else {
-                        Some(alloc::string::ToString::to_string(handle))
+                        Some(alloc::string::ToString::to_string(&rev))
                     };
                     RecordJson::Sig(SigJson {
-                        canonical: alloc::string::ToString::to_string(canonical),
-                        handle: handle_str,
+                        signer: alloc::string::ToString::to_string(signer),
+                        rev: rev_str,
                         sig: hex::encode(sig),
-                        flags: *flags,
                     })
                 }
                 Record::Unknown { rtype, rdata } => RecordJson::Unknown(UnknownJson {
@@ -641,14 +546,8 @@ mod serde_impl {
         fn try_from(j: RecordJson) -> Result<Self, Self::Error> {
             match j {
                 RecordJson::Seq(s) => Ok(Record::seq(s.version)),
-                RecordJson::Txt(t) => Ok(Record::Txt {
-                    key: t.key,
-                    value: t.value,
-                }),
-                RecordJson::Addr(a) => Ok(Record::Addr {
-                    key: a.key,
-                    value: a.value,
-                }),
+                RecordJson::Txt(t) => Ok(Record::Txt { key: t.key, value: t.value }),
+                RecordJson::Addr(a) => Ok(Record::Addr { key: a.key, value: a.value }),
                 RecordJson::Blob(b) => {
                     let value = BASE64_STANDARD
                         .decode(&b.value)
@@ -656,14 +555,15 @@ mod serde_impl {
                     Ok(Record::blob(&b.key, value))
                 }
                 RecordJson::Sig(s) => {
-                    let canonical =
-                        SName::try_from(s.canonical).map_err(|_| "invalid canonical sname")?;
-                    let handle = match s.handle {
-                        Some(h) => SName::try_from(h).map_err(|_| "invalid handle sname")?,
+                    let signer = SName::try_from(s.signer)
+                        .map_err(|_| "invalid signer sname")?;
+                    let rev = match s.rev {
+                        Some(r) => SName::try_from(r).map_err(|_| "invalid rev sname")?,
                         None => SName::empty(),
                     };
-                    let sig = hex::decode(&s.sig).map_err(|_| "invalid hex in sig")?;
-                    Ok(Record::sig(canonical, handle, sig, s.flags))
+                    let sig = hex::decode(&s.sig)
+                        .map_err(|_| "invalid hex in sig")?;
+                    Ok(Record::sig(signer, rev, sig))
                 }
                 RecordJson::Unknown(u) => {
                     let rdata = BASE64_STANDARD
@@ -744,12 +644,15 @@ mod serde_impl {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use alloc::vec;
+    use super::*;
 
     #[test]
     fn pack_unpack_seq() {
-        let rs = RecordSet::pack(vec![Record::seq(1), Record::txt("btc", &["bc1qtest"])]).unwrap();
+        let rs = RecordSet::pack(vec![
+            Record::seq(1),
+            Record::txt("btc", &["bc1qtest"]),
+        ]).unwrap();
 
         let records = rs.unpack().unwrap();
         assert_eq!(records.len(), 2);
@@ -772,7 +675,10 @@ mod tests {
 
     #[test]
     fn seq_must_be_first_pack() {
-        let err = RecordSet::pack(vec![Record::txt("btc", &["bc1q"]), Record::seq(1)]).unwrap_err();
+        let err = RecordSet::pack(vec![
+            Record::txt("btc", &["bc1q"]),
+            Record::seq(1),
+        ]).unwrap_err();
         assert_eq!(err, Error::SeqNotFirst);
     }
 
@@ -787,7 +693,10 @@ mod tests {
 
     #[test]
     fn duplicate_seq_pack() {
-        let err = RecordSet::pack(vec![Record::seq(1), Record::seq(2)]).unwrap_err();
+        let err = RecordSet::pack(vec![
+            Record::seq(1),
+            Record::seq(2),
+        ]).unwrap_err();
         assert_eq!(err, Error::DuplicateSeq);
     }
 
@@ -802,13 +711,18 @@ mod tests {
 
     #[test]
     fn seq_helper_returns_version() {
-        let rs = RecordSet::pack(vec![Record::seq(42), Record::txt("btc", &["bc1q"])]).unwrap();
+        let rs = RecordSet::pack(vec![
+            Record::seq(42),
+            Record::txt("btc", &["bc1q"]),
+        ]).unwrap();
         assert_eq!(rs.seq(), Some(42));
     }
 
     #[test]
     fn no_seq_returns_none() {
-        let rs = RecordSet::pack(vec![Record::txt("btc", &["bc1q"])]).unwrap();
+        let rs = RecordSet::pack(vec![
+            Record::txt("btc", &["bc1q"]),
+        ]).unwrap();
         assert_eq!(rs.seq(), None);
     }
 
@@ -823,8 +737,7 @@ mod tests {
         let rs = RecordSet::pack(vec![
             Record::txt("btc", &["bc1qtest"]),
             Record::txt("nostr", &["npub1abc"]),
-        ])
-        .unwrap();
+        ]).unwrap();
 
         let records = rs.unpack().unwrap();
         assert_eq!(records.len(), 2);
@@ -839,15 +752,14 @@ mod tests {
 
     #[test]
     fn pack_unpack_addr() {
-        let rs = RecordSet::pack(vec![Record::addr("btc", &["bc1qtest", "bc1qother"])]).unwrap();
+        let rs = RecordSet::pack(vec![
+            Record::addr("btc", &["bc1qtest", "bc1qother"]),
+        ]).unwrap();
         let records = rs.unpack().unwrap();
         match &records[0] {
             Record::Addr { key, value } => {
                 assert_eq!(key, "btc");
-                assert_eq!(
-                    value,
-                    &vec![String::from("bc1qtest"), String::from("bc1qother")]
-                );
+                assert_eq!(value, &vec![String::from("bc1qtest"), String::from("bc1qother")]);
             }
             _ => panic!("expected addr"),
         }
@@ -856,29 +768,19 @@ mod tests {
     #[test]
     fn pack_unpack_sig() {
         use core::str::FromStr;
-        let canonical = SName::from_str("@bitcoin").unwrap();
-        let handle = SName::from_str("alice@bitcoin").unwrap();
+        let signer = SName::from_str("@bitcoin").unwrap();
+        let rev = SName::from_str("alice@bitcoin").unwrap();
         let sig_bytes = vec![0xDE, 0xAD, 0xBE, 0xEF];
 
-        let rs = RecordSet::pack(vec![Record::sig(
-            canonical.clone(),
-            handle.clone(),
-            sig_bytes.clone(),
-            SIG_PRIMARY_ZONE,
-        )])
-        .unwrap();
+        let rs = RecordSet::pack(vec![
+            Record::sig(signer.clone(), rev.clone(), sig_bytes.clone()),
+        ]).unwrap();
 
         let records = rs.unpack().unwrap();
         match &records[0] {
-            Record::Sig {
-                flags,
-                canonical: c,
-                handle: h,
-                sig,
-            } => {
-                assert_eq!(*flags, SIG_PRIMARY_ZONE);
-                assert_eq!(c, &canonical);
-                assert_eq!(h, &handle);
+            Record::Sig { signer: s, rev: r, sig } => {
+                assert_eq!(s, &signer);
+                assert_eq!(r, &rev);
                 assert_eq!(sig, &sig_bytes);
             }
             _ => panic!("expected sig"),
@@ -886,31 +788,21 @@ mod tests {
     }
 
     #[test]
-    fn pack_unpack_sig_empty_handle() {
+    fn pack_unpack_sig_empty_rev() {
         use core::str::FromStr;
-        let canonical = SName::from_str("@bitcoin").unwrap();
-        let empty_handle = SName::empty();
+        let signer = SName::from_str("@bitcoin").unwrap();
+        let empty_rev = SName::empty();
         let sig_bytes = vec![0x01, 0x02, 0x03];
 
-        let rs = RecordSet::pack(vec![Record::sig(
-            canonical.clone(),
-            empty_handle.clone(),
-            sig_bytes.clone(),
-            SIG_PRIMARY_ZONE,
-        )])
-        .unwrap();
+        let rs = RecordSet::pack(vec![
+            Record::sig(signer.clone(), empty_rev.clone(), sig_bytes.clone()),
+        ]).unwrap();
 
         let records = rs.unpack().unwrap();
         match &records[0] {
-            Record::Sig {
-                flags,
-                canonical: c,
-                handle: h,
-                sig,
-            } => {
-                assert_eq!(*flags, SIG_PRIMARY_ZONE);
-                assert_eq!(c, &canonical);
-                assert!(h.is_empty(), "handle should be empty");
+            Record::Sig { signer: s, rev: r, sig } => {
+                assert_eq!(s, &signer);
+                assert_eq!(r.label_count(), 0, "rev should be empty");
                 assert_eq!(sig, &sig_bytes);
             }
             _ => panic!("expected sig"),
@@ -919,8 +811,9 @@ mod tests {
 
     #[test]
     fn pack_unpack_blob() {
-        let rs =
-            RecordSet::pack(vec![Record::blob("avatar", vec![0x89, 0x50, 0x4E, 0x47])]).unwrap();
+        let rs = RecordSet::pack(vec![
+            Record::blob("avatar", vec![0x89, 0x50, 0x4E, 0x47]),
+        ]).unwrap();
 
         let records = rs.unpack().unwrap();
         match &records[0] {
@@ -954,8 +847,7 @@ mod tests {
             Record::blob("data", vec![0xFF, 0x00]),
             Record::unknown(0x10, vec![0xAB]),
             Record::txt("email", &["alice@example.com"]),
-        ])
-        .unwrap();
+        ]).unwrap();
 
         let records = rs.unpack().unwrap();
         assert_eq!(records.len(), 5);
@@ -996,11 +888,9 @@ mod tests {
 
     #[test]
     fn multi_value_txt() {
-        let rs = RecordSet::pack(vec![Record::txt(
-            "ns",
-            &["ns1.example.com", "ns2.example.com", "ns3.example.com"],
-        )])
-        .unwrap();
+        let rs = RecordSet::pack(vec![
+            Record::txt("ns", &["ns1.example.com", "ns2.example.com", "ns3.example.com"]),
+        ]).unwrap();
         let records = rs.unpack().unwrap();
         match &records[0] {
             Record::Txt { key, value } => {
@@ -1042,8 +932,7 @@ mod tests {
             Record::txt("a", &["1"]),
             Record::txt("b", &["2"]),
             Record::txt("c", &["3"]),
-        ])
-        .unwrap();
+        ]).unwrap();
 
         let first = rs.iter().next().unwrap().unwrap();
         assert_eq!(
@@ -1057,34 +946,19 @@ mod tests {
 
     #[test]
     fn reject_uppercase_key() {
-        assert_eq!(
-            Record::txt("BTC", &["bc1q"]).pack().unwrap_err(),
-            Error::InvalidKey
-        );
+        assert_eq!(Record::txt("BTC", &["bc1q"]).pack().unwrap_err(), Error::InvalidKey);
     }
 
     #[test]
     fn reject_invalid_key_chars() {
-        assert_eq!(
-            Record::txt("my_key", &["v"]).pack().unwrap_err(),
-            Error::InvalidKey
-        );
-        assert_eq!(
-            Record::txt("my.key", &["v"]).pack().unwrap_err(),
-            Error::InvalidKey
-        );
-        assert_eq!(
-            Record::txt("my key", &["v"]).pack().unwrap_err(),
-            Error::InvalidKey
-        );
+        assert_eq!(Record::txt("my_key", &["v"]).pack().unwrap_err(), Error::InvalidKey);
+        assert_eq!(Record::txt("my.key", &["v"]).pack().unwrap_err(), Error::InvalidKey);
+        assert_eq!(Record::txt("my key", &["v"]).pack().unwrap_err(), Error::InvalidKey);
     }
 
     #[test]
     fn reject_empty_key() {
-        assert_eq!(
-            Record::txt("", &["v"]).pack().unwrap_err(),
-            Error::InvalidKey
-        );
+        assert_eq!(Record::txt("", &["v"]).pack().unwrap_err(), Error::InvalidKey);
     }
 
     #[test]
@@ -1143,13 +1017,15 @@ mod tests {
 
     #[cfg(feature = "serde")]
     mod serde_tests {
-        use super::*;
         use alloc::vec;
+        use super::*;
 
         #[test]
         fn json_round_trip_seq() {
-            let rs =
-                RecordSet::pack(vec![Record::seq(1), Record::txt("btc", &["bc1qtest"])]).unwrap();
+            let rs = RecordSet::pack(vec![
+                Record::seq(1),
+                Record::txt("btc", &["bc1qtest"]),
+            ]).unwrap();
 
             let json = serde_json::to_string(&rs).unwrap();
             assert!(json.contains("\"type\":\"seq\""));
@@ -1164,8 +1040,7 @@ mod tests {
             let rs = RecordSet::pack(vec![
                 Record::txt("btc", &["bc1qtest"]),
                 Record::txt("nostr", &["npub1abc"]),
-            ])
-            .unwrap();
+            ]).unwrap();
 
             let json = serde_json::to_string(&rs).unwrap();
             let decoded: RecordSet = serde_json::from_str(&json).unwrap();
@@ -1174,11 +1049,9 @@ mod tests {
 
         #[test]
         fn json_round_trip_multi_value_txt() {
-            let rs = RecordSet::pack(vec![Record::txt(
-                "ns",
-                &["ns1.example.com", "ns2.example.com"],
-            )])
-            .unwrap();
+            let rs = RecordSet::pack(vec![
+                Record::txt("ns", &["ns1.example.com", "ns2.example.com"]),
+            ]).unwrap();
 
             let json = serde_json::to_string(&rs).unwrap();
             assert!(json.contains(r#""value":["ns1.example.com","ns2.example.com"]"#));
@@ -1189,8 +1062,9 @@ mod tests {
 
         #[test]
         fn json_round_trip_blob() {
-            let rs = RecordSet::pack(vec![Record::blob("avatar", vec![0x89, 0x50, 0x4E, 0x47])])
-                .unwrap();
+            let rs = RecordSet::pack(vec![
+                Record::blob("avatar", vec![0x89, 0x50, 0x4E, 0x47]),
+            ]).unwrap();
 
             let json = serde_json::to_string(&rs).unwrap();
             assert!(json.contains("\"type\":\"blob\""));
@@ -1257,8 +1131,7 @@ mod tests {
                 Record::txt("nostr", &["npub1abc"]),
                 Record::txt("btc", &["bc1q..."]),
                 Record::blob("some-data", b"hello".to_vec()),
-            ])
-            .unwrap();
+            ]).unwrap();
 
             let json = serde_json::to_string_pretty(&rs).unwrap();
             let decoded: RecordSet = serde_json::from_str(&json).unwrap();
@@ -1268,7 +1141,7 @@ mod tests {
         #[test]
         fn json_seq_not_first_rejected() {
             let json = r#"[
-                {"type":"txt","key":"btc","value":["bc1q..."]},
+                {"type":"txt","key":"btc","value":"bc1q..."},
                 {"type":"seq","version":1}
             ]"#;
             let err = serde_json::from_str::<RecordSet>(json);
