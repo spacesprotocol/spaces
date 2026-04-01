@@ -468,6 +468,9 @@ impl fmt::Display for Error {
     }
 }
 
+#[cfg(feature = "std")]
+impl std::error::Error for Error {}
+
 fn validate_key(key: &str) -> Result<(), Error> {
     if key.is_empty() {
         return Err(Error::InvalidKey);
