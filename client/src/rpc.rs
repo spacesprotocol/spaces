@@ -479,9 +479,23 @@ pub trait Rpc {
         subject: Subject,
     ) -> Result<Option<FallbackResponse>, ErrorObjectOwned>;
 
+    #[method(name = "estimatefee")]
+    async fn estimate_fee(
+        &self,
+        conf_target: u32,
+        estimate_mode: Option<String>,
+    ) -> Result<FeeEstimateResponse, ErrorObjectOwned>;
+
     /// Debug method to set a space's expire height (regtest only)
     #[method(name = "debugsetexpireheight")]
     async fn debug_set_expire_height(&self, space: &str, expire_height: u32) -> Result<(), ErrorObjectOwned>;
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct FeeEstimateResponse {
+    pub feerate_sat_vb: u64,
+    pub blocks: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1545,6 +1559,49 @@ impl RpcServer for RpcServerImpl {
                     records,
                 }))
             }
+        }
+    }
+
+    async fn estimate_fee(
+        &self,
+        conf_target: u32,
+        estimate_mode: Option<String>,
+    ) -> Result<FeeEstimateResponse, ErrorObjectOwned> {
+        let mode = estimate_mode.unwrap_or_else(|| "unset".to_string());
+        let params = serde_json::json!([conf_target, mode]);
+        let rpc = self.wallet_manager.rpc.clone();
+
+        let estimate_req = rpc.make_request("estimatesmartfee", params);
+
+        let result = tokio::task::spawn_blocking(move || {
+            let blocking_client = reqwest::blocking::Client::new();
+            rpc.send_json_blocking::<serde_json::Value>(&blocking_client, &estimate_req)
+        })
+        .await
+        .map_err(|e| ErrorObjectOwned::owned(-1, format!("Task join error: {}", e), None::<String>))?;
+
+        match result {
+            Ok(res) => {
+                if let Some(fee_rate) = res["feerate"].as_f64() {
+                    let fee_rate_sat_vb = (fee_rate * 100_000.0).ceil() as u64;
+                    let blocks = res["blocks"].as_u64().unwrap_or(conf_target as u64);
+                    Ok(FeeEstimateResponse {
+                        feerate_sat_vb: fee_rate_sat_vb,
+                        blocks,
+                    })
+                } else {
+                    Err(ErrorObjectOwned::owned(
+                        -1,
+                        "Fee estimation unavailable: no feerate in response".to_string(),
+                        None::<String>,
+                    ))
+                }
+            }
+            Err(e) => Err(ErrorObjectOwned::owned(
+                -1,
+                format!("RPC error: {}", e),
+                None::<String>,
+            )),
         }
     }
 
