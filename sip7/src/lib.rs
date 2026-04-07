@@ -24,6 +24,7 @@ pub enum Error {
     InvalidUtf8,
     SeqNotFirst,
     DuplicateSeq,
+    InvalidSName,
     DuplicateSig,
     SigNotLast,
 }
@@ -145,6 +146,9 @@ impl Record {
             TYPE_SEQ => {
                 let mut rpos = 0;
                 let version = read_compact_size(rdata, &mut rpos)?;
+                if rpos != rdata.len() {
+                    return Err(Error::DataOverflow);
+                }
                 Record::Seq(version)
             }
             TYPE_TXT => {
@@ -328,19 +332,16 @@ impl RecordSet {
         Ok(Self(data))
     }
 
-    /// Unpacks all records, returning an error if any record is malformed.
-    pub fn unpack(&self) -> Result<Vec<Record>, Error> {
-        self.iter().collect()
+    /// Unpacks all records as zero-copy [`ParsedRecord`] references.
+    /// Performs structural validation first.
+    pub fn unpack(&self) -> Result<Vec<ParsedRecord<'_>>, Error> {
+        Ok(self.iter()?.iter().collect())
     }
 
-    /// Returns a lazy iterator over the records.
-    pub fn iter(&self) -> RecordIter<'_> {
-        RecordIter {
-            data: self.0.as_slice(),
-            index: 0,
-            seen_seq: false,
-            seen_sig: false,
-        }
+    /// Unpacks all records as owned [`Record`] values.
+    /// Malformed records become `Record::Unknown`.
+    pub fn unpack_owned(&self) -> Result<Vec<Record>, Error> {
+        Ok(self.iter()?.iter().map(|r| r.into()).collect())
     }
 
     /// Returns the raw wire-format bytes.
@@ -402,54 +403,6 @@ impl RecordSet {
     }
 }
 
-/// An iterator that lazily unpacks records from a byte slice.
-pub struct RecordIter<'a> {
-    data: &'a [u8],
-    index: usize,
-    seen_seq: bool,
-    seen_sig: bool,
-}
-
-impl<'a> Iterator for RecordIter<'a> {
-    type Item = Result<Record, Error>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.data.is_empty() {
-            return None;
-        }
-        match Record::unpack(self.data) {
-            Ok(Some((record, consumed))) => {
-                if matches!(record, Record::Seq(_)) {
-                    if self.seen_seq {
-                        self.data = &[];
-                        return Some(Err(Error::DuplicateSeq));
-                    }
-                    if self.index > 0 {
-                        self.data = &[];
-                        return Some(Err(Error::SeqNotFirst));
-                    }
-                    self.seen_seq = true;
-                }
-                if self.seen_sig {
-                    // Previous record was a SIG but there's more data
-                    self.data = &[];
-                    return Some(Err(Error::SigNotLast));
-                }
-                if matches!(record, Record::Sig { .. }) {
-                    self.seen_sig = true;
-                }
-                self.data = &self.data[consumed..];
-                self.index += 1;
-                Some(Ok(record))
-            }
-            Ok(None) => None,
-            Err(e) => {
-                self.data = &[];
-                Some(Err(e))
-            }
-        }
-    }
-}
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -462,6 +415,7 @@ impl fmt::Display for Error {
             Error::InvalidUtf8 => write!(f, "invalid UTF-8 in text value"),
             Error::SeqNotFirst => write!(f, "seq record must be the first record"),
             Error::DuplicateSeq => write!(f, "only one seq record is allowed"),
+            Error::InvalidSName => write!(f, "invalid space name"),
             Error::DuplicateSig => write!(f, "only one sig record is allowed"),
             Error::SigNotLast => write!(f, "sig record must be the last record"),
         }
@@ -500,6 +454,9 @@ fn read_compact_size(data: &[u8], pos: &mut usize) -> Result<u64, Error> {
                 return Err(Error::UnexpectedEof);
             }
             let v = u16::from_le_bytes([data[*pos], data[*pos + 1]]) as u64;
+            if v < 0xFD {
+                return Err(Error::DataOverflow);
+            }
             *pos += 2;
             Ok(v)
         }
@@ -508,6 +465,9 @@ fn read_compact_size(data: &[u8], pos: &mut usize) -> Result<u64, Error> {
                 return Err(Error::UnexpectedEof);
             }
             let v = u32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap()) as u64;
+            if v < 0x10000 {
+                return Err(Error::DataOverflow);
+            }
             *pos += 4;
             Ok(v)
         }
@@ -516,6 +476,9 @@ fn read_compact_size(data: &[u8], pos: &mut usize) -> Result<u64, Error> {
                 return Err(Error::UnexpectedEof);
             }
             let v = u64::from_le_bytes(data[*pos..*pos + 8].try_into().unwrap());
+            if v < 0x100000000 {
+                return Err(Error::DataOverflow);
+            }
             *pos += 8;
             Ok(v)
         }
@@ -545,9 +508,9 @@ fn parse_sig_rdata(rdata: &[u8]) -> Result<(SigData, usize), Error> {
     }
     let flags = rdata[0];
     let rest = &rdata[1..];
-    let canonical_ref = SNameRef::try_from(rest).map_err(|_| Error::InvalidUtf8)?;
+    let canonical_ref = SNameRef::try_from(rest).map_err(|_| Error::InvalidSName)?;
     let after_canonical = canonical_ref.to_bytes().len();
-    let handle_ref = SNameRef::try_from(&rest[after_canonical..]).map_err(|_| Error::InvalidUtf8)?;
+    let handle_ref = SNameRef::try_from(&rest[after_canonical..]).map_err(|_| Error::InvalidSName)?;
     let sig_offset = 1 + after_canonical + handle_ref.to_bytes().len();
     let sig_bytes = &rdata[sig_offset..];
     Ok((SigData {
@@ -569,6 +532,278 @@ fn parse_kv(data: &[u8]) -> Result<(String, &[u8]), Error> {
     let key = core::str::from_utf8(&data[1..1 + kl]).map_err(|_| Error::InvalidKey)?;
     validate_key(key)?;
     Ok((String::from(key), &data[1 + kl..]))
+}
+
+/// Zero-copy key-value parse — returns (&str, &[u8]) without allocation.
+fn parse_kv_ref(data: &[u8]) -> Option<(&str, &[u8])> {
+    if data.is_empty() {
+        return None;
+    }
+    let kl = data[0] as usize;
+    if kl == 0 || 1 + kl > data.len() {
+        return None;
+    }
+    let key = core::str::from_utf8(&data[1..1 + kl]).ok()?;
+    if validate_key(key).is_err() {
+        return None;
+    }
+    Some((key, &data[1 + kl..]))
+}
+
+// ── Zero-copy parsed records ────────────────────────────────────────
+
+/// An iterator over length-prefixed text values in wire format.
+/// Yields `&str` references into the underlying byte slice.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TextValues<'a>(&'a [u8]);
+
+impl<'a> TextValues<'a> {
+    pub fn iter(&self) -> TextValuesIter<'a> {
+        TextValuesIter(self.0)
+    }
+
+    /// Collect all values into a Vec (allocating convenience).
+    pub fn to_vec(&self) -> Vec<&'a str> {
+        self.iter().collect()
+    }
+}
+
+impl<'a> IntoIterator for &TextValues<'a> {
+    type Item = &'a str;
+    type IntoIter = TextValuesIter<'a>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+pub struct TextValuesIter<'a>(&'a [u8]);
+
+impl<'a> Iterator for TextValuesIter<'a> {
+    type Item = &'a str;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.0.is_empty() {
+            return None;
+        }
+        let mut pos = 0;
+        let slen = read_compact_size(self.0, &mut pos).ok()? as usize;
+        if pos + slen > self.0.len() {
+            self.0 = &[];
+            return None;
+        }
+        let s = core::str::from_utf8(&self.0[pos..pos + slen]).ok()?;
+        self.0 = &self.0[pos + slen..];
+        Some(s)
+    }
+}
+
+/// A zero-copy parsed SIG record.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ParsedSig<'a> {
+    pub flags: u8,
+    pub canonical: SNameRef<'a>,
+    pub handle: SNameRef<'a>,
+    pub sig: &'a [u8],
+}
+
+/// A zero-copy parsed record. Returned from [`RecordsIter::iter`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ParsedRecord<'a> {
+    Seq(u64),
+    Txt { key: &'a str, value: TextValues<'a> },
+    Blob { key: &'a str, value: &'a [u8] },
+    Addr { key: &'a str, value: TextValues<'a> },
+    Sig(ParsedSig<'a>),
+    /// Known record type but rdata could not be parsed.
+    Malformed { rtype: u8, rdata: &'a [u8] },
+    /// Unknown record type.
+    Unknown { rtype: u8, rdata: &'a [u8] },
+}
+
+impl<'a> From<ParsedRecord<'a>> for Record {
+    fn from(p: ParsedRecord<'a>) -> Self {
+        match p {
+            ParsedRecord::Seq(v) => Record::Seq(v),
+            ParsedRecord::Txt { key, value } => Record::Txt {
+                key: String::from(key),
+                value: value.to_vec().into_iter().map(String::from).collect(),
+            },
+            ParsedRecord::Blob { key, value } => Record::Blob {
+                key: String::from(key),
+                value: value.to_vec(),
+            },
+            ParsedRecord::Addr { key, value } => Record::Addr {
+                key: String::from(key),
+                value: value.to_vec().into_iter().map(String::from).collect(),
+            },
+            ParsedRecord::Sig(sig) => Record::Sig {
+                flags: sig.flags,
+                canonical: sig.canonical.to_owned(),
+                handle: sig.handle.to_owned(),
+                sig: sig.sig.to_vec(),
+            },
+            ParsedRecord::Malformed { rtype, rdata } => Record::Unknown {
+                rtype,
+                rdata: rdata.to_vec(),
+            },
+            ParsedRecord::Unknown { rtype, rdata } => Record::Unknown {
+                rtype,
+                rdata: rdata.to_vec(),
+            },
+        }
+    }
+}
+
+/// A structurally validated record set. Guarantees:
+/// - All type/rdlength/rdata boundaries are valid
+/// - At most one SEQ record, and it is first
+/// - At most one SIG record, and it is last
+///
+/// Individual records may be `Malformed` if their rdata is invalid.
+#[derive(Debug)]
+pub struct RecordsIter<'a> {
+    data: &'a [u8],
+}
+
+impl<'a> RecordsIter<'a> {
+    pub fn iter(&self) -> ParsedRecordIter<'a> {
+        ParsedRecordIter(self.data)
+    }
+}
+
+impl<'a> IntoIterator for &RecordsIter<'a> {
+    type Item = ParsedRecord<'a>;
+    type IntoIter = ParsedRecordIter<'a>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+pub struct ParsedRecordIter<'a>(&'a [u8]);
+
+impl<'a> Iterator for ParsedRecordIter<'a> {
+    type Item = ParsedRecord<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.0.is_empty() {
+            return None;
+        }
+        let rtype = self.0[0];
+        let mut pos = 1;
+        let rlen = read_compact_size(self.0, &mut pos).ok()? as usize;
+        if pos + rlen > self.0.len() {
+            self.0 = &[];
+            return None;
+        }
+        let rdata = &self.0[pos..pos + rlen];
+        self.0 = &self.0[pos + rlen..];
+
+        Some(parse_record(rtype, rdata))
+    }
+}
+
+fn parse_record<'a>(rtype: u8, rdata: &'a [u8]) -> ParsedRecord<'a> {
+    match rtype {
+        TYPE_SEQ => {
+            let mut rpos = 0;
+            match read_compact_size(rdata, &mut rpos) {
+                Ok(version) if rpos == rdata.len() => ParsedRecord::Seq(version),
+                _ => ParsedRecord::Malformed { rtype, rdata },
+            }
+        }
+        TYPE_TXT | TYPE_ADDR => {
+            let Some((key, val_bytes)) = parse_kv_ref(rdata) else {
+                return ParsedRecord::Malformed { rtype, rdata };
+            };
+            // Validate all values are valid UTF-8 before returning
+            let values = TextValues(val_bytes);
+            let mut check = TextValuesIter(val_bytes);
+            let mut count = 0;
+            while let Some(_) = check.next() { count += 1; }
+            if !check.0.is_empty() || (count == 0 && !val_bytes.is_empty()) {
+                return ParsedRecord::Malformed { rtype, rdata };
+            }
+            if rtype == TYPE_TXT {
+                ParsedRecord::Txt { key, value: values }
+            } else {
+                ParsedRecord::Addr { key, value: values }
+            }
+        }
+        TYPE_BLOB => {
+            let Some((key, val_bytes)) = parse_kv_ref(rdata) else {
+                return ParsedRecord::Malformed { rtype, rdata };
+            };
+            ParsedRecord::Blob { key, value: val_bytes }
+        }
+        TYPE_SIG => {
+            if rdata.is_empty() {
+                return ParsedRecord::Malformed { rtype, rdata };
+            }
+            let flags = rdata[0];
+            let rest = &rdata[1..];
+            let Ok(canonical) = SNameRef::try_from(rest) else {
+                return ParsedRecord::Malformed { rtype, rdata };
+            };
+            let after_canonical = &rest[canonical.to_bytes().len()..];
+            let Ok(handle) = SNameRef::try_from(after_canonical) else {
+                return ParsedRecord::Malformed { rtype, rdata };
+            };
+            let sig = &after_canonical[handle.to_bytes().len()..];
+            ParsedRecord::Sig(ParsedSig { flags, canonical, handle, sig })
+        }
+        _ => ParsedRecord::Unknown { rtype, rdata },
+    }
+}
+
+impl RecordSet {
+    /// Performs structural validation and returns a [`RecordsIter`] handle
+    /// for zero-copy iteration.
+    ///
+    /// Validates that:
+    /// - Every record has valid type + rdlength + rdata boundaries
+    /// - At most one SEQ, and it is first
+    /// - At most one SIG, and it is last
+    ///
+    /// Individual record rdata is NOT validated here — malformed rdata
+    /// will produce [`ParsedRecord::Malformed`] during iteration.
+    pub fn iter(&self) -> Result<RecordsIter<'_>, Error> {
+        let data = self.0.as_slice();
+        let mut pos = 0;
+        let mut index = 0usize;
+        let mut seen_seq = false;
+        let mut seen_sig = false;
+        let mut last_was_sig = false;
+
+        while pos < data.len() {
+            let rtype = data[pos];
+            let mut rpos = pos + 1;
+            let rlen = read_compact_size(data, &mut rpos)? as usize;
+            if rpos + rlen > data.len() {
+                return Err(Error::DataOverflow);
+            }
+
+            if last_was_sig {
+                return Err(Error::SigNotLast);
+            }
+
+            if rtype == TYPE_SEQ {
+                if seen_seq { return Err(Error::DuplicateSeq); }
+                if index > 0 { return Err(Error::SeqNotFirst); }
+                seen_seq = true;
+            }
+
+            if rtype == TYPE_SIG {
+                if seen_sig { return Err(Error::DuplicateSig); }
+                seen_sig = true;
+                last_was_sig = true;
+            }
+
+            pos = rpos + rlen;
+            index += 1;
+        }
+
+        Ok(RecordsIter { data })
+    }
 }
 
 #[cfg(feature = "serde")]
@@ -735,10 +970,8 @@ mod serde_impl {
         where
             S: Serializer,
         {
-            let records: Vec<Record> = self
-                .iter()
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(serde::ser::Error::custom)?;
+            let records_iter = self.iter().map_err(serde::ser::Error::custom)?;
+            let records: Vec<Record> = records_iter.iter().map(|r| r.into()).collect();
             let mut seq = serializer.serialize_seq(Some(records.len()))?;
             for record in &records {
                 seq.serialize_element(record)?;
@@ -787,7 +1020,7 @@ mod tests {
     fn pack_unpack_seq() {
         let rs = RecordSet::pack(vec![Record::seq(1), Record::txt("btc", &["bc1qtest"])]).unwrap();
 
-        let records = rs.unpack().unwrap();
+        let records = rs.unpack_owned().unwrap();
         assert_eq!(records.len(), 2);
         assert_eq!(records[0], Record::Seq(1));
     }
@@ -795,14 +1028,14 @@ mod tests {
     #[test]
     fn seq_large_version() {
         let rs = RecordSet::pack(vec![Record::seq(1000)]).unwrap();
-        let records = rs.unpack().unwrap();
+        let records = rs.unpack_owned().unwrap();
         assert_eq!(records[0], Record::Seq(1000));
     }
 
     #[test]
     fn seq_u64_max() {
         let rs = RecordSet::pack(vec![Record::seq(u64::MAX)]).unwrap();
-        let records = rs.unpack().unwrap();
+        let records = rs.unpack_owned().unwrap();
         assert_eq!(records[0], Record::Seq(u64::MAX));
     }
 
@@ -862,7 +1095,7 @@ mod tests {
         ])
         .unwrap();
 
-        let records = rs.unpack().unwrap();
+        let records = rs.unpack_owned().unwrap();
         assert_eq!(records.len(), 2);
         assert_eq!(
             records[0],
@@ -876,7 +1109,7 @@ mod tests {
     #[test]
     fn pack_unpack_addr() {
         let rs = RecordSet::pack(vec![Record::addr("btc", &["bc1qtest", "bc1qother"])]).unwrap();
-        let records = rs.unpack().unwrap();
+        let records = rs.unpack_owned().unwrap();
         match &records[0] {
             Record::Addr { key, value } => {
                 assert_eq!(key, "btc");
@@ -904,7 +1137,7 @@ mod tests {
         )])
         .unwrap();
 
-        let records = rs.unpack().unwrap();
+        let records = rs.unpack_owned().unwrap();
         match &records[0] {
             Record::Sig {
                 flags,
@@ -936,7 +1169,7 @@ mod tests {
         )])
         .unwrap();
 
-        let records = rs.unpack().unwrap();
+        let records = rs.unpack_owned().unwrap();
         match &records[0] {
             Record::Sig {
                 flags,
@@ -1045,7 +1278,7 @@ mod tests {
         let rs =
             RecordSet::pack(vec![Record::blob("avatar", vec![0x89, 0x50, 0x4E, 0x47])]).unwrap();
 
-        let records = rs.unpack().unwrap();
+        let records = rs.unpack_owned().unwrap();
         match &records[0] {
             Record::Blob { key, value } => {
                 assert_eq!(key, "avatar");
@@ -1059,7 +1292,7 @@ mod tests {
     fn pack_unpack_unknown() {
         let rs = RecordSet::pack(vec![Record::unknown(42, vec![1, 2, 3])]).unwrap();
 
-        let records = rs.unpack().unwrap();
+        let records = rs.unpack_owned().unwrap();
         match &records[0] {
             Record::Unknown { rtype, rdata } => {
                 assert_eq!(*rtype, 42);
@@ -1080,7 +1313,7 @@ mod tests {
         ])
         .unwrap();
 
-        let records = rs.unpack().unwrap();
+        let records = rs.unpack_owned().unwrap();
         assert_eq!(records.len(), 5);
         assert_eq!(records[0], Record::Seq(1));
     }
@@ -1088,7 +1321,7 @@ mod tests {
     #[test]
     fn round_trip_type_0xff() {
         let rs = RecordSet::pack(vec![Record::unknown(0xFF, vec![1, 2, 3])]).unwrap();
-        let records = rs.unpack().unwrap();
+        let records = rs.unpack_owned().unwrap();
         assert_eq!(records.len(), 1);
         match &records[0] {
             Record::Unknown { rtype, rdata } => {
@@ -1104,7 +1337,7 @@ mod tests {
         let record = Record::txt("btc", &["bc1qtest"]);
         let bytes = record.pack().unwrap();
         let rs = RecordSet::new(bytes);
-        let records = rs.unpack().unwrap();
+        let records = rs.unpack_owned().unwrap();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0], record);
     }
@@ -1113,7 +1346,7 @@ mod tests {
     fn empty_record_set() {
         let rs = RecordSet::default();
         assert!(rs.is_empty());
-        let records = rs.unpack().unwrap();
+        let records = rs.unpack_owned().unwrap();
         assert!(records.is_empty());
     }
 
@@ -1124,7 +1357,7 @@ mod tests {
             &["ns1.example.com", "ns2.example.com", "ns3.example.com"],
         )])
         .unwrap();
-        let records = rs.unpack().unwrap();
+        let records = rs.unpack_owned().unwrap();
         match &records[0] {
             Record::Txt { key, value } => {
                 assert_eq!(key, "ns");
@@ -1140,7 +1373,7 @@ mod tests {
     #[test]
     fn empty_txt_value() {
         let rs = RecordSet::pack(vec![Record::txt("btc", &[""])]).unwrap();
-        let records = rs.unpack().unwrap();
+        let records = rs.unpack_owned().unwrap();
         match &records[0] {
             Record::Txt { key, value } => {
                 assert_eq!(key, "btc");
@@ -1156,7 +1389,7 @@ mod tests {
         let bytes = original.to_bytes();
         let restored = RecordSet::new(bytes.clone());
         assert_eq!(restored.as_slice(), &bytes);
-        assert_eq!(restored.unpack().unwrap().len(), 1);
+        assert_eq!(restored.unpack_owned().unwrap().len(), 1);
     }
 
     #[test]
@@ -1168,9 +1401,9 @@ mod tests {
         ])
         .unwrap();
 
-        let first = rs.iter().next().unwrap().unwrap();
+        let records = rs.unpack_owned().unwrap();
         assert_eq!(
-            first,
+            records[0],
             Record::Txt {
                 key: String::from("a"),
                 value: vec![String::from("1")],
@@ -1251,7 +1484,7 @@ mod tests {
     fn compact_size_boundary() {
         let long_value = "x".repeat(248);
         let rs = RecordSet::pack(vec![Record::txt("btc", &[&long_value])]).unwrap();
-        let records = rs.unpack().unwrap();
+        let records = rs.unpack_owned().unwrap();
         assert_eq!(records.len(), 1);
     }
 
@@ -1260,8 +1493,89 @@ mod tests {
         let long_value = "x".repeat(300);
         let rs = RecordSet::pack(vec![Record::txt("btc", &[&long_value])]).unwrap();
         assert_eq!(rs.as_slice()[1], 0xFD);
+        let records = rs.unpack_owned().unwrap();
+        assert_eq!(records.len(), 1);
+    }
+
+    #[test]
+    fn non_minimal_compact_size_in_txt_value_is_malformed() {
+        // TXT record with valid key but non-minimal compact size in value portion
+        // key="btc", then value with 0xFD encoding for a small length
+        let mut data = Vec::new();
+        data.push(TYPE_TXT);
+        let mut rdata = Vec::new();
+        rdata.push(3); // key_len
+        rdata.extend_from_slice(b"btc");
+        // Non-minimal: value "hi" with length 2 encoded as 0xFD 0x02 0x00
+        rdata.push(0xFD);
+        rdata.extend_from_slice(&2u16.to_le_bytes());
+        rdata.extend_from_slice(b"hi");
+        write_compact_size(&mut data, rdata.len() as u64);
+        data.extend_from_slice(&rdata);
+
+        let rs = RecordSet::new(data);
         let records = rs.unpack().unwrap();
         assert_eq!(records.len(), 1);
+        assert!(matches!(records[0], ParsedRecord::Malformed { rtype: TYPE_TXT, .. }));
+    }
+
+    #[test]
+    fn non_minimal_compact_size_in_addr_value_is_malformed() {
+        let mut data = Vec::new();
+        data.push(TYPE_ADDR);
+        let mut rdata = Vec::new();
+        rdata.push(3);
+        rdata.extend_from_slice(b"eth");
+        // Non-minimal encoding for length 5
+        rdata.push(0xFD);
+        rdata.extend_from_slice(&5u16.to_le_bytes());
+        rdata.extend_from_slice(b"0xabc");
+        write_compact_size(&mut data, rdata.len() as u64);
+        data.extend_from_slice(&rdata);
+
+        let rs = RecordSet::new(data);
+        let records = rs.unpack().unwrap();
+        assert!(matches!(records[0], ParsedRecord::Malformed { rtype: TYPE_ADDR, .. }));
+    }
+
+    #[test]
+    fn non_minimal_compact_size_in_seq_is_malformed() {
+        // SEQ record where the version itself uses non-minimal encoding
+        let mut data = Vec::new();
+        data.push(TYPE_SEQ);
+        // rdata: version 1 encoded as 0xFD 0x01 0x00 (non-minimal)
+        let rdata = &[0xFD, 0x01, 0x00];
+        write_compact_size(&mut data, rdata.len() as u64);
+        data.extend_from_slice(rdata);
+
+        let rs = RecordSet::new(data);
+        let records = rs.unpack().unwrap();
+        assert!(matches!(records[0], ParsedRecord::Malformed { rtype: TYPE_SEQ, .. }));
+    }
+
+    #[test]
+    fn non_minimal_compact_size_rejected() {
+        // Value 1 encoded as 0xFD 0x01 0x00 (3 bytes) instead of just 0x01 (1 byte)
+        // Craft: TYPE_SEQ + non-minimal rdlength(1) + rdata(0x01)
+        let data = vec![
+            TYPE_SEQ,
+            0xFD, 0x01, 0x00, // non-minimal: value 1 using 3-byte encoding
+            0x01,              // version = 1
+        ];
+        let rs = RecordSet::new(data);
+        assert!(rs.unpack().is_err(), "non-minimal compact size should be rejected");
+        assert!(rs.iter().is_err(), "structural validation should also reject");
+    }
+
+    #[test]
+    fn non_minimal_compact_size_0xfe_rejected() {
+        // Value 100 encoded as 0xFE (4-byte) instead of 1-byte
+        let data = vec![
+            TYPE_SEQ,
+            0xFE, 0x64, 0x00, 0x00, 0x00, // non-minimal: value 100 using 5-byte encoding
+        ];
+        let rs = RecordSet::new(data);
+        assert!(rs.unpack().is_err());
     }
 
     #[cfg(feature = "serde")]
@@ -1279,7 +1593,7 @@ mod tests {
             assert!(json.contains("\"version\":1"));
 
             let decoded: RecordSet = serde_json::from_str(&json).unwrap();
-            assert_eq!(rs.unpack().unwrap(), decoded.unpack().unwrap());
+            assert_eq!(rs.unpack_owned().unwrap(), decoded.unpack_owned().unwrap());
         }
 
         #[test]
@@ -1292,7 +1606,7 @@ mod tests {
 
             let json = serde_json::to_string(&rs).unwrap();
             let decoded: RecordSet = serde_json::from_str(&json).unwrap();
-            assert_eq!(rs.unpack().unwrap(), decoded.unpack().unwrap());
+            assert_eq!(rs.unpack_owned().unwrap(), decoded.unpack_owned().unwrap());
         }
 
         #[test]
@@ -1307,7 +1621,7 @@ mod tests {
             assert!(json.contains(r#""value":["ns1.example.com","ns2.example.com"]"#));
 
             let decoded: RecordSet = serde_json::from_str(&json).unwrap();
-            assert_eq!(rs.unpack().unwrap(), decoded.unpack().unwrap());
+            assert_eq!(rs.unpack_owned().unwrap(), decoded.unpack_owned().unwrap());
         }
 
         #[test]
@@ -1320,7 +1634,7 @@ mod tests {
             assert!(json.contains("\"value\":\"iVBORw==\""));
 
             let decoded: RecordSet = serde_json::from_str(&json).unwrap();
-            assert_eq!(rs.unpack().unwrap(), decoded.unpack().unwrap());
+            assert_eq!(rs.unpack_owned().unwrap(), decoded.unpack_owned().unwrap());
         }
 
         #[test]
@@ -1332,7 +1646,7 @@ mod tests {
             assert!(json.contains("\"rtype\":42"));
 
             let decoded: RecordSet = serde_json::from_str(&json).unwrap();
-            assert_eq!(rs.unpack().unwrap(), decoded.unpack().unwrap());
+            assert_eq!(rs.unpack_owned().unwrap(), decoded.unpack_owned().unwrap());
         }
 
         #[test]
@@ -1345,7 +1659,7 @@ mod tests {
             ]"#;
 
             let rs: RecordSet = serde_json::from_str(json).unwrap();
-            let records = rs.unpack().unwrap();
+            let records = rs.unpack_owned().unwrap();
             assert_eq!(records.len(), 4);
             assert_eq!(records[0], Record::Seq(1));
 
@@ -1385,7 +1699,7 @@ mod tests {
 
             let json = serde_json::to_string_pretty(&rs).unwrap();
             let decoded: RecordSet = serde_json::from_str(&json).unwrap();
-            assert_eq!(rs.unpack().unwrap(), decoded.unpack().unwrap());
+            assert_eq!(rs.unpack_owned().unwrap(), decoded.unpack_owned().unwrap());
         }
 
         #[test]
@@ -1397,5 +1711,167 @@ mod tests {
             let err = serde_json::from_str::<RecordSet>(json);
             assert!(err.is_err());
         }
+    }
+
+    // ── Zero-copy ParsedRecord tests ────────────────────
+
+    #[test]
+    fn records_zero_copy_txt() {
+        let rs = RecordSet::pack(vec![
+            Record::txt("btc", &["bc1qtest", "bc1qother"]),
+        ]).unwrap();
+
+        let records = rs.iter().unwrap();
+        let parsed: Vec<_> = records.iter().collect();
+        assert_eq!(parsed.len(), 1);
+        match &parsed[0] {
+            ParsedRecord::Txt { key, value } => {
+                assert_eq!(*key, "btc");
+                let vals = value.to_vec();
+                assert_eq!(vals, vec!["bc1qtest", "bc1qother"]);
+            }
+            _ => panic!("expected Txt"),
+        }
+    }
+
+    #[test]
+    fn records_zero_copy_addr() {
+        let rs = RecordSet::pack(vec![
+            Record::addr("eth", &["0xdead", "0xbeef"]),
+        ]).unwrap();
+
+        let records = rs.iter().unwrap();
+        let parsed: Vec<_> = records.iter().collect();
+        match &parsed[0] {
+            ParsedRecord::Addr { key, value } => {
+                assert_eq!(*key, "eth");
+                assert_eq!(value.to_vec(), vec!["0xdead", "0xbeef"]);
+            }
+            _ => panic!("expected Addr"),
+        }
+    }
+
+    #[test]
+    fn records_zero_copy_blob() {
+        let rs = RecordSet::pack(vec![
+            Record::blob("avatar", vec![0x89, 0x50]),
+        ]).unwrap();
+
+        let records = rs.iter().unwrap();
+        let parsed: Vec<_> = records.iter().collect();
+        match &parsed[0] {
+            ParsedRecord::Blob { key, value } => {
+                assert_eq!(*key, "avatar");
+                assert_eq!(*value, &[0x89, 0x50]);
+            }
+            _ => panic!("expected Blob"),
+        }
+    }
+
+    #[test]
+    fn records_zero_copy_sig() {
+        use core::str::FromStr;
+        let canonical = SName::from_str("@bitcoin").unwrap();
+        let handle = SName::from_str("alice@bitcoin").unwrap();
+
+        let rs = RecordSet::pack(vec![
+            Record::txt("btc", &["bc1q"]),
+            Record::sig(canonical.clone(), handle.clone(), vec![0xAB, 0xCD], 0),
+        ]).unwrap();
+
+        let records = rs.iter().unwrap();
+        let parsed: Vec<_> = records.iter().collect();
+        assert_eq!(parsed.len(), 2);
+        match &parsed[1] {
+            ParsedRecord::Sig(sig) => {
+                assert_eq!(sig.flags, 0);
+                assert_eq!(sig.canonical.to_owned(), canonical);
+                assert_eq!(sig.handle.to_owned(), handle);
+                assert_eq!(sig.sig, &[0xAB, 0xCD]);
+            }
+            _ => panic!("expected Sig"),
+        }
+    }
+
+    #[test]
+    fn records_zero_copy_seq() {
+        let rs = RecordSet::pack(vec![
+            Record::seq(42),
+            Record::txt("a", &["b"]),
+        ]).unwrap();
+
+        let records = rs.iter().unwrap();
+        let parsed: Vec<_> = records.iter().collect();
+        assert_eq!(parsed.len(), 2);
+        assert!(matches!(parsed[0], ParsedRecord::Seq(42)));
+    }
+
+    #[test]
+    fn records_malformed_txt_becomes_malformed() {
+        // Craft a TXT record with invalid UTF-8 in the value
+        let mut data = Vec::new();
+        data.push(TYPE_TXT);
+        let rdata = &[3, b'b', b't', b'c', 2, 0xFF, 0xFE]; // key="btc", value=invalid utf8
+        write_compact_size(&mut data, rdata.len() as u64);
+        data.extend_from_slice(rdata);
+
+        let rs = RecordSet::new(data);
+        let records = rs.iter().unwrap(); // structural validation passes
+        let parsed: Vec<_> = records.iter().collect();
+        assert_eq!(parsed.len(), 1);
+        assert!(matches!(parsed[0], ParsedRecord::Malformed { rtype: TYPE_TXT, .. }));
+    }
+
+    #[test]
+    fn records_unknown_type() {
+        let mut data = Vec::new();
+        data.push(0xFF);
+        write_compact_size(&mut data, 3);
+        data.extend_from_slice(&[1, 2, 3]);
+
+        let rs = RecordSet::new(data);
+        let records = rs.iter().unwrap();
+        let parsed: Vec<_> = records.iter().collect();
+        assert!(matches!(parsed[0], ParsedRecord::Unknown { rtype: 0xFF, .. }));
+    }
+
+    #[test]
+    fn records_structural_validation_rejects_sig_not_last() {
+        use core::str::FromStr;
+        let canonical = SName::from_str("@bitcoin").unwrap();
+        // Manually craft: SIG then TXT
+        let sig_bytes = Record::sig(canonical, SName::empty(), vec![0x01], 0).pack().unwrap();
+        let txt_bytes = Record::txt("a", &["b"]).pack().unwrap();
+        let mut data = sig_bytes;
+        data.extend_from_slice(&txt_bytes);
+
+        let rs = RecordSet::new(data);
+        assert_eq!(rs.iter().unwrap_err(), Error::SigNotLast);
+    }
+
+    #[test]
+    fn records_mixed_with_malformed() {
+        // Good TXT + malformed TXT (bad key) + good BLOB
+        let good_txt = Record::txt("btc", &["bc1q"]).pack().unwrap();
+        let good_blob = Record::blob("img", vec![0x01]).pack().unwrap();
+
+        // Craft a TXT with empty key (invalid)
+        let mut bad_txt = Vec::new();
+        bad_txt.push(TYPE_TXT);
+        let rdata = &[0u8]; // key_len=0, no key, no value
+        write_compact_size(&mut bad_txt, rdata.len() as u64);
+        bad_txt.extend_from_slice(rdata);
+
+        let mut data = good_txt;
+        data.extend_from_slice(&bad_txt);
+        data.extend_from_slice(&good_blob);
+
+        let rs = RecordSet::new(data);
+        let records = rs.iter().unwrap(); // structural check passes
+        let parsed: Vec<_> = records.iter().collect();
+        assert_eq!(parsed.len(), 3);
+        assert!(matches!(parsed[0], ParsedRecord::Txt { .. }));
+        assert!(matches!(parsed[1], ParsedRecord::Malformed { rtype: TYPE_TXT, .. }));
+        assert!(matches!(parsed[2], ParsedRecord::Blob { .. }));
     }
 }

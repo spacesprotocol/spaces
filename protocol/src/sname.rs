@@ -93,7 +93,7 @@ impl Display for Error {
 #[cfg(feature = "std")]
 impl std::error::Error for Error {}
 
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct SNameRef<'a>(pub &'a [u8]);
 
 pub struct LabelIterator<'a>(&'a [u8]);
