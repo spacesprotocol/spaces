@@ -79,12 +79,13 @@ pub struct ExecuteEventDetails {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CreateNumEventDetails {
-    pub script_pubkey: ScriptBuf,
+    pub genesis_spk: ScriptBuf,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TransferNumEventDetails {
-    pub script_pubkey: ScriptBuf,
+    pub num_id: String,
+    pub to: ScriptBuf,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -229,6 +230,21 @@ impl TxEvent {
             }
         }
         Ok(None)
+    }
+
+    /// Retrieve all CreateNum events
+    pub fn get_create_num_events(
+        db_tx: &rusqlite::Transaction,
+    ) -> rusqlite::Result<Vec<TxEvent>> {
+        let query = format!(
+            "SELECT type, space, previous_spaceout, details
+             FROM {table}
+             WHERE type = 'create-num'
+             ORDER BY id DESC",
+            table = Self::TX_EVENTS_TABLE_NAME,
+        );
+        let stmt = db_tx.prepare(&query)?;
+        Self::from_sqlite_statement(stmt, [])
     }
 
     /// Retrieve all spaces the wallet has done any operation with
@@ -456,25 +472,25 @@ impl TxRecord {
         });
     }
 
-    pub fn add_create_num(&mut self, to: ScriptBuf) {
+    pub fn add_create_num(&mut self, genesis_spk: ScriptBuf) {
         self.events.push(TxEvent {
             kind: TxEventKind::CreateNum,
             space: None,
             previous_spaceout: None,
             details: Some(
-                serde_json::to_value(CreateNumEventDetails { script_pubkey: to })
+                serde_json::to_value(CreateNumEventDetails { genesis_spk })
                     .expect("json value"),
             ),
         });
     }
 
-    pub fn add_transfer_num(&mut self, num: String, to: ScriptBuf) {
+    pub fn add_transfer_num(&mut self, num: String, num_id: String, to: ScriptBuf) {
         self.events.push(TxEvent {
             kind: TxEventKind::TransferNum,
             space: Some(num),
             previous_spaceout: None,
             details: Some(
-                serde_json::to_value(TransferNumEventDetails { script_pubkey: to })
+                serde_json::to_value(TransferNumEventDetails { num_id, to })
                     .expect("json value"),
             ),
         });
