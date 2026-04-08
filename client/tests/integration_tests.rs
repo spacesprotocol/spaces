@@ -390,7 +390,7 @@ async fn it_should_allow_batch_transfers_refreshing_expire_height(
     let result = wallet_do(
         rig,
         ALICE,
-        vec![RpcWalletRequest::Transfer(TransferSpacesParams {
+        vec![RpcWalletRequest::Transfer(TransferSpacesParams { secret: None,
             spaces: registered_spaces.clone(),
             to: Some(space_address),
             data: None,
@@ -457,7 +457,7 @@ async fn it_should_allow_applying_script_in_batch(rig: &TestRig) -> anyhow::Resu
         ALICE,
         vec![
             // Transfer spaces to self with data (replaces Execute)
-            RpcWalletRequest::Transfer(TransferSpacesParams {
+            RpcWalletRequest::Transfer(TransferSpacesParams { secret: None,
                 spaces: registered_spaces.clone(),
                 to: None, // None = renew to self
                 data: Some(vec![0xDE, 0xAD, 0xBE, 0xEF]),
@@ -868,7 +868,7 @@ async fn it_should_not_allow_register_or_transfer_to_same_space_multiple_times(
     let response = wallet_do(
         rig,
         ALICE,
-        vec![RpcWalletRequest::Transfer(TransferSpacesParams {
+        vec![RpcWalletRequest::Transfer(TransferSpacesParams { secret: None,
             spaces: vec![Subject::Label(SLabel::from_str(&transfer).expect("valid"))],
             to: Some(bob_address.clone()),
             data: None,
@@ -886,7 +886,7 @@ async fn it_should_not_allow_register_or_transfer_to_same_space_multiple_times(
     wallet_do(
         rig,
         ALICE,
-        vec![RpcWalletRequest::Transfer(TransferSpacesParams {
+        vec![RpcWalletRequest::Transfer(TransferSpacesParams { secret: None,
             spaces: vec![Subject::Label(SLabel::from_str(&transfer).expect("valid"))],
             to: Some(bob_address),
             data: None,
@@ -900,7 +900,7 @@ async fn it_should_not_allow_register_or_transfer_to_same_space_multiple_times(
     let response = wallet_do(
         rig,
         ALICE,
-        vec![RpcWalletRequest::Transfer(TransferSpacesParams {
+        vec![RpcWalletRequest::Transfer(TransferSpacesParams { secret: None,
             spaces: vec![Subject::Label(SLabel::from_str(&setdata).expect("valid"))],
             to: None,
             data: Some(vec![0xAA, 0xAA]),
@@ -917,7 +917,7 @@ async fn it_should_not_allow_register_or_transfer_to_same_space_multiple_times(
     wallet_do(
         rig,
         ALICE,
-        vec![RpcWalletRequest::Transfer(TransferSpacesParams {
+        vec![RpcWalletRequest::Transfer(TransferSpacesParams { secret: None,
             spaces: vec![Subject::Label(SLabel::from_str(&setdata).expect("valid"))],
             to: None,
             data: Some(vec![0xDE, 0xAD]),
@@ -968,7 +968,7 @@ async fn it_can_batch_txs(rig: &TestRig) -> anyhow::Result<()> {
         rig,
         ALICE,
         vec![
-            RpcWalletRequest::Transfer(TransferSpacesParams {
+            RpcWalletRequest::Transfer(TransferSpacesParams { secret: None,
                 spaces: vec![Subject::Label(SLabel::from_str("@test9996").expect("valid"))],
                 to: Some(bob_address),
                 data: None,
@@ -986,7 +986,7 @@ async fn it_can_batch_txs(rig: &TestRig) -> anyhow::Result<()> {
                 amount: 1000,
             }),
             // Transfer spaces to self with data (replaces Execute)
-            RpcWalletRequest::Transfer(TransferSpacesParams {
+            RpcWalletRequest::Transfer(TransferSpacesParams { secret: None,
                 spaces: vec![
                     Subject::Label(SLabel::from_str("@test10000").expect("valid")),
                     Subject::Label(SLabel::from_str("@test9999").expect("valid")),
@@ -1250,7 +1250,7 @@ async fn it_should_handle_expired_spaces(rig: &TestRig) -> anyhow::Result<()> {
     let renew_result = wallet_do(
         rig,
         ALICE,
-        vec![RpcWalletRequest::Transfer(TransferSpacesParams {
+        vec![RpcWalletRequest::Transfer(TransferSpacesParams { secret: None,
             spaces: vec![Subject::Label(
                 SLabel::from_str(&space_name).expect("valid")
             )],
@@ -1327,7 +1327,7 @@ async fn it_should_handle_expired_spaces(rig: &TestRig) -> anyhow::Result<()> {
     let force_renew_result = wallet_do(
         rig,
         ALICE,
-        vec![RpcWalletRequest::Transfer(TransferSpacesParams {
+        vec![RpcWalletRequest::Transfer(TransferSpacesParams { secret: None,
             spaces: vec![Subject::Label(
                 SLabel::from_str(&space_name_2).expect("valid")
             )],

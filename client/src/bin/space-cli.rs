@@ -144,6 +144,9 @@ enum Commands {
         /// The space name
         space: String,
     },
+    /// Generate a random p2tr keypair and print the secret key, script pubkey, and num id
+    #[command(name = "generatekey")]
+    GenerateKey,
     /// Create a new num
     #[command(name = "createnum")]
     CreateNum {
@@ -173,6 +176,9 @@ enum Commands {
         /// Recipient space name or address
         #[arg(long, display_order = 1)]
         to: String,
+        /// Read hex-encoded secret key from stdin for transferring nums not owned by wallet
+        #[arg(long)]
+        secret_stdin: bool,
         /// Fee rate to use in sat/vB
         #[arg(long, short)]
         fee_rate: Option<u64>,
@@ -399,9 +405,12 @@ enum Commands {
     /// still in auction with a winning bid
     #[command(name = "listspaces")]
     ListSpaces,
-    /// List nums owned by wallet
+    /// List nums. Defaults to owned, use --kind external for nums created but not owned.
     #[command(name = "listnums")]
-    ListNums,
+    ListNums {
+        #[arg(long, default_value = "owned")]
+        kind: String,
+    },
     /// List unspent auction outputs i.e. outputs that can be
     /// auctioned off in the bidding process
     #[command(name = "listbidouts")]
@@ -694,7 +703,7 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
                 Subject::Label(SLabel::from_str(&normalized).expect("valid space"))
             }).collect();
             cli.send_request(
-                Some(RpcWalletRequest::Transfer(TransferSpacesParams {
+                Some(RpcWalletRequest::Transfer(TransferSpacesParams { secret: None,
                     spaces,
                     to: None,
                     data: None,
@@ -708,10 +717,20 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
         Commands::Transfer {
             spaces,
             to,
+            secret_stdin,
             fee_rate,
         } => {
+            let secret = if secret_stdin {
+                let mut input = String::new();
+                io::stdin().read_line(&mut input)
+                    .map_err(|e| ClientError::Custom(format!("failed to read secret from stdin: {}", e)))?;
+                Some(input.trim().to_string())
+            } else {
+                None
+            };
             cli.send_request(
                 Some(RpcWalletRequest::Transfer(TransferSpacesParams {
+                    secret,
                     spaces,
                     to: Some(to),
                     data: None,
@@ -817,8 +836,9 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
             let spaces = cli.client.wallet_list_spaces(&cli.wallet).await?;
             print_list_spaces_response(tip.tip.height, spaces, cli.format);
         }
-        Commands::ListNums => {
-            let nums = cli.client.wallet_list_nums(&cli.wallet).await?;
+        Commands::ListNums { kind } => {
+            let kind = if kind == "owned" { None } else { Some(kind) };
+            let nums = cli.client.wallet_list_nums(&cli.wallet, kind).await?;
             print_list_nums_response(nums, cli.format);
         }
         Commands::Balance => {
@@ -922,6 +942,30 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
 
             cli.client.verify_listing(listing).await?;
             println!("{} Listing verified", "✓".color(Color::Green));
+        }
+        Commands::GenerateKey => {
+            use spaces_wallet::bitcoin::secp256k1::{Secp256k1, Keypair};
+            use spaces_wallet::bitcoin::key::TapTweak;
+            use spaces_wallet::bitcoin::script::Builder;
+            use spaces_wallet::bitcoin::opcodes::all::OP_PUSHNUM_1;
+
+            let secp = Secp256k1::new();
+            let (secret_key, _) = secp.generate_keypair(&mut rand::thread_rng());
+            let keypair = Keypair::from_secret_key(&secp, &secret_key);
+            let tweaked = keypair.tap_tweak(&secp, None);
+            let (xonly, _) = tweaked.to_keypair().x_only_public_key();
+
+            let spk = Builder::new()
+                .push_opcode(OP_PUSHNUM_1)
+                .push_slice(xonly.serialize())
+                .into_script();
+
+            let num_id = NumId::from_spk::<Sha256>(spk.clone());
+            let tweaked_secret = tweaked.to_keypair().secret_key().secret_bytes();
+
+            println!("secret: {}", hex::encode(tweaked_secret));
+            println!("spk: {}", hex::encode(spk.as_bytes()));
+            println!("num_id: {}", num_id);
         }
         Commands::CreateNum { bind_spk, fee_rate } => {
             let spk = match bind_spk {

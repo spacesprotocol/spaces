@@ -424,6 +424,7 @@ pub trait Rpc {
     async fn wallet_list_nums(
         &self,
         wallet: &str,
+        kind: Option<String>,
     ) -> Result<ListNumsResponse, ErrorObjectOwned>;
 
     #[method(name = "walletlistunspent")]
@@ -513,6 +514,10 @@ pub struct TransferSpacesParams {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<Vec<u8>>,
+
+    /// Hex-encoded 32-byte secret key for transferring nums not owned by the wallet
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secret: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -1361,10 +1366,12 @@ impl RpcServer for RpcServerImpl {
     async fn wallet_list_nums(
         &self,
         wallet: &str,
+        kind: Option<String>,
     ) -> Result<ListNumsResponse, ErrorObjectOwned> {
+        let external = kind.as_deref() == Some("external");
         self.wallet(&wallet)
             .await?
-            .send_list_nums()
+            .send_list_nums(external)
             .await
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
     }
