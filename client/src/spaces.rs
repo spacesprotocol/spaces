@@ -207,13 +207,7 @@ impl Spaced {
     }
 
     pub fn genesis(network: ExtendedNetwork) -> ChainAnchor {
-        match network {
-            ExtendedNetwork::Testnet => ChainAnchor::TESTNET(),
-            ExtendedNetwork::Testnet4 => ChainAnchor::TESTNET4(),
-            ExtendedNetwork::Regtest => ChainAnchor::REGTEST(),
-            ExtendedNetwork::Mainnet => ChainAnchor::MAINNET(),
-            _ => panic!("unsupported network"),
-        }
+        network.genesis()
     }
 
     pub fn nums_genesis(network: ExtendedNetwork) -> ChainAnchor {

@@ -105,15 +105,22 @@ pub fn load_open_context<T: SpacesSource, H: KeyHasher>(
         let existing = src.get_space_outpoint(&spacehash)?;
         match existing {
             None => OpenContext::NewSpace(name.to_owned()),
-            Some(outpoint) => OpenContext::ExistingSpace(FullSpaceOut {
-                txid: outpoint.txid,
-                spaceout: src.get_spaceout(&outpoint)?.expect("spaceout exists"),
-            }),
+            Some(outpoint) => {
+                // Handle data inconsistency: if spaceout doesn't exist, treat as new space.
+                // This can happen if the space was revoked but the space->outpoint mapping
+                // wasn't cleaned up properly.
+                match src.get_spaceout(&outpoint)? {
+                    Some(spaceout) => OpenContext::ExistingSpace(FullSpaceOut {
+                        txid: outpoint.txid,
+                        spaceout,
+                    }),
+                    None => OpenContext::NewSpace(name.to_owned()),
+                }
+            }
         }
     };
     Ok(Some(Ok(ctx)))
 }
-
 
 fn find_open(script: &Script) -> Option<OpenResult<SLabelRef<'_>>> {
     // Find the first OP_PUSH bytes in a bitcoin script prefixed with our magic

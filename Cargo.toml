@@ -2,6 +2,10 @@
 resolver = "2"
 members = ["borsh_utils", "checkpoint", "client", "protocol", "testutil", "wallet", "nums", "sip7"]
 
+[workspace.package]
+version = "0.0.9"
+edition = "2021"
+
 [workspace.dependencies]
 anyhow = "1.0"
 hex = "0.4"
@@ -32,4 +36,3 @@ predicates = "3.1"
 tempfile = "3.14"
 bitcoind = { version = "0.36.0", features = ["26_0"] }
 zip = "0.6"
-

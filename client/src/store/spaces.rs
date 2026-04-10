@@ -183,10 +183,19 @@ impl SpacesState for SpLiveSnapshot {
         if let Some(outpoint) = outpoint {
             let spaceout = self.get_spaceout(&outpoint)?;
 
-            return Ok(Some(FullSpaceOut {
-                txid: outpoint.txid,
-                spaceout: spaceout.expect("should exist if outpoint exists"),
-            }));
+            // Handle data inconsistency gracefully: if outpoint exists but spaceout doesn't,
+            // this indicates the space was revoked but the space->outpoint mapping wasn't cleaned up.
+            // Clean up the inconsistent mapping and return None instead of panicking.
+            if let Some(spaceout) = spaceout {
+                return Ok(Some(FullSpaceOut {
+                    txid: outpoint.txid,
+                    spaceout,
+                }));
+            } else {
+                // Clean up the inconsistent space->outpoint mapping
+                self.remove(*space_hash);
+                return Ok(None);
+            }
         }
         Ok(None)
     }
