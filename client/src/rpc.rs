@@ -173,6 +173,10 @@ pub enum ChainStateCommand {
         txid: Txid,
         resp: Responder<anyhow::Result<Option<TxEntry>>>,
     },
+    FindFallbackByHandle {
+        needle: String,
+        resp: Responder<anyhow::Result<Option<Vec<u8>>>>,
+    },
     GetBlockMeta {
         height_or_hash: HeightOrHash,
         resp: Responder<anyhow::Result<BlockMetaWithHash>>,
@@ -1532,6 +1536,13 @@ impl RpcServer for RpcServerImpl {
 
     async fn get_fallback(&self, subject: Subject) -> Result<Option<FallbackResponse>, ErrorObjectOwned> {
         let data = match &subject {
+            Subject::Handle(name) => {
+                let needle = name.to_string();
+                self.store
+                    .find_fallback_by_handle(&needle)
+                    .await
+                    .map_err(|e| ErrorObjectOwned::owned(-1, e.to_string(), None::<String>))?
+            }
             Subject::Label(label) if !label.is_numeric() => {
                 let space_hash = SpaceKey::from(Sha256::hash(label.as_ref()));
                 let fso = self.store.get_space(space_hash).await
@@ -1546,7 +1557,7 @@ impl RpcServer for RpcServerImpl {
                 })
             }
             _ => {
-                let fpt = self.store.get_ptr(subject).await
+                let fpt = self.store.get_ptr(subject.clone()).await
                     .map_err(|e| ErrorObjectOwned::owned(-1, e.to_string(), None::<String>))?;
                 fpt.and_then(|fpt| fpt.numout.num.data.map(|b| b.to_vec()))
             }
@@ -1852,6 +1863,10 @@ impl AsyncChainState {
             }
             ChainStateCommand::GetTxMeta { txid, resp } => {
                 let res = Self::get_indexed_tx(state, &txid, client, rpc).await;
+                let _ = resp.send(res);
+            }
+            ChainStateCommand::FindFallbackByHandle { needle, resp } => {
+                let res = state.find_fallback_payload_by_handle(&needle);
                 let _ = resp.send(res);
             }
             ChainStateCommand::EstimateBid { target, resp } => {
@@ -2367,6 +2382,17 @@ impl AsyncChainState {
             .await?;
         resp_rx.await?
     }
+
+    pub async fn find_fallback_by_handle(&self, needle: &str) -> anyhow::Result<Option<Vec<u8>>> {
+        let (resp, resp_rx) = oneshot::channel();
+        self.sender
+            .send(ChainStateCommand::FindFallbackByHandle {
+                needle: needle.to_string(),
+                resp,
+            })
+            .await?;
+        resp_rx.await?
+    }
 }
 
 fn resolve_num_id(state: &mut Chain, subject: &Subject) -> anyhow::Result<NumId> {
@@ -2378,6 +2404,7 @@ fn resolve_num_id(state: &mut Chain, subject: &Subject) -> anyhow::Result<NumId>
                 .ok_or_else(|| anyhow!("numeric '{}' not found", numeric))
         }
         Subject::Label(_) => Err(anyhow!("expected a num id or numeric, not a space")),
+        Subject::Handle(h) => Err(anyhow!("expected a num id or numeric, not a handle: {}", h)),
     }
 }
 
@@ -2449,6 +2476,7 @@ fn resolve_label(state: &mut Chain, subject: &Subject) -> anyhow::Result<SLabel>
                 .ok_or_else(|| anyhow!("num id '{}' not found", id))?;
             Ok(info.numout.num.name.to_slabel())
         }
+        Subject::Handle(h) => Err(anyhow!("expected a space or num, not a handle: {}", h)),
     }
 }
 
@@ -2473,7 +2501,10 @@ fn get_delegation(state: &mut Chain, subject: &Subject) -> anyhow::Result<Option
             };
             (NumId::from_spk::<Sha256>(info.spaceout.script_pubkey), space.clone())
         }
-        Subject::NumId(id) => return Ok(Some(id.clone()))
+        Subject::NumId(id) => return Ok(Some(id.clone())),
+        Subject::Handle(h) => {
+            return Err(anyhow!("expected a space, numeric, or num id, not a handle: {}", h));
+        }
     };
 
     let delegate = state.get_delegator(&DelegatorKey::from_id::<Sha256>(id))?;

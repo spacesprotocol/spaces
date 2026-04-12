@@ -249,6 +249,27 @@ impl Chain {
         self.idx.block_index
     }
 
+    pub fn list_spaces_blocks_merged(&self) -> anyhow::Result<Vec<(u32, BlockHash, BlockMeta)>> {
+        self.idx
+            .db
+            .list_spaces_blocks_merged()
+            .context("list indexed spaces blocks")
+    }
+
+    pub fn list_nums_blocks_merged(&self) -> anyhow::Result<Vec<(u32, BlockHash, NumBlockMeta)>> {
+        self.idx
+            .db
+            .list_nums_blocks_merged()
+            .context("list indexed nums blocks")
+    }
+
+    pub fn find_fallback_payload_by_handle(
+        &self,
+        needle: &str,
+    ) -> anyhow::Result<Option<Vec<u8>>> {
+        crate::fallback_handle::find_fallback_payload_by_handle(self, needle)
+    }
+
     pub fn rollout_iter(&self) -> anyhow::Result<(RolloutIterator, ReadTx)> {
         self.db.sp.store.rollout_iter()
     }

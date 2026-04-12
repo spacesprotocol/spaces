@@ -43,6 +43,7 @@ use spaces_protocol::{
     constants::{BID_PSBT_INPUT_SEQUENCE, BID_PSBT_TX_LOCK_TIME},
     hasher::{KeyHasher, SpaceKey},
     prepare::{is_magic_lock_time, SpacesSource, TrackableOutput},
+    sname::{NameLike, SName},
     slabel::SLabel,
     Covenant, FullSpaceOut, Space,
 };
@@ -84,11 +85,12 @@ pub struct Balance {
     pub details: BalanceDetails,
 }
 
-/// A space name (@bitcoin), numeric (#800000-3), or num id (num1...)
+/// A space name (@bitcoin), numeric (#800000-3), num id (num1...), or multi-label handle (sub@space)
 #[derive(Debug, Clone)]
 pub enum Subject {
     Label(SLabel),
     NumId(NumId),
+    Handle(SName),
 }
 
 impl From<SLabel> for Subject {
@@ -103,11 +105,18 @@ impl From<NumId> for Subject {
     }
 }
 
+impl From<SName> for Subject {
+    fn from(name: SName) -> Self {
+        Subject::Handle(name)
+    }
+}
+
 impl fmt::Display for Subject {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Subject::Label(label) => write!(f, "{}", label),
             Subject::NumId(id) => write!(f, "{}", id),
+            Subject::Handle(name) => write!(f, "{}", name),
         }
     }
 }
@@ -117,19 +126,32 @@ impl FromStr for Subject {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         if s.starts_with(&format!("{}1", NUM_HRP)) {
-            NumId::from_str(s)
+            return NumId::from_str(s)
                 .map(Subject::NumId)
-                .map_err(|e| format!("invalid num id: {}", e))
-        } else {
-            let normalized = if s.starts_with('#') || s.starts_with('@') {
-                s.to_ascii_lowercase()
-            } else {
-                format!("@{}", s.to_ascii_lowercase())
-            };
-            SLabel::from_str(&normalized)
-                .map(Subject::Label)
-                .map_err(|e| format!("invalid space or numeric: {}", e))
+                .map_err(|e| format!("invalid num id: {}", e));
         }
+
+        let lower = s.to_ascii_lowercase();
+        if let Ok(name) = SName::from_str(&lower) {
+            if name.label_count() >= 2 {
+                return Ok(Subject::Handle(name));
+            }
+            if name.label_count() == 1 {
+                let label = name
+                    .space()
+                    .ok_or_else(|| "invalid space name".to_string())?;
+                return Ok(Subject::Label(label));
+            }
+        }
+
+        let normalized = if s.starts_with('#') || s.starts_with('@') {
+            lower
+        } else {
+            format!("@{}", lower)
+        };
+        SLabel::from_str(&normalized)
+            .map(Subject::Label)
+            .map_err(|e| format!("invalid space or numeric: {}", e))
     }
 }
 
@@ -138,6 +160,7 @@ impl Serialize for Subject {
         match self {
             Subject::Label(label) => serializer.serialize_str(&label.to_string()),
             Subject::NumId(id) => serializer.serialize_str(&id.to_string()),
+            Subject::Handle(name) => serializer.serialize_str(&name.to_string()),
         }
     }
 }
@@ -492,6 +515,11 @@ impl SpacesWallet {
                 src.get_num_outpoint_by_id(id)?
                     .ok_or_else(|| anyhow::anyhow!("Num id not found"))?
             }
+            Subject::Handle(_) => {
+                return Err(anyhow::anyhow!(
+                    "handle subjects are not supported for this operation"
+                ));
+            }
         };
 
         // We use list_output instead of get_utxo because the output might
@@ -540,6 +568,11 @@ impl SpacesWallet {
                 let numout = src.get_numout(&outpoint)?
                     .ok_or_else(|| anyhow::anyhow!("Num output not found"))?;
                 numout.script_pubkey
+            }
+            Subject::Handle(_) => {
+                return Err(anyhow::anyhow!(
+                    "handle subjects are not supported for this operation"
+                ));
             }
         };
 
@@ -595,6 +628,11 @@ impl SpacesWallet {
             Subject::NumId(id) => {
                 src.get_num_outpoint_by_id(id)?
                     .ok_or_else(|| anyhow::anyhow!("Num id not found"))?
+            }
+            Subject::Handle(_) => {
+                return Err(anyhow::anyhow!(
+                    "handle subjects are not supported for this operation"
+                ));
             }
         };
 
@@ -652,6 +690,11 @@ impl SpacesWallet {
                 let numout = src.get_numout(&outpoint)?
                     .ok_or_else(|| anyhow::anyhow!("Num output not found"))?;
                 numout.script_pubkey
+            }
+            Subject::Handle(_) => {
+                return Err(anyhow::anyhow!(
+                    "handle subjects are not supported for this operation"
+                ));
             }
         };
 
@@ -1693,5 +1736,30 @@ impl<'de> Deserialize<'de> for SpaceScriptSigningInfo {
         }
 
         deserializer.deserialize_seq(OpenSigningInfoVisitor)
+    }
+}
+
+#[cfg(test)]
+mod subject_tests {
+    use super::Subject;
+    use spaces_protocol::sname::NameLike;
+    use std::str::FromStr;
+
+    #[test]
+    fn subject_from_str_parses_multi_label_as_handle() {
+        let s = Subject::from_str("dictionary@mad").expect("parse");
+        match s {
+            Subject::Handle(n) => assert!(n.label_count() >= 2),
+            _ => panic!("expected Handle"),
+        }
+    }
+
+    #[test]
+    fn subject_from_str_plain_space_still_label() {
+        let s = Subject::from_str("mad").expect("parse");
+        match s {
+            Subject::Label(l) => assert_eq!(l.to_string(), "@mad"),
+            _ => panic!("expected Label"),
+        }
     }
 }

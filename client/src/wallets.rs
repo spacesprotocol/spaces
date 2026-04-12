@@ -394,6 +394,10 @@ fn resolve_subject_to_num_id<H: KeyHasher>(
             "expected a num id or numeric, not a space: '{}'",
             label
         )),
+        Subject::Handle(h) => Err(anyhow!(
+            "expected a num id or numeric, not a handle: '{}'",
+            h
+        )),
     }
 }
 
@@ -425,6 +429,9 @@ fn commit_params_to_req(
             NumId::from_spk::<Sha256>(info.spaceout.script_pubkey)
         }
         Subject::NumId(id) => *id,
+        Subject::Handle(h) => {
+            return Err(anyhow!("commit: handle '{}' is not a valid subject", h));
+        }
     };
 
     let num_info = chain
@@ -749,6 +756,12 @@ impl RpcWallet {
                     .get_num_info(id)?
                     .ok_or_else(|| anyhow::anyhow!("num id '{}' not found", id))?;
                 info.numout.num.name.to_slabel()
+            }
+            Subject::Handle(h) => {
+                return Err(anyhow::anyhow!(
+                    "handle '{}' is not supported for this operation",
+                    h
+                ));
             }
         };
 
@@ -1422,6 +1435,9 @@ impl RpcWallet {
                                     is_delegate: false,
                                 });
                             }
+                            Subject::Handle(h) => {
+                                return Err(anyhow!("transfer: handle '{}' is not a valid subject", h));
+                            }
                             Subject::Label(space) => {
                                 // Handle space transfer
                                 let spacehash = SpaceKey::from(Sha256::hash(space.as_ref()));
@@ -1695,6 +1711,9 @@ impl RpcWallet {
                                 create_num: true,
                             });
                         }
+                        Subject::Handle(h) => {
+                            return Err(anyhow!("operate: handle '{}' is not a valid subject", h));
+                        }
                     }
                 }
                 RpcWalletRequest::Delegate(params) => {
@@ -1712,6 +1731,12 @@ impl RpcWallet {
                     })
                 }
                 RpcWalletRequest::SetFallback(params) => match params.subject {
+                    Subject::Handle(ref h) => {
+                        return Err(anyhow!(
+                            "setfallback: handle '{}' is not supported; use a space or num",
+                            h
+                        ));
+                    }
                     Subject::Label(ref label) if !label.is_numeric() => {
                         let spacehash = SpaceKey::from(Sha256::hash(label.as_ref()));
                         let full = chain
@@ -2193,6 +2218,9 @@ fn find_delegate_utxo(chain: &mut Chain, subject: &Subject) -> anyhow::Result<Fu
                 anyhow!("delegate: numeric '{}' not found", label)
             })?;
             Some(id)
+        }
+        Subject::Handle(h) => {
+            return Err(anyhow!("delegate: handle '{}' is not a valid subject", h));
         }
         Subject::Label(_) => None,
     };

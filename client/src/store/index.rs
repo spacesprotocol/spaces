@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Mutex, RwLock};
 use anyhow::{anyhow, Result};
@@ -5,7 +6,7 @@ use borsh::BorshDeserialize;
 use rusqlite::{params, Connection};
 use spaces_nums::num_id::NumId;
 use spaces_nums::snumeric::SNumeric;
-use spaces_protocol::bitcoin::BlockHash;
+use spaces_protocol::bitcoin::{hashes::Hash as _, BlockHash};
 
 use crate::client::{BlockMeta, NumBlockMeta};
 
@@ -73,6 +74,70 @@ impl SqliteIndex {
             .unwrap()
             .spaces_blocks
             .push((hash, height, meta));
+    }
+
+    /// All spaces block rows merged with uncommitted staged entries, ordered by height.
+    pub fn list_spaces_blocks_merged(&self) -> Result<Vec<(u32, BlockHash, BlockMeta)>> {
+        let mut by_height: BTreeMap<u32, (BlockHash, BlockMeta)> = BTreeMap::new();
+
+        {
+            let conn = self.conn.lock().unwrap();
+            let mut stmt = conn.prepare_cached(
+                "SELECT block_height, block_hash, data FROM spaces_blocks ORDER BY block_height ASC",
+            )?;
+            let mut rows = stmt.query([])?;
+            while let Some(row) = rows.next()? {
+                let height: u32 = row.get(0)?;
+                let hash_bytes: Vec<u8> = row.get(1)?;
+                let data: Vec<u8> = row.get(2)?;
+                let hash = BlockHash::from_slice(&hash_bytes)
+                    .map_err(|_| anyhow!("invalid block hash length in spaces_blocks"))?;
+                let meta = BlockMeta::try_from_slice(&data)
+                    .map_err(|e| anyhow!("deserialize BlockMeta: {}", e))?;
+                by_height.insert(height, (hash, meta));
+            }
+        }
+
+        {
+            let staged = self.staged.read().unwrap();
+            for (hash, height, meta) in &staged.spaces_blocks {
+                by_height.insert(*height, (*hash, meta.clone()));
+            }
+        }
+
+        Ok(by_height.into_iter().map(|(h, (bh, m))| (h, bh, m)).collect())
+    }
+
+    /// All nums block rows merged with uncommitted staged entries, ordered by height.
+    pub fn list_nums_blocks_merged(&self) -> Result<Vec<(u32, BlockHash, NumBlockMeta)>> {
+        let mut by_height: BTreeMap<u32, (BlockHash, NumBlockMeta)> = BTreeMap::new();
+
+        {
+            let conn = self.conn.lock().unwrap();
+            let mut stmt = conn.prepare_cached(
+                "SELECT block_height, block_hash, data FROM nums_blocks ORDER BY block_height ASC",
+            )?;
+            let mut rows = stmt.query([])?;
+            while let Some(row) = rows.next()? {
+                let height: u32 = row.get(0)?;
+                let hash_bytes: Vec<u8> = row.get(1)?;
+                let data: Vec<u8> = row.get(2)?;
+                let hash = BlockHash::from_slice(&hash_bytes)
+                    .map_err(|_| anyhow!("invalid block hash length in nums_blocks"))?;
+                let meta = NumBlockMeta::try_from_slice(&data)
+                    .map_err(|e| anyhow!("deserialize NumBlockMeta: {}", e))?;
+                by_height.insert(height, (hash, meta));
+            }
+        }
+
+        {
+            let staged = self.staged.read().unwrap();
+            for (hash, height, meta) in &staged.nums_blocks {
+                by_height.insert(*height, (*hash, meta.clone()));
+            }
+        }
+
+        Ok(by_height.into_iter().map(|(h, (bh, m))| (h, bh, m)).collect())
     }
 
     pub fn get_spaces_block(&self, hash: &BlockHash) -> Result<Option<BlockMeta>> {
