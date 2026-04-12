@@ -335,13 +335,13 @@ impl RecordSet {
     /// Unpacks all records as zero-copy [`ParsedRecord`] references.
     /// Performs structural validation first.
     pub fn unpack(&self) -> Result<Vec<ParsedRecord<'_>>, Error> {
-        Ok(self.iter()?.iter().collect())
+        Ok(self.iter()?.collect())
     }
 
     /// Unpacks all records as owned [`Record`] values.
     /// Malformed records become `Record::Unknown`.
     pub fn unpack_owned(&self) -> Result<Vec<Record>, Error> {
-        Ok(self.iter()?.iter().map(|r| r.into()).collect())
+        Ok(self.iter()?.map(|r| r.into()).collect())
     }
 
     /// Returns the raw wire-format bytes.
@@ -661,27 +661,9 @@ impl<'a> From<ParsedRecord<'a>> for Record {
 ///
 /// Individual records may be `Malformed` if their rdata is invalid.
 #[derive(Debug)]
-pub struct RecordsIter<'a> {
-    data: &'a [u8],
-}
+pub struct RecordsIter<'a>(&'a [u8]);
 
-impl<'a> RecordsIter<'a> {
-    pub fn iter(&self) -> ParsedRecordIter<'a> {
-        ParsedRecordIter(self.data)
-    }
-}
-
-impl<'a> IntoIterator for &RecordsIter<'a> {
-    type Item = ParsedRecord<'a>;
-    type IntoIter = ParsedRecordIter<'a>;
-    fn into_iter(self) -> Self::IntoIter {
-        self.iter()
-    }
-}
-
-pub struct ParsedRecordIter<'a>(&'a [u8]);
-
-impl<'a> Iterator for ParsedRecordIter<'a> {
+impl<'a> Iterator for RecordsIter<'a> {
     type Item = ParsedRecord<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -802,7 +784,7 @@ impl RecordSet {
             index += 1;
         }
 
-        Ok(RecordsIter { data })
+        Ok(RecordsIter(data))
     }
 }
 
@@ -970,8 +952,10 @@ mod serde_impl {
         where
             S: Serializer,
         {
-            let records_iter = self.iter().map_err(serde::ser::Error::custom)?;
-            let records: Vec<Record> = records_iter.iter().map(|r| r.into()).collect();
+            let records: Vec<Record> = self.iter()
+                .map_err(serde::ser::Error::custom)?
+                .map(|r| r.into())
+                .collect();
             let mut seq = serializer.serialize_seq(Some(records.len()))?;
             for record in &records {
                 seq.serialize_element(record)?;
@@ -1721,8 +1705,7 @@ mod tests {
             Record::txt("btc", &["bc1qtest", "bc1qother"]),
         ]).unwrap();
 
-        let records = rs.iter().unwrap();
-        let parsed: Vec<_> = records.iter().collect();
+        let parsed: Vec<_> = rs.iter().unwrap().collect();
         assert_eq!(parsed.len(), 1);
         match &parsed[0] {
             ParsedRecord::Txt { key, value } => {
@@ -1740,8 +1723,7 @@ mod tests {
             Record::addr("eth", &["0xdead", "0xbeef"]),
         ]).unwrap();
 
-        let records = rs.iter().unwrap();
-        let parsed: Vec<_> = records.iter().collect();
+        let parsed: Vec<_> = rs.iter().unwrap().collect();
         match &parsed[0] {
             ParsedRecord::Addr { key, value } => {
                 assert_eq!(*key, "eth");
@@ -1757,8 +1739,7 @@ mod tests {
             Record::blob("avatar", vec![0x89, 0x50]),
         ]).unwrap();
 
-        let records = rs.iter().unwrap();
-        let parsed: Vec<_> = records.iter().collect();
+        let parsed: Vec<_> = rs.iter().unwrap().collect();
         match &parsed[0] {
             ParsedRecord::Blob { key, value } => {
                 assert_eq!(*key, "avatar");
@@ -1779,8 +1760,7 @@ mod tests {
             Record::sig(canonical.clone(), handle.clone(), vec![0xAB, 0xCD], 0),
         ]).unwrap();
 
-        let records = rs.iter().unwrap();
-        let parsed: Vec<_> = records.iter().collect();
+        let parsed: Vec<_> = rs.iter().unwrap().collect();
         assert_eq!(parsed.len(), 2);
         match &parsed[1] {
             ParsedRecord::Sig(sig) => {
@@ -1800,8 +1780,7 @@ mod tests {
             Record::txt("a", &["b"]),
         ]).unwrap();
 
-        let records = rs.iter().unwrap();
-        let parsed: Vec<_> = records.iter().collect();
+        let parsed: Vec<_> = rs.iter().unwrap().collect();
         assert_eq!(parsed.len(), 2);
         assert!(matches!(parsed[0], ParsedRecord::Seq(42)));
     }
@@ -1817,7 +1796,7 @@ mod tests {
 
         let rs = RecordSet::new(data);
         let records = rs.iter().unwrap(); // structural validation passes
-        let parsed: Vec<_> = records.iter().collect();
+        let parsed: Vec<_> = records.collect();
         assert_eq!(parsed.len(), 1);
         assert!(matches!(parsed[0], ParsedRecord::Malformed { rtype: TYPE_TXT, .. }));
     }
@@ -1830,8 +1809,7 @@ mod tests {
         data.extend_from_slice(&[1, 2, 3]);
 
         let rs = RecordSet::new(data);
-        let records = rs.iter().unwrap();
-        let parsed: Vec<_> = records.iter().collect();
+        let parsed: Vec<_> = rs.iter().unwrap().collect();
         assert!(matches!(parsed[0], ParsedRecord::Unknown { rtype: 0xFF, .. }));
     }
 
@@ -1868,7 +1846,7 @@ mod tests {
 
         let rs = RecordSet::new(data);
         let records = rs.iter().unwrap(); // structural check passes
-        let parsed: Vec<_> = records.iter().collect();
+        let parsed: Vec<_> = records.collect();
         assert_eq!(parsed.len(), 3);
         assert!(matches!(parsed[0], ParsedRecord::Txt { .. }));
         assert!(matches!(parsed[1], ParsedRecord::Malformed { rtype: TYPE_TXT, .. }));
