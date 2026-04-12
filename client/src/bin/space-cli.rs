@@ -1089,4 +1089,3 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
 fn default_rpc_url(chain: &ExtendedNetwork) -> String {
     format!("http://127.0.0.1:{}", default_spaces_rpc_port(chain))
 }
-
