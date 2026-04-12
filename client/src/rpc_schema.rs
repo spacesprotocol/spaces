@@ -547,14 +547,14 @@ pub fn build_schema() -> Vec<MethodSchema> {
         },
         MethodSchema {
             name: "getfallback",
-            description: "Get fallback data and parsed SIP-7 records for a subject",
+            description: "Get fallback data and parsed SIP-7 records for a subject. Supports * and ? wildcards for pattern matching (e.g. *@mad, @*).",
             params: vec![param(
                 "subject",
                 "Subject",
-                "@space, #numeric, num1... id, or handle (sub@space) for indexed lookup",
+                "@space, #numeric, num1... id, handle (sub@space) for indexed lookup, or wildcard pattern (*@mad, @*)",
                 json!("dictionary@mad"),
             )],
-            result_type: "Option<FallbackResponse>",
+            result_type: "Value",
             result_schema: Some(serde_json::to_value(schema_for!(FallbackResponse)).unwrap()),
             extra_examples: vec![],
         },

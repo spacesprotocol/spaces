@@ -177,6 +177,10 @@ pub enum ChainStateCommand {
         needle: String,
         resp: Responder<anyhow::Result<Option<Vec<u8>>>>,
     },
+    SearchFallbackByPattern {
+        pattern: String,
+        resp: Responder<anyhow::Result<BTreeMap<String, Vec<u8>>>>,
+    },
     GetBlockMeta {
         height_or_hash: HeightOrHash,
         resp: Responder<anyhow::Result<BlockMetaWithHash>>,
@@ -481,7 +485,7 @@ pub trait Rpc {
     async fn get_fallback(
         &self,
         subject: Subject,
-    ) -> Result<Option<FallbackResponse>, ErrorObjectOwned>;
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     #[method(name = "estimatefee")]
     async fn estimate_fee(
@@ -1534,7 +1538,28 @@ impl RpcServer for RpcServerImpl {
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
     }
 
-    async fn get_fallback(&self, subject: Subject) -> Result<Option<FallbackResponse>, ErrorObjectOwned> {
+    async fn get_fallback(&self, subject: Subject) -> Result<serde_json::Value, ErrorObjectOwned> {
+        if let Subject::HandlePattern(ref pattern) = subject {
+            let results = self.store
+                .search_fallback_by_pattern(pattern)
+                .await
+                .map_err(|e| ErrorObjectOwned::owned(-1, e.to_string(), None::<String>))?;
+
+            let map: BTreeMap<String, FallbackResponse> = results
+                .into_iter()
+                .map(|(name, raw)| {
+                    use base64::Engine;
+                    let encoded = base64::engine::general_purpose::STANDARD.encode(&raw);
+                    let rs = sip7::RecordSet::new(raw);
+                    let records = if rs.unpack().is_ok() { Some(rs) } else { None };
+                    (name, FallbackResponse { data: encoded, records })
+                })
+                .collect();
+
+            return serde_json::to_value(&map)
+                .map_err(|e| ErrorObjectOwned::owned(-1, e.to_string(), None::<String>));
+        }
+
         let data = match &subject {
             Subject::Handle(name) => {
                 let needle = name.to_string();
@@ -1563,19 +1588,22 @@ impl RpcServer for RpcServerImpl {
             }
         };
 
-        match data {
-            None => Ok(None),
+        let response = match data {
+            None => None,
             Some(raw) => {
                 use base64::Engine;
                 let encoded = base64::engine::general_purpose::STANDARD.encode(&raw);
                 let rs = sip7::RecordSet::new(raw);
                 let records = if rs.unpack().is_ok() { Some(rs) } else { None };
-                Ok(Some(FallbackResponse {
+                Some(FallbackResponse {
                     data: encoded,
                     records,
-                }))
+                })
             }
-        }
+        };
+
+        serde_json::to_value(&response)
+            .map_err(|e| ErrorObjectOwned::owned(-1, e.to_string(), None::<String>))
     }
 
     async fn estimate_fee(
@@ -1867,6 +1895,10 @@ impl AsyncChainState {
             }
             ChainStateCommand::FindFallbackByHandle { needle, resp } => {
                 let res = state.find_fallback_payload_by_handle(&needle);
+                let _ = resp.send(res);
+            }
+            ChainStateCommand::SearchFallbackByPattern { pattern, resp } => {
+                let res = state.search_fallback_by_pattern(&pattern);
                 let _ = resp.send(res);
             }
             ChainStateCommand::EstimateBid { target, resp } => {
@@ -2393,6 +2425,20 @@ impl AsyncChainState {
             .await?;
         resp_rx.await?
     }
+
+    pub async fn search_fallback_by_pattern(
+        &self,
+        pattern: &str,
+    ) -> anyhow::Result<BTreeMap<String, Vec<u8>>> {
+        let (resp, resp_rx) = oneshot::channel();
+        self.sender
+            .send(ChainStateCommand::SearchFallbackByPattern {
+                pattern: pattern.to_string(),
+                resp,
+            })
+            .await?;
+        resp_rx.await?
+    }
 }
 
 fn resolve_num_id(state: &mut Chain, subject: &Subject) -> anyhow::Result<NumId> {
@@ -2405,6 +2451,7 @@ fn resolve_num_id(state: &mut Chain, subject: &Subject) -> anyhow::Result<NumId>
         }
         Subject::Label(_) => Err(anyhow!("expected a num id or numeric, not a space")),
         Subject::Handle(h) => Err(anyhow!("expected a num id or numeric, not a handle: {}", h)),
+        Subject::HandlePattern(p) => Err(anyhow!("expected a num id or numeric, not a pattern: {}", p)),
     }
 }
 
@@ -2477,6 +2524,7 @@ fn resolve_label(state: &mut Chain, subject: &Subject) -> anyhow::Result<SLabel>
             Ok(info.numout.num.name.to_slabel())
         }
         Subject::Handle(h) => Err(anyhow!("expected a space or num, not a handle: {}", h)),
+        Subject::HandlePattern(p) => Err(anyhow!("expected a space or num, not a pattern: {}", p)),
     }
 }
 
@@ -2504,6 +2552,9 @@ fn get_delegation(state: &mut Chain, subject: &Subject) -> anyhow::Result<Option
         Subject::NumId(id) => return Ok(Some(id.clone())),
         Subject::Handle(h) => {
             return Err(anyhow!("expected a space, numeric, or num id, not a handle: {}", h));
+        }
+        Subject::HandlePattern(p) => {
+            return Err(anyhow!("expected a space, numeric, or num id, not a pattern: {}", p));
         }
     };
 

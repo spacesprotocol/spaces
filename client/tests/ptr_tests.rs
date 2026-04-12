@@ -910,7 +910,8 @@ async fn it_should_set_and_get_space_fallback(rig: &TestRig) -> anyhow::Result<(
 
     // Verify no fallback data initially via getfallback
     let subject = Subject::Label(space_name.clone());
-    let fallback_before = rig.spaced.client.get_fallback(subject.clone()).await?;
+    let fallback_before: Option<spaces_client::rpc::FallbackResponse> =
+        serde_json::from_value(rig.spaced.client.get_fallback(subject.clone()).await?)?;
     assert!(fallback_before.is_none(), "space should have no fallback data initially");
     println!("✓ No fallback data initially");
 
@@ -955,8 +956,9 @@ async fn it_should_set_and_get_space_fallback(rig: &TestRig) -> anyhow::Result<(
     println!("✓ Covenant data matches wire-encoded SIP-7 records");
 
     // Verify via getfallback RPC
-    let fallback = rig.spaced.client.get_fallback(subject.clone()).await?
-        .expect("getfallback should return data");
+    let fallback: spaces_client::rpc::FallbackResponse =
+        serde_json::from_value(rig.spaced.client.get_fallback(subject.clone()).await?)
+            .expect("getfallback should return data");
     let parsed = fallback.records.expect("should parse as SIP-7 records");
     assert_eq!(parsed.unpack().unwrap().len(), 2, "should have 2 records");
     println!("✓ getfallback returns parsed SIP-7 records");
@@ -978,8 +980,9 @@ async fn it_should_set_and_get_space_fallback(rig: &TestRig) -> anyhow::Result<(
     mine_and_sync(rig, 1).await?;
 
     // Data should persist after transfer
-    let fallback_after_transfer = rig.spaced.client.get_fallback(subject.clone()).await?
-        .expect("fallback data should persist after transfer");
+    let fallback_after_transfer: spaces_client::rpc::FallbackResponse =
+        serde_json::from_value(rig.spaced.client.get_fallback(subject.clone()).await?)
+            .expect("fallback data should persist after transfer");
     assert!(fallback_after_transfer.records.is_some(), "SIP-7 records should still parse");
     println!("✓ Fallback data persists after transfer");
 
@@ -1002,8 +1005,9 @@ async fn it_should_set_and_get_space_fallback(rig: &TestRig) -> anyhow::Result<(
     assert!(wallet_res_err(&bob_set).is_ok(), "Bob should be able to setfallback on his space");
     mine_and_sync(rig, 1).await?;
 
-    let fallback_bob = rig.spaced.client.get_fallback(subject).await?
-        .expect("should have fallback data");
+    let fallback_bob: spaces_client::rpc::FallbackResponse =
+        serde_json::from_value(rig.spaced.client.get_fallback(subject).await?)
+            .expect("should have fallback data");
     let bob_parsed = fallback_bob.records.expect("should parse as SIP-7");
     assert_eq!(bob_parsed.unpack().unwrap().len(), 1, "should have 1 record now");
     println!("✓ Bob successfully overwrote fallback data");

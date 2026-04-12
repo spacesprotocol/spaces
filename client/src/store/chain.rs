@@ -270,6 +270,13 @@ impl Chain {
         crate::fallback_handle::find_fallback_payload_by_handle(self, needle)
     }
 
+    pub fn search_fallback_by_pattern(
+        &self,
+        pattern: &str,
+    ) -> anyhow::Result<std::collections::BTreeMap<String, Vec<u8>>> {
+        crate::fallback_handle::search_fallback_by_pattern(self, pattern)
+    }
+
     pub fn rollout_iter(&self) -> anyhow::Result<(RolloutIterator, ReadTx)> {
         self.db.sp.store.rollout_iter()
     }

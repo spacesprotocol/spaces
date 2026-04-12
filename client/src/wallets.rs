@@ -398,6 +398,10 @@ fn resolve_subject_to_num_id<H: KeyHasher>(
             "expected a num id or numeric, not a handle: '{}'",
             h
         )),
+        Subject::HandlePattern(p) => Err(anyhow!(
+            "expected a num id or numeric, not a pattern: '{}'",
+            p
+        )),
     }
 }
 
@@ -431,6 +435,9 @@ fn commit_params_to_req(
         Subject::NumId(id) => *id,
         Subject::Handle(h) => {
             return Err(anyhow!("commit: handle '{}' is not a valid subject", h));
+        }
+        Subject::HandlePattern(p) => {
+            return Err(anyhow!("commit: pattern '{}' is not a valid subject", p));
         }
     };
 
@@ -761,6 +768,12 @@ impl RpcWallet {
                 return Err(anyhow::anyhow!(
                     "handle '{}' is not supported for this operation",
                     h
+                ));
+            }
+            Subject::HandlePattern(p) => {
+                return Err(anyhow::anyhow!(
+                    "pattern '{}' is not supported for this operation",
+                    p
                 ));
             }
         };
@@ -1438,6 +1451,9 @@ impl RpcWallet {
                             Subject::Handle(h) => {
                                 return Err(anyhow!("transfer: handle '{}' is not a valid subject", h));
                             }
+                            Subject::HandlePattern(p) => {
+                                return Err(anyhow!("transfer: pattern '{}' is not a valid subject", p));
+                            }
                             Subject::Label(space) => {
                                 // Handle space transfer
                                 let spacehash = SpaceKey::from(Sha256::hash(space.as_ref()));
@@ -1714,6 +1730,9 @@ impl RpcWallet {
                         Subject::Handle(h) => {
                             return Err(anyhow!("operate: handle '{}' is not a valid subject", h));
                         }
+                        Subject::HandlePattern(p) => {
+                            return Err(anyhow!("operate: pattern '{}' is not a valid subject", p));
+                        }
                     }
                 }
                 RpcWalletRequest::Delegate(params) => {
@@ -1735,6 +1754,12 @@ impl RpcWallet {
                         return Err(anyhow!(
                             "setfallback: handle '{}' is not supported; use a space or num",
                             h
+                        ));
+                    }
+                    Subject::HandlePattern(ref p) => {
+                        return Err(anyhow!(
+                            "setfallback: pattern '{}' is not supported; use a space or num",
+                            p
                         ));
                     }
                     Subject::Label(ref label) if !label.is_numeric() => {
@@ -2221,6 +2246,9 @@ fn find_delegate_utxo(chain: &mut Chain, subject: &Subject) -> anyhow::Result<Fu
         }
         Subject::Handle(h) => {
             return Err(anyhow!("delegate: handle '{}' is not a valid subject", h));
+        }
+        Subject::HandlePattern(p) => {
+            return Err(anyhow!("delegate: pattern '{}' is not a valid subject", p));
         }
         Subject::Label(_) => None,
     };

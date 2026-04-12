@@ -85,12 +85,15 @@ pub struct Balance {
     pub details: BalanceDetails,
 }
 
-/// A space name (@bitcoin), numeric (#800000-3), num id (num1...), or multi-label handle (sub@space)
+/// A space name (@bitcoin), numeric (#800000-3), num id (num1...), multi-label handle (sub@space),
+/// or a wildcard pattern containing `*`/`?` for fallback search.
 #[derive(Debug, Clone)]
 pub enum Subject {
     Label(SLabel),
     NumId(NumId),
     Handle(SName),
+    /// Wildcard pattern for `getfallback` searches (e.g. `*@mad`, `@*`, `*@*`).
+    HandlePattern(String),
 }
 
 impl From<SLabel> for Subject {
@@ -117,6 +120,7 @@ impl fmt::Display for Subject {
             Subject::Label(label) => write!(f, "{}", label),
             Subject::NumId(id) => write!(f, "{}", id),
             Subject::Handle(name) => write!(f, "{}", name),
+            Subject::HandlePattern(pat) => write!(f, "{}", pat),
         }
     }
 }
@@ -125,6 +129,11 @@ impl FromStr for Subject {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.contains('*') || s.contains('?') {
+            let lower = s.to_ascii_lowercase();
+            return Ok(Subject::HandlePattern(lower));
+        }
+
         if s.starts_with(&format!("{}1", NUM_HRP)) {
             return NumId::from_str(s)
                 .map(Subject::NumId)
@@ -161,6 +170,7 @@ impl Serialize for Subject {
             Subject::Label(label) => serializer.serialize_str(&label.to_string()),
             Subject::NumId(id) => serializer.serialize_str(&id.to_string()),
             Subject::Handle(name) => serializer.serialize_str(&name.to_string()),
+            Subject::HandlePattern(pat) => serializer.serialize_str(pat),
         }
     }
 }
@@ -515,7 +525,7 @@ impl SpacesWallet {
                 src.get_num_outpoint_by_id(id)?
                     .ok_or_else(|| anyhow::anyhow!("Num id not found"))?
             }
-            Subject::Handle(_) => {
+            Subject::Handle(_) | Subject::HandlePattern(_) => {
                 return Err(anyhow::anyhow!(
                     "handle subjects are not supported for this operation"
                 ));
@@ -569,7 +579,7 @@ impl SpacesWallet {
                     .ok_or_else(|| anyhow::anyhow!("Num output not found"))?;
                 numout.script_pubkey
             }
-            Subject::Handle(_) => {
+            Subject::Handle(_) | Subject::HandlePattern(_) => {
                 return Err(anyhow::anyhow!(
                     "handle subjects are not supported for this operation"
                 ));
@@ -629,7 +639,7 @@ impl SpacesWallet {
                 src.get_num_outpoint_by_id(id)?
                     .ok_or_else(|| anyhow::anyhow!("Num id not found"))?
             }
-            Subject::Handle(_) => {
+            Subject::Handle(_) | Subject::HandlePattern(_) => {
                 return Err(anyhow::anyhow!(
                     "handle subjects are not supported for this operation"
                 ));
@@ -691,7 +701,7 @@ impl SpacesWallet {
                     .ok_or_else(|| anyhow::anyhow!("Num output not found"))?;
                 numout.script_pubkey
             }
-            Subject::Handle(_) => {
+            Subject::Handle(_) | Subject::HandlePattern(_) => {
                 return Err(anyhow::anyhow!(
                     "handle subjects are not supported for this operation"
                 ));
@@ -1760,6 +1770,42 @@ mod subject_tests {
         match s {
             Subject::Label(l) => assert_eq!(l.to_string(), "@mad"),
             _ => panic!("expected Label"),
+        }
+    }
+
+    #[test]
+    fn subject_from_str_wildcard_star_at_star() {
+        let s = Subject::from_str("*@*").expect("parse");
+        match s {
+            Subject::HandlePattern(p) => assert_eq!(p, "*@*"),
+            _ => panic!("expected HandlePattern, got {:?}", s),
+        }
+    }
+
+    #[test]
+    fn subject_from_str_wildcard_star_at_name() {
+        let s = Subject::from_str("*@mad").expect("parse");
+        match s {
+            Subject::HandlePattern(p) => assert_eq!(p, "*@mad"),
+            _ => panic!("expected HandlePattern, got {:?}", s),
+        }
+    }
+
+    #[test]
+    fn subject_from_str_wildcard_at_star() {
+        let s = Subject::from_str("@*").expect("parse");
+        match s {
+            Subject::HandlePattern(p) => assert_eq!(p, "@*"),
+            _ => panic!("expected HandlePattern, got {:?}", s),
+        }
+    }
+
+    #[test]
+    fn subject_from_str_wildcard_question() {
+        let s = Subject::from_str("d?ct@mad").expect("parse");
+        match s {
+            Subject::HandlePattern(p) => assert_eq!(p, "d?ct@mad"),
+            _ => panic!("expected HandlePattern, got {:?}", s),
         }
     }
 }
