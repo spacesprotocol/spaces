@@ -115,7 +115,7 @@ async fn it_should_create_nums(rig: &TestRig) -> anyhow::Result<()> {
     let xfer = wallet_do(
         rig,
         ALICE,
-        vec![RpcWalletRequest::Transfer(TransferSpacesParams {
+        vec![RpcWalletRequest::Transfer(TransferSpacesParams { secret: None,
             spaces: vec![Subject::NumId(id0)],
             to: Some(addr1.clone()),
             data: None,
@@ -561,7 +561,7 @@ async fn it_should_reject_duplicate_num_id_delegations(rig: &TestRig) -> anyhow:
     let transfer1 = wallet_do(
         rig,
         ALICE,
-        vec![RpcWalletRequest::Transfer(TransferSpacesParams {
+        vec![RpcWalletRequest::Transfer(TransferSpacesParams { secret: None,
             spaces: vec![Subject::Label(space1_name.clone())],
             to: Some(common_addr.clone()),
             data: None,
@@ -584,7 +584,7 @@ async fn it_should_reject_duplicate_num_id_delegations(rig: &TestRig) -> anyhow:
     let transfer2 = wallet_do(
         rig,
         ALICE,
-        vec![RpcWalletRequest::Transfer(TransferSpacesParams {
+        vec![RpcWalletRequest::Transfer(TransferSpacesParams { secret: None,
             spaces: vec![Subject::Label(space2_name.clone())],
             to: Some(common_addr.clone()),
             data: None,
@@ -613,7 +613,7 @@ async fn it_should_reject_duplicate_num_id_delegations(rig: &TestRig) -> anyhow:
     let transfer_away = wallet_do(
         rig,
         ALICE,
-        vec![RpcWalletRequest::Transfer(TransferSpacesParams {
+        vec![RpcWalletRequest::Transfer(TransferSpacesParams { secret: None,
             spaces: vec![Subject::Label(space1_name.clone())],
             to: Some(new_addr),
             data: None,
@@ -634,7 +634,7 @@ async fn it_should_reject_duplicate_num_id_delegations(rig: &TestRig) -> anyhow:
     let transfer2_retry = wallet_do(
         rig,
         ALICE,
-        vec![RpcWalletRequest::Transfer(TransferSpacesParams {
+        vec![RpcWalletRequest::Transfer(TransferSpacesParams { secret: None,
             spaces: vec![Subject::Label(space2_name.clone())],
             to: Some(common_addr),
             data: None,
@@ -685,7 +685,7 @@ async fn it_should_restore_delegation_when_transferring_back(rig: &TestRig) -> a
     let setup_transfer = wallet_do(
         rig,
         ALICE,
-        vec![RpcWalletRequest::Transfer(TransferSpacesParams {
+        vec![RpcWalletRequest::Transfer(TransferSpacesParams { secret: None,
             spaces: vec![Subject::Label(space_name.clone())],
             to: Some(original_addr.clone()),
             data: None,
@@ -714,7 +714,7 @@ async fn it_should_restore_delegation_when_transferring_back(rig: &TestRig) -> a
     let transfer1 = wallet_do(
         rig,
         ALICE,
-        vec![RpcWalletRequest::Transfer(TransferSpacesParams {
+        vec![RpcWalletRequest::Transfer(TransferSpacesParams { secret: None,
             spaces: vec![Subject::Label(space_name.clone())],
             to: Some(new_addr.clone()),
             data: None,
@@ -744,7 +744,7 @@ async fn it_should_restore_delegation_when_transferring_back(rig: &TestRig) -> a
     let transfer2 = wallet_do(
         rig,
         ALICE,
-        vec![RpcWalletRequest::Transfer(TransferSpacesParams {
+        vec![RpcWalletRequest::Transfer(TransferSpacesParams { secret: None,
             spaces: vec![Subject::Label(space_name.clone())],
             to: Some(original_addr.clone()),
             data: None,
@@ -832,7 +832,7 @@ async fn it_should_set_and_persist_ptr_data(rig: &TestRig) -> anyhow::Result<()>
     let transfer = wallet_do(
         rig,
         ALICE,
-        vec![RpcWalletRequest::Transfer(TransferSpacesParams {
+        vec![RpcWalletRequest::Transfer(TransferSpacesParams { secret: None,
             spaces: vec![Subject::NumId(id)],
             to: Some(bob_addr.clone()),
             data: None,
@@ -969,7 +969,7 @@ async fn it_should_set_and_get_space_fallback(rig: &TestRig) -> anyhow::Result<(
     let transfer = wallet_do(
         rig,
         ALICE,
-        vec![RpcWalletRequest::Transfer(TransferSpacesParams {
+        vec![RpcWalletRequest::Transfer(TransferSpacesParams { secret: None,
             spaces: vec![Subject::Label(space_name.clone())],
             to: Some(bob_addr),
             data: None,
@@ -1066,7 +1066,123 @@ async fn run_ptr_tests() -> anyhow::Result<()> {
     println!("\n=== Running Multiple Nums Same Tx Tests ===");
     it_should_create_multiple_nums_same_tx(&rig).await?;
 
+    println!("\n=== Running Foreign Num Transfer Tests ===");
+    it_should_transfer_foreign_num_with_secret(&rig).await?;
+
     println!("\n=== All tests passed! ===");
+    Ok(())
+}
+
+fn gen_p2tr_keypair() -> (bitcoin::ScriptBuf, [u8; 32]) {
+    use bitcoin::secp256k1::{Secp256k1, Keypair};
+    use bitcoin::key::TapTweak;
+    use bitcoin::script::Builder;
+    use bitcoin::opcodes::all::OP_PUSHNUM_1;
+
+    let secp = Secp256k1::new();
+    let (secret_key, _) = secp.generate_keypair(&mut rand::thread_rng());
+    let keypair = Keypair::from_secret_key(&secp, &secret_key);
+    let tweaked = keypair.tap_tweak(&secp, None);
+    let (xonly, _) = tweaked.to_keypair().x_only_public_key();
+
+    let spk = Builder::new()
+        .push_opcode(OP_PUSHNUM_1)
+        .push_slice(xonly.serialize())
+        .into_script();
+
+    let tweaked_secret = tweaked.to_keypair().secret_key().secret_bytes();
+    (spk, tweaked_secret)
+}
+
+async fn it_should_transfer_foreign_num_with_secret(rig: &TestRig) -> anyhow::Result<()> {
+    sync_all(rig).await?;
+
+    // Generate a keypair not owned by any wallet
+    let (spk, secret) = gen_p2tr_keypair();
+    let num_id = NumId::from_spk::<Sha256>(spk.clone());
+    println!("Test 1: Create num bound to external key (num_id={})", num_id);
+
+    // Create a num bound to the external spk
+    wallet_do(rig, ALICE, vec![
+        RpcWalletRequest::CreateNum(CreateNumParams {
+            bind_spk: Some(spk.clone()),
+        }),
+    ], false).await?;
+    mine_and_sync(rig, 1).await?;
+
+    // Verify the num exists
+    let num_info = rig.spaced.client.get_num(Subject::NumId(num_id)).await?
+        .expect("num should exist");
+    assert_eq!(num_info.numout.script_pubkey, spk, "num should be bound to external spk");
+    println!("  Num created: {} (id={})", num_info.numout.num.name, num_id);
+
+    // Before transfer: num should appear in external list, not owned list
+    rig.wait_until_wallet_synced(ALICE).await?;
+    let owned_before = rig.spaced.client.wallet_list_nums(ALICE, None).await?;
+    let external_before = rig.spaced.client.wallet_list_nums(ALICE, Some("external".to_string())).await?;
+    assert!(!owned_before.nums.iter().any(|n| n.numout.num.id == num_id),
+        "num should NOT be in owned list before transfer");
+    assert!(external_before.nums.iter().any(|n| n.numout.num.id == num_id),
+        "num should be in external list before transfer");
+    println!("✓ Num correctly listed as external before transfer");
+
+    // Test 1: Transfer the foreign num to ALICE's wallet using the secret
+    println!("\nTest 2: Transfer foreign num to wallet using secret key");
+    let secret_hex = hex::encode(secret);
+    let result = wallet_do(rig, ALICE, vec![
+        RpcWalletRequest::Transfer(TransferSpacesParams {
+            secret: Some(secret_hex.clone()),
+            spaces: vec![Subject::NumId(num_id)],
+            to: None, // transfer to self (wallet's own address)
+            data: None,
+        }),
+    ], false).await?;
+    assert!(wallet_res_err(&result).is_ok(), "transfer with secret should succeed");
+    mine_and_sync(rig, 1).await?;
+    rig.wait_until_wallet_synced(ALICE).await?;
+
+    // Verify ALICE's wallet now lists the num as owned, not external
+    let owned_after = rig.spaced.client.wallet_list_nums(ALICE, None).await?;
+    let external_after = rig.spaced.client.wallet_list_nums(ALICE, Some("external".to_string())).await?;
+    assert!(owned_after.nums.iter().any(|n| n.numout.num.id == num_id),
+        "num should be in owned list after transfer");
+    assert!(!external_after.nums.iter().any(|n| n.numout.num.id == num_id),
+        "num should NOT be in external list after transfer");
+    println!("✓ Foreign num transferred to wallet, correctly moved from external to owned");
+
+    // Test 2: Generate a second keypair, transfer using secret to that external address
+    println!("\nTest 3: Transfer num from wallet to a new external key using wallet ownership");
+    let (spk2, _secret2) = gen_p2tr_keypair();
+    let addr2 = SpaceAddress(bitcoin::Address::from_script(&spk2, bitcoin::Network::Regtest)
+        .expect("valid address"));
+
+    let result2 = wallet_do(rig, ALICE, vec![
+        RpcWalletRequest::Transfer(TransferSpacesParams {
+            secret: None, // ALICE owns it now, no secret needed
+            spaces: vec![Subject::NumId(num_id)],
+            to: Some(addr2.to_string()),
+            data: None,
+        }),
+    ], false).await?;
+    assert!(wallet_res_err(&result2).is_ok(), "transfer to external address should succeed");
+    mine_and_sync(rig, 1).await?;
+
+    // Verify the num is now at the new spk
+    let num_after = rig.spaced.client.get_num(Subject::NumId(num_id)).await?
+        .expect("num should still exist");
+    assert_eq!(num_after.numout.script_pubkey, spk2, "num should be at new external spk");
+    println!("✓ Num transferred to new external address");
+
+    // After transferring out: should be back in external list, not owned
+    rig.wait_until_wallet_synced(ALICE).await?;
+    let owned_final = rig.spaced.client.wallet_list_nums(ALICE, None).await?;
+    let external_final = rig.spaced.client.wallet_list_nums(ALICE, Some("external".to_string())).await?;
+    assert!(!owned_final.nums.iter().any(|n| n.numout.num.id == num_id),
+        "num should NOT be in owned list after transferring out");
+    assert!(external_final.nums.iter().any(|n| n.numout.num.id == num_id),
+        "num should be back in external list after transferring out");
+    println!("✓ Num correctly back in external list after transferring out");
+
     Ok(())
 }
 
@@ -1093,7 +1209,7 @@ async fn it_should_transfer_ptr_with_n_to_n_rule(rig: &TestRig) -> anyhow::Resul
         // Transfer to addr1 with SAME value (should use n→n rule)
         let addr1 = rig.spaced.client.wallet_get_new_address(BOB, AddressKind::Space).await?;
         wallet_do(rig, ALICE, vec![
-            RpcWalletRequest::Transfer(TransferSpacesParams {
+            RpcWalletRequest::Transfer(TransferSpacesParams { secret: None,
                 spaces: vec![Subject::NumId(id)],
                 to: Some(addr1.clone()),
                 data: None,
@@ -1132,12 +1248,12 @@ async fn it_should_transfer_ptr_with_n_to_n_rule(rig: &TestRig) -> anyhow::Resul
         let dest_b = rig.spaced.client.wallet_get_new_address(BOB, AddressKind::Space).await?;
 
         wallet_do(rig, ALICE, vec![
-            RpcWalletRequest::Transfer(TransferSpacesParams {
+            RpcWalletRequest::Transfer(TransferSpacesParams { secret: None,
                 spaces: vec![Subject::NumId(id_a)],
                 to: Some(dest_a.clone()),
                 data: None,
             }),
-            RpcWalletRequest::Transfer(TransferSpacesParams {
+            RpcWalletRequest::Transfer(TransferSpacesParams { secret: None,
                 spaces: vec![Subject::NumId(id_b)],
                 to: Some(dest_b.clone()),
                 data: None,
@@ -1305,7 +1421,7 @@ async fn it_should_authorize_numeric_to_another_wallet(rig: &TestRig) -> anyhow:
     ], false).await?;
     mine_and_sync(rig, 1).await?;
 
-    let alice_nums = rig.spaced.client.wallet_list_nums(ALICE).await?;
+    let alice_nums = rig.spaced.client.wallet_list_nums(ALICE, None).await?;
     let num_entry = alice_nums.nums.last().expect("Alice should have a num");
     let numeric_label = num_entry.numout.num.name.to_slabel();
     let num_id = num_entry.numout.num.id;
@@ -1340,7 +1456,7 @@ async fn it_should_authorize_numeric_to_another_wallet(rig: &TestRig) -> anyhow:
     let bob_addr = rig.spaced.client
         .wallet_get_new_address(BOB, AddressKind::Space).await?;
     let authorize_res = wallet_do(rig, ALICE, vec![
-        RpcWalletRequest::Transfer(TransferSpacesParams {
+        RpcWalletRequest::Transfer(TransferSpacesParams { secret: None,
             spaces: vec![Subject::NumId(delegation_id)],
             to: Some(bob_addr),
             data: None,
@@ -1451,7 +1567,7 @@ async fn it_should_create_multiple_nums_same_tx(rig: &TestRig) -> anyhow::Result
     sync_all(rig).await?;
 
     println!("Test 1: Create two nums in a single transaction (auto-generated addresses)");
-    let before = rig.spaced.client.wallet_list_nums(ALICE).await?;
+    let before = rig.spaced.client.wallet_list_nums(ALICE, None).await?;
     let before_count = before.nums.len();
 
     wallet_do(rig, ALICE, vec![
@@ -1460,7 +1576,7 @@ async fn it_should_create_multiple_nums_same_tx(rig: &TestRig) -> anyhow::Result
     ], false).await?;
     mine_and_sync(rig, 1).await?;
 
-    let after = rig.spaced.client.wallet_list_nums(ALICE).await?;
+    let after = rig.spaced.client.wallet_list_nums(ALICE, None).await?;
     assert_eq!(after.nums.len(), before_count + 2, "two new nums created");
 
     let new_nums: Vec<_> = after.nums.iter()

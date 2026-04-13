@@ -314,6 +314,7 @@ pub enum WalletCommand {
         resp: crate::rpc::Responder<anyhow::Result<ListSpacesResponse>>,
     },
     ListPtrs {
+        external: bool,
         resp: crate::rpc::Responder<anyhow::Result<ListNumsResponse>>,
     },
     Buy {
@@ -691,8 +692,12 @@ impl RpcWallet {
                 let result = Self::list_spaces(wallet, chain);
                 _ = resp.send(result);
             }
-            WalletCommand::ListPtrs { resp } => {
-                let result = Self::list_nums(wallet, chain);
+            WalletCommand::ListPtrs { external, resp } => {
+                let result = if external {
+                    Self::list_external_nums(wallet, chain)
+                } else {
+                    Self::list_nums(wallet, chain)
+                };
                 _ = resp.send(result);
             }
             WalletCommand::ListBidouts { resp } => {
@@ -1108,23 +1113,57 @@ impl RpcWallet {
     fn list_nums(wallet: &mut SpacesWallet, chain: &mut Chain) -> anyhow::Result<ListNumsResponse> {
         let mut nums: Vec<NumEntry> = Vec::new();
         for unspent in wallet.list_unspent() {
-            let snum = NumId::from_spk::<Sha256>(unspent.txout.script_pubkey);
-            let Some(fpo) = chain.get_num_info(&snum)? else {
+            let Some(numout) = chain.get_numout(&unspent.outpoint)? else {
                 continue;
             };
-            if fpo.outpoint() != unspent.outpoint {
+            let rsk = DelegatorKey::from_id::<Sha256>(numout.num.id);
+            let delegating_for = chain.get_delegator(&rsk)?;
+            nums.push(NumEntry {
+                txid: unspent.outpoint.txid,
+                numout,
+                delegating_for,
+            })
+        }
+
+        Ok(ListNumsResponse { nums })
+    }
+
+    fn list_external_nums(wallet: &mut SpacesWallet, chain: &mut Chain) -> anyhow::Result<ListNumsResponse> {
+        use spaces_wallet::tx_event::CreateNumEventDetails;
+
+        let mut nums: Vec<NumEntry> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+
+        for event in wallet.list_create_num_events()? {
+            let Some(details) = event.details else { continue };
+            let Ok(create) = serde_json::from_value::<CreateNumEventDetails>(details) else {
+                continue;
+            };
+
+            let num_id = NumId::from_spk::<Sha256>(create.genesis_spk.clone());
+            if !seen.insert(num_id) {
                 continue;
             }
-            let rsk = DelegatorKey::from_id::<Sha256>(snum);
+
+            let Some(fpo) = chain.get_num_info(&num_id)? else {
+                continue;
+            };
+
+            // Only include if the wallet doesn't own the current output
+            if wallet.is_mine(fpo.numout.script_pubkey.clone()) {
+                continue;
+            }
+
+            let rsk = DelegatorKey::from_id::<Sha256>(num_id);
             let delegating_for = chain.get_delegator(&rsk)?;
             nums.push(NumEntry {
                 txid: fpo.txid,
                 numout: fpo.numout,
                 delegating_for,
-            })
+            });
         }
 
-        Ok(ListNumsResponse { nums: nums })
+        Ok(ListNumsResponse { nums })
     }
 
     fn list_spaces(
@@ -1380,6 +1419,19 @@ impl RpcWallet {
                     });
                 }
                 RpcWalletRequest::Transfer(params) => {
+                    let secret: Option<[u8; 32]> = match &params.secret {
+                        Some(hex) => {
+                            let bytes = hex::decode(hex)
+                                .map_err(|_| anyhow!("invalid hex secret key"))?;
+                            if bytes.len() != 32 {
+                                return Err(anyhow!("secret key must be 32 bytes"));
+                            }
+                            let mut arr = [0u8; 32];
+                            arr.copy_from_slice(&bytes);
+                            Some(arr)
+                        }
+                        None => None,
+                    };
                     let recipient = if let Some(to) = params.to {
                         match Self::resolve(network, chain, &to, true)? {
                             None => return Err(anyhow!("transfer: could not resolve '{}'", to)),
@@ -1394,11 +1446,11 @@ impl RpcWallet {
                         match item {
                             Subject::NumId(id) => {
                                 let num = match chain.get_num_info(id)? {
-                                    None => return Err(anyhow!("transfer: num '{}' not found or not owned", id)),
-                                    Some(full) if !wallet.is_mine(full.numout.script_pubkey.clone()) => {
+                                    None => return Err(anyhow!("transfer: num '{}' not found", id)),
+                                    Some(full) if secret.is_none() && !wallet.is_mine(full.numout.script_pubkey.clone()) => {
                                         return Err(anyhow!("transfer: you don't own num '{}'", id))
                                     }
-                                    Some(full) if wallet.get_utxo(OutPoint::new(full.txid, full.numout.n as u32)).is_none() => {
+                                    Some(full) if secret.is_none() && wallet.get_utxo(OutPoint::new(full.txid, full.numout.n as u32)).is_none() => {
                                         return Err(anyhow!(
                                             "transfer '{}': wallet already has a pending tx for this num",
                                             id
@@ -1416,6 +1468,7 @@ impl RpcWallet {
                                     num,
                                     recipient: recipient_addr,
                                     is_delegate: false,
+                                    secret,
                                 });
                             }
                             Subject::Label(label) if label.is_numeric() => {
@@ -1424,11 +1477,11 @@ impl RpcWallet {
                                     anyhow!("transfer: numeric '{}' not found", numeric)
                                 })?;
                                 let num = match chain.get_num_info(&id)? {
-                                    None => return Err(anyhow!("transfer: num '{}' not found or not owned", id)),
-                                    Some(full) if !wallet.is_mine(full.numout.script_pubkey.clone()) => {
+                                    None => return Err(anyhow!("transfer: num '{}' not found", id)),
+                                    Some(full) if secret.is_none() && !wallet.is_mine(full.numout.script_pubkey.clone()) => {
                                         return Err(anyhow!("transfer: you don't own num '{}'", id))
                                     }
-                                    Some(full) if wallet.get_utxo(OutPoint::new(full.txid, full.numout.n as u32)).is_none() => {
+                                    Some(full) if secret.is_none() && wallet.get_utxo(OutPoint::new(full.txid, full.numout.n as u32)).is_none() => {
                                         return Err(anyhow!(
                                             "transfer '{}': wallet already has a pending tx for this num",
                                             id
@@ -1446,6 +1499,7 @@ impl RpcWallet {
                                     num,
                                     recipient: recipient_addr,
                                     is_delegate: false,
+                                    secret,
                                 });
                             }
                             Subject::Handle(h) => {
@@ -1747,6 +1801,7 @@ impl RpcWallet {
                         num: delegate_utxo,
                         recipient: SpaceAddress::from(r),
                         is_delegate: true,
+                        secret: None,
                     })
                 }
                 RpcWalletRequest::SetFallback(params) => match params.subject {
@@ -1816,6 +1871,7 @@ impl RpcWallet {
                                 num: num_info,
                                 recipient,
                                 is_delegate: false,
+                                secret: None,
                             })
                             .add_data(params.data);
                     }
@@ -2109,9 +2165,9 @@ impl RpcWallet {
         resp_rx.await?
     }
 
-    pub async fn send_list_nums(&self) -> anyhow::Result<ListNumsResponse> {
+    pub async fn send_list_nums(&self, external: bool) -> anyhow::Result<ListNumsResponse> {
         let (resp, resp_rx) = oneshot::channel();
-        self.sender.send(WalletCommand::ListPtrs { resp }).await?;
+        self.sender.send(WalletCommand::ListPtrs { external, resp }).await?;
         resp_rx.await?
     }
 

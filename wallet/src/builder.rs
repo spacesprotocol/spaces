@@ -13,11 +13,7 @@ use bdk_wallet::{
     tx_builder::TxOrdering,
     KeychainKind, TxBuilder, Utxo, WeightedUtxo,
 };
-use bitcoin::{
-    absolute::LockTime, key::rand::RngCore, psbt::Input, script, script::PushBytesBuf, Address,
-    Amount, FeeRate, Network, OutPoint, Psbt, Script, ScriptBuf, Sequence, Transaction, TxOut,
-    Txid, Weight, Witness,
-};
+use bitcoin::{absolute::LockTime, key::rand::RngCore, psbt::Input, script, script::PushBytesBuf, Address, Amount, FeeRate, Network, OutPoint, Psbt, Script, ScriptBuf, Sequence, Transaction, TxOut, Txid, Weight, Witness};
 
 use spaces_nums::{create_commitment_script, CommitmentOp, FullNumOut};
 use spaces_protocol::hasher::Hash;
@@ -148,6 +144,8 @@ pub struct NumTransfer {
     pub recipient: SpaceAddress,
     /// Whether this transfer is a delegation (authorize) rather than a regular transfer
     pub is_delegate: bool,
+    /// Must be specified if num isn't owned by wallet
+    pub secret: Option<[u8;32]>,
 }
 
 #[derive(Debug, Clone)]
@@ -655,7 +653,7 @@ impl Iterator for BuilderIterator<'_> {
             }
             StackOp::Num(params) => {
                 let transfers: Vec<_> = params.transfers.iter().map(|t| {
-                    (t.num.numout.num.name.to_string(), t.recipient.script_pubkey(), t.is_delegate)
+                    (t.num.numout.num.name.to_string(), t.num.numout.num.id.to_string(), t.recipient.script_pubkey(), t.is_delegate)
                 }).collect();
                 let binds: Vec<_> = params.binds.iter().map(|b| {
                     b.bind_spk.clone()
@@ -671,11 +669,11 @@ impl Iterator for BuilderIterator<'_> {
                 );
                 Some(tx.map(|tx| {
                     let mut detailed = TxRecord::new(tx);
-                    for (name, spk, is_delegate) in transfers {
+                    for (name, num_id, to_spk, is_delegate) in transfers {
                         if is_delegate {
-                            detailed.add_delegate(name, spk);
+                            detailed.add_delegate(name, to_spk);
                         } else {
-                            detailed.add_transfer_num(name, spk);
+                            detailed.add_transfer_num(name, num_id, to_spk);
                         }
                     }
                     for spk in binds {
@@ -1320,10 +1318,36 @@ fn create_num_tx(
             vout: transfer.num.numout.n as _,
         };
 
-        // spend num
-        builder
-            .add_utxo(outpoint)
-            .map_err(|e| anyhow!("could not transfer num at {}:{}", outpoint, e))?;
+        if let Some(secret) = transfer.secret {
+            // spend foreign num
+            let mut spend_input = Input {
+                witness_utxo: Some(TxOut {
+                    value: transfer.num.numout.value,
+                    script_pubkey: transfer.num.numout.script_pubkey.clone(),
+                }),
+                final_script_witness: Some(Witness::default()),
+                final_script_sig: Some(ScriptBuf::new()),
+                proprietary: BTreeMap::new(),
+                ..Default::default()
+            };
+            spend_input
+                .proprietary
+                .insert(SpacesWallet::spaces_signer("sign_with_custom_secret"), secret.to_vec());
+            builder
+                .add_foreign_utxo_with_sequence(
+                    outpoint,
+                    spend_input,
+                    tap_key_spend_weight(),
+                    Sequence::ENABLE_RBF_NO_LOCKTIME,
+                )
+                .map_err(|e| anyhow!("could not spend foreign num at {}:{}", outpoint, e))?;
+        } else {
+            // spend local num
+            builder
+                .add_utxo(outpoint)
+                .map_err(|e| anyhow!("could not transfer num at {}:{}", outpoint, e))?;
+        }
+        
         // add replacement output at the same index
         builder.add_recipient(
             transfer.recipient.script_pubkey(),

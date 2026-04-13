@@ -499,6 +499,11 @@ impl SpacesWallet {
         TxEvent::get_latest_events(&db_tx).context("could not read latest events")
     }
 
+    pub fn list_create_num_events(&mut self) -> anyhow::Result<Vec<TxEvent>> {
+        let db_tx = self.connection.transaction().context("no db transaction")?;
+        TxEvent::get_create_num_events(&db_tx).context("could not read create num events")
+    }
+
     pub fn sign_event<H: KeyHasher, S: SpacesSource + NumSource>(
         &mut self,
         src: &mut S,
@@ -1414,6 +1419,7 @@ impl SpacesWallet {
         }
 
         let mut reveals: BTreeMap<u32, SpaceScriptSigningInfo> = BTreeMap::new();
+        let mut custom_secrets: BTreeMap<u32, [u8; 32]> = BTreeMap::new();
 
         for (idx, input) in psbt.inputs.iter_mut().enumerate() {
             let reveal_key = Self::spaces_signer("reveal_signing_info");
@@ -1423,10 +1429,16 @@ impl SpacesWallet {
                     .context("expected reveal signing info")?;
                 reveals.insert(idx as u32, signing_info);
             }
+            let secret_key = Self::spaces_signer("sign_with_custom_secret");
+            if let Some(raw) = input.proprietary.get(&secret_key) {
+                let mut secret = [0u8; 32];
+                secret.copy_from_slice(raw.as_slice());
+                custom_secrets.insert(idx as u32, secret);
+            }
         }
 
         let mut tx = psbt.extract_tx()?;
-        if reveals.len() == 0 {
+        if reveals.is_empty() && custom_secrets.is_empty() {
             return Ok(tx);
         }
 
@@ -1477,6 +1489,33 @@ impl SpacesWallet {
             );
             witness.push(&signing_info.script);
             witness.push(&signing_info.control_block.serialize());
+        }
+
+        // Sign inputs with externally-provided secret keys (taproot key-spend)
+        for (input_idx, secret) in custom_secrets {
+            let ctx = secp256k1::Secp256k1::new();
+            let keypair = secp256k1::Keypair::from_seckey_slice(&ctx, &secret)
+                .context("invalid secret key")?;
+
+            let sighash = sighash_cache.taproot_key_spend_signature_hash(
+                input_idx as usize,
+                &prevouts,
+                TapSighashType::Default,
+            )?;
+
+            let msg = secp256k1::Message::from_digest_slice(sighash.as_ref())?;
+            let signature = ctx.sign_schnorr(&msg, &keypair);
+
+            let witness = sighash_cache
+                .witness_mut(input_idx as usize)
+                .expect("witness should exist");
+            witness.push(
+                taproot::Signature {
+                    signature,
+                    sighash_type: TapSighashType::Default,
+                }
+                .to_vec(),
+            );
         }
 
         Ok(tx)
