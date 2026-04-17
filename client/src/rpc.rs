@@ -1429,10 +1429,10 @@ impl RpcServer for RpcServerImpl {
                             ErrorObjectOwned::owned(-1, e.to_string(), None::<String>)
                         })?;
                     fso.and_then(|fso| {
-                        if let Some(space) = &fso.spaceout.space {
-                            if let Covenant::Transfer { data, .. } = &space.covenant {
-                                return data.as_ref().map(|b| b.clone().to_vec());
-                            }
+                        if let Some(space) = &fso.spaceout.space
+                            && let Covenant::Transfer { data, .. } = &space.covenant
+                        {
+                            return data.as_ref().map(|b| b.clone().to_vec());
                         }
                         None
                     })
@@ -1875,12 +1875,12 @@ impl AsyncChainState {
 
             let outpoint_key = OutpointKey::from_outpoint::<Sha256>(fso.outpoint());
             space_tree_keys.insert(outpoint_key.into());
-            if let Some(space) = &fso.spaceout.space {
-                if let Covenant::Transfer { expire_height, .. } = &space.covenant {
-                    let last_update =
-                        expire_height.saturating_sub(spaces_protocol::constants::RENEWAL_INTERVAL);
-                    most_recent_update = std::cmp::max(most_recent_update, last_update);
-                }
+            if let Some(space) = &fso.spaceout.space
+                && let Covenant::Transfer { expire_height, .. } = &space.covenant
+            {
+                let last_update =
+                    expire_height.saturating_sub(spaces_protocol::constants::RENEWAL_INTERVAL);
+                most_recent_update = std::cmp::max(most_recent_update, last_update);
             }
 
             let id = NumId::from_spk::<Sha256>(fso.spaceout.script_pubkey);

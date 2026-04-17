@@ -439,12 +439,11 @@ impl RpcWallet {
         if let Ok(res) = source
             .rpc
             .send_json_blocking::<serde_json::Value>(&source.client, &estimate_req)
+            && let Some(fee_rate) = res["feerate"].as_f64()
         {
-            if let Some(fee_rate) = res["feerate"].as_f64() {
-                // Convert BTC/kB to sat/vB
-                let fee_rate_sat_vb = (fee_rate * 100_000.0).ceil() as u64;
-                return FeeRate::from_sat_per_vb(fee_rate_sat_vb);
-            }
+            // Convert BTC/kB to sat/vB
+            let fee_rate_sat_vb = (fee_rate * 100_000.0).ceil() as u64;
+            return FeeRate::from_sat_per_vb(fee_rate_sat_vb);
         }
 
         None
@@ -1031,21 +1030,22 @@ impl RpcWallet {
                 continue;
             }
 
-            if synced_at_least_once && last_mempool_check.elapsed() > MEMPOOL_CHECK_INTERVAL {
-                if let Some(common_tip) = Self::all_synced(&source, &mut chain, &wallet, None) {
-                    let mem = MempoolChecker(&source);
-                    match wallet.update_unconfirmed_bids(mem, common_tip.height, &mut chain) {
-                        Ok(txids) => {
-                            for txid in txids {
-                                info!("Dropped {} - no longer in the mempool", txid);
-                            }
-                        }
-                        Err(err) => {
-                            warn!("Could not check for unconfirmed bids in mempool: {}", err)
+            if synced_at_least_once
+                && last_mempool_check.elapsed() > MEMPOOL_CHECK_INTERVAL
+                && let Some(common_tip) = Self::all_synced(&source, &mut chain, &wallet, None)
+            {
+                let mem = MempoolChecker(&source);
+                match wallet.update_unconfirmed_bids(mem, common_tip.height, &mut chain) {
+                    Ok(txids) => {
+                        for txid in txids {
+                            info!("Dropped {} - no longer in the mempool", txid);
                         }
                     }
-                    last_mempool_check = Instant::now();
+                    Err(err) => {
+                        warn!("Could not check for unconfirmed bids in mempool: {}", err)
+                    }
                 }
+                last_mempool_check = Instant::now();
             }
 
             std::thread::sleep(Duration::from_millis(10));
@@ -1325,15 +1325,15 @@ impl RpcWallet {
     ) -> anyhow::Result<WalletResponse> {
         let tip_height = wallet.local_chain().tip().height();
 
-        if let Some(dust) = tx.dust {
-            if dust > SpacesAwareCoinSelection::DUST_THRESHOLD {
-                // Allowing higher dust may space outs to be accidentally
-                // spent during coin selection
-                return Err(anyhow!(
-                    "dust cannot be higher than {}",
-                    SpacesAwareCoinSelection::DUST_THRESHOLD
-                ));
-            }
+        if let Some(dust) = tx.dust
+            && dust > SpacesAwareCoinSelection::DUST_THRESHOLD
+        {
+            // Allowing higher dust may space outs to be accidentally
+            // spent during coin selection
+            return Err(anyhow!(
+                "dust cannot be higher than {}",
+                SpacesAwareCoinSelection::DUST_THRESHOLD
+            ));
         }
 
         let fee_rate = match tx.fee_rate.as_ref() {
@@ -1348,8 +1348,8 @@ impl RpcWallet {
         let mut builder = spaces_wallet::builder::Builder::new();
         builder = builder.fee_rate(fee_rate);
 
-        if tx.bidouts.is_some() {
-            builder = builder.bidouts(tx.bidouts.unwrap());
+        if let Some(bidouts) = tx.bidouts {
+            builder = builder.bidouts(bidouts);
         }
 
         builder = builder.force(tx.force);
@@ -1560,17 +1560,13 @@ impl RpcWallet {
                         // Warn if already exists
                         let spacehash = SpaceKey::from(Sha256::hash(name.as_ref()));
                         let full = chain.get_space_info(&spacehash)?;
-                        if let Some(full) = full {
-                            if !full
+                        if let Some(full) = full
+                            && !full
                                 .spaceout
                                 .space
                                 .is_some_and(|s| s.is_expired(tip_height))
-                            {
-                                return Err(anyhow!(
-                                    "open '{}': space already exists",
-                                    params.name
-                                ));
-                            }
+                        {
+                            return Err(anyhow!("open '{}': space already exists", params.name));
                         }
                     }
 

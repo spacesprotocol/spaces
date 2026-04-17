@@ -253,14 +253,12 @@ impl Validator {
             .auctioned_output
             .as_ref()
             .map(|out| out.bid_psbt.outpoint)
-        {
-            if tx
+            && tx
                 .input
                 .iter()
                 .any(|input| input.previous_output == auctioned)
-            {
-                meta.auctioned_output.as_mut().unwrap().output = None;
-            }
+        {
+            meta.auctioned_output.as_mut().unwrap().output = None;
         }
     }
 

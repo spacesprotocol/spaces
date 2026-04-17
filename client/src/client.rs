@@ -207,7 +207,7 @@ impl Client {
         }
 
         // Rollouts:
-        if (height - 1) % ROLLOUT_BLOCK_INTERVAL == 0 {
+        if (height - 1).is_multiple_of(ROLLOUT_BLOCK_INTERVAL) {
             let batch = Self::get_rollout_batch(ROLLOUT_BATCH_SIZE, chain)?;
             let coinbase = block
                 .coinbase()

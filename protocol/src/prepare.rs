@@ -114,15 +114,15 @@ impl TxContext {
             let spacein = InputContext { n, sstxo };
 
             // Check for a name revealed in the witness
-            if auctioned_output.is_some() && proposed_space.is_none() {
-                if let Some(leaf_script) = input
+            if auctioned_output.is_some()
+                && proposed_space.is_none()
+                && let Some(leaf_script) = input
                     .witness
                     .taproot_leaf_script()
                     .filter(|ls| ls.version == LeafVersion::TapScript)
-                {
-                    proposed_space =
-                        load_open_context::<T, H>(src, leaf_script.script)?.map(|o| (n, o));
-                }
+            {
+                proposed_space =
+                    load_open_context::<T, H>(src, leaf_script.script)?.map(|o| (n, o));
             }
 
             inputs.push(spacein)

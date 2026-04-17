@@ -643,13 +643,13 @@ impl Validator {
                 match &commitment_op {
                     Some(CommitmentOp::Rollback) => {
                         // Rollback applies to ALL delegates with pending commitments
-                        if let Some(pending) = delegate.pending_tip {
-                            if !pending.is_finalized(height) {
-                                changeset.revoked_commitments.push(CommitmentInfo {
-                                    space: delegate.subject.clone(),
-                                    commitment: pending,
-                                });
-                            }
+                        if let Some(pending) = delegate.pending_tip
+                            && !pending.is_finalized(height)
+                        {
+                            changeset.revoked_commitments.push(CommitmentInfo {
+                                space: delegate.subject.clone(),
+                                commitment: pending,
+                            });
                         }
                     }
                     Some(CommitmentOp::Commit(_)) => {
@@ -797,10 +797,11 @@ impl Validator {
         // Only update data if:
         // 1. A data OP_RETURN is present
         // 2. PTR is P2TR and input uses SIGHASH_ALL (prevents malicious data injection)
-        if let Some(new_data) = data {
-            if numout.script_pubkey.is_p2tr() && is_p2tr_sighash_all(tx, input_index) {
-                ptr.data = Some(new_data.clone());
-            }
+        if let Some(new_data) = data
+            && numout.script_pubkey.is_p2tr()
+            && is_p2tr_sighash_all(tx, input_index)
+        {
+            ptr.data = Some(new_data.clone());
         }
         numout.n = output_index;
         numout.value = output.value;

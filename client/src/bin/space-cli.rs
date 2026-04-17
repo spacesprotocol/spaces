@@ -452,11 +452,8 @@ impl SpaceCli {
             args.rpc_url = Some(default_rpc_url(&args.chain));
         }
 
-        let auth_token = if args.rpc_user.is_some() {
-            auth_token_from_creds(
-                args.rpc_user.as_ref().unwrap(),
-                args.rpc_password.as_ref().unwrap(),
-            )
+        let auth_token = if let Some(user) = args.rpc_user.as_ref() {
+            auth_token_from_creds(user, args.rpc_password.as_ref().unwrap())
         } else {
             let cookie_path = match &args.rpc_cookie {
                 Some(path) => path,

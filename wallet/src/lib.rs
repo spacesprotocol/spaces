@@ -1345,11 +1345,10 @@ impl SpacesWallet {
                 );
             }
 
-            if input.final_script_witness.is_none() && input.witness_utxo.is_some() {
-                if self
-                    .internal
-                    .is_mine(input.witness_utxo.as_ref().unwrap().script_pubkey.clone())
-                {
+            if input.final_script_witness.is_none()
+                && let Some(witness_utxo) = input.witness_utxo.as_ref()
+            {
+                if self.internal.is_mine(witness_utxo.script_pubkey.clone()) {
                     input
                         .proprietary
                         .insert(Self::spaces_signer("tbs"), Vec::new());
@@ -1359,10 +1358,7 @@ impl SpacesWallet {
 
                 let previous_output = psbt.unsigned_tx.input[input_index].previous_output;
                 let signing_info = self
-                    .get_signing_info(
-                        previous_output,
-                        &input.witness_utxo.as_ref().unwrap().script_pubkey,
-                    )
+                    .get_signing_info(previous_output, &witness_utxo.script_pubkey)
                     .context("could not retrieve signing info for script")?;
                 if let Some(info) = signing_info {
                     input

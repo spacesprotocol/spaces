@@ -416,7 +416,7 @@ impl Builder {
                 // Must be an odd number of outputs so that
                 // transfers align correctly
                 // TODO: use the actual change output instead of creating this
-                if vout % 2 == 0 {
+                if vout.is_multiple_of(2) {
                     let dust = match dust {
                         None => change_address.minimal_non_dust().mul(2),
                         Some(dust) => dust,
@@ -1120,12 +1120,11 @@ impl CoinSelectionAlgorithm for SpacesAwareCoinSelection {
 
         // Filter out UTXOs that are either explicitly excluded or below the dust threshold
         optional_utxos.retain(|weighted_utxo| {
-            if self.confirmed_only {
-                if let Utxo::Local(local) = &weighted_utxo.utxo {
-                    if !local.chain_position.is_confirmed() {
-                        return false;
-                    }
-                }
+            if self.confirmed_only
+                && let Utxo::Local(local) = &weighted_utxo.utxo
+                && !local.chain_position.is_confirmed()
+            {
+                return false;
             }
 
             weighted_utxo.utxo.txout().value > SpacesAwareCoinSelection::DUST_THRESHOLD
@@ -1374,11 +1373,11 @@ fn create_num_tx(
     }
 
     // Add data OP_RETURN if present (only makes sense with transfers)
-    if let Some(data) = params.data {
-        if has_transfers {
-            let script = create_data_script(&data);
-            builder.add_recipient(script, Amount::from_sat(0));
-        }
+    if let Some(data) = params.data
+        && has_transfers
+    {
+        let script = create_data_script(&data);
+        builder.add_recipient(script, Amount::from_sat(0));
     }
 
     let psbt = builder.finish()?;

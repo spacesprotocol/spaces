@@ -859,10 +859,10 @@ impl ErrorForRpc for reqwest::Response {
                 // Try to decode without result
                 let error_res: Option<JsonRpcResponse<Option<String>>> =
                     serde_json::from_str(&text).ok();
-                if let Some(error_res) = error_res {
-                    if let Some(error) = error_res.error {
-                        return Err(BitcoinRpcError::Rpc(error));
-                    }
+                if let Some(error_res) = error_res
+                    && let Some(error) = error_res.error
+                {
+                    return Err(BitcoinRpcError::Rpc(error));
                 }
                 return Err(BitcoinRpcError::Other(format!(
                     "Expected a JSON response, got '{}': {}",
@@ -892,10 +892,10 @@ impl ErrorForRpcBlocking for reqwest::blocking::Response {
                 // try to decode without result
                 let error_res: Option<JsonRpcResponse<Option<String>>> =
                     serde_json::from_str(&text).ok();
-                if let Some(error_res) = error_res {
-                    if let Some(error) = error_res.error {
-                        return Err(BitcoinRpcError::Rpc(error));
-                    }
+                if let Some(error_res) = error_res
+                    && let Some(error) = error_res.error
+                {
+                    return Err(BitcoinRpcError::Rpc(error));
                 }
                 return Err(BitcoinRpcError::Other(format!(
                     "Expected a JSON response, got '{}': {}",

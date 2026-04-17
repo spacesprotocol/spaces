@@ -39,7 +39,7 @@ macro_rules! const_assert {
 }
 
 const_assert!(
-    spaces_protocol::constants::ROLLOUT_BLOCK_INTERVAL % COMMIT_BLOCK_INTERVAL == 0,
+    spaces_protocol::constants::ROLLOUT_BLOCK_INTERVAL.is_multiple_of(COMMIT_BLOCK_INTERVAL),
     "commit and rollout intervals must be aligned"
 );
 
@@ -263,7 +263,7 @@ impl Chain {
     }
 
     pub fn maybe_commit(&self, checkpoint: ChainAnchor) -> anyhow::Result<bool> {
-        if checkpoint.height % COMMIT_BLOCK_INTERVAL != 0 {
+        if !checkpoint.height.is_multiple_of(COMMIT_BLOCK_INTERVAL) {
             return Ok(false);
         }
 

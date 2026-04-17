@@ -344,16 +344,16 @@ impl SpLiveSnapshot {
         let mut spaceouts = Vec::with_capacity(rollouts.len());
         for (priority, spacehash) in rollouts {
             let outpoint = self.get_space_outpoint(&spacehash)?;
-            if let Some(outpoint) = outpoint {
-                if let Some(spaceout) = self.get_spaceout(&outpoint)? {
-                    spaceouts.push((
-                        priority,
-                        FullSpaceOut {
-                            txid: outpoint.txid,
-                            spaceout,
-                        },
-                    ));
-                }
+            if let Some(outpoint) = outpoint
+                && let Some(spaceout) = self.get_spaceout(&outpoint)?
+            {
+                spaceouts.push((
+                    priority,
+                    FullSpaceOut {
+                        txid: outpoint.txid,
+                        spaceout,
+                    },
+                ));
             }
         }
 

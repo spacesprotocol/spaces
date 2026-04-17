@@ -74,11 +74,9 @@ impl<'a> TxChecker<'a> {
                 txid,
                 vout: create.n as _,
             };
-            if create.space.is_some() {
-                let space = SpaceKey::from(Sha256::hash(
-                    create.space.as_ref().expect("space").name.as_ref(),
-                ));
-                self.spaces.insert(space, Some(outpoint));
+            if let Some(space) = create.space.as_ref() {
+                let key = SpaceKey::from(Sha256::hash(space.name.as_ref()));
+                self.spaces.insert(key, Some(outpoint));
             }
             self.spaceouts.insert(outpoint, Some(create));
         }
@@ -120,12 +118,12 @@ impl<'a> TxChecker<'a> {
             ));
         }
         for create in changset.creates.iter() {
-            if let Some(space) = create.space.as_ref() {
-                if matches!(space.covenant, Covenant::Reserved) {
-                    return Err(anyhow!(
-                        "tx-check: transaction not broadcasted as it may cause spaces to use a reserved covenant"
-                    ));
-                }
+            if let Some(space) = create.space.as_ref()
+                && matches!(space.covenant, Covenant::Reserved)
+            {
+                return Err(anyhow!(
+                    "tx-check: transaction not broadcasted as it may cause spaces to use a reserved covenant"
+                ));
             }
         }
         for update in changset.updates.iter() {
