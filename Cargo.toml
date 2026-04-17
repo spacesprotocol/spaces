@@ -5,7 +5,7 @@ members = ["borsh_utils", "checkpoint", "client", "protocol", "testutil", "walle
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "MIT"
 repository = "https://github.com/buffrr/spaces"
 homepage = "https://spacesprotocol.org"
