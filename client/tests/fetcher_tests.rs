@@ -7,8 +7,8 @@ use anyhow::Result;
 use spaces_client::source::{
     BitcoinBlockSource, BitcoinRpc, BitcoinRpcAuth, BlockEvent, BlockFetcher,
 };
-use spaces_protocol::{bitcoin::BlockHash, constants::ChainAnchor};
 use spaces_protocol::bitcoin::Network;
+use spaces_protocol::{bitcoin::BlockHash, constants::ChainAnchor};
 use spaces_testutil::TestRig;
 
 async fn setup(blocks: u64) -> Result<(TestRig, u64, BlockHash)> {
@@ -28,7 +28,7 @@ fn test_block_fetching_from_bitcoin_rpc() -> Result<()> {
     let fetcher_rpc = BitcoinBlockSource::new(BitcoinRpc::new(
         &rig.bitcoind.rpc_url(),
         BitcoinRpcAuth::UserPass("user".to_string(), "password".to_string()),
-        true
+        true,
     ));
     let (fetcher, receiver) = BlockFetcher::new(Network::Regtest, fetcher_rpc.clone(), 8);
     fetcher.start(ChainAnchor { hash, height: 0 });

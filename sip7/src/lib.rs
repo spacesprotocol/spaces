@@ -35,6 +35,7 @@ pub const SIG_PRIMARY_ZONE: u8 = 0x01;
 
 /// A single record in a SIP-7 record set.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
 pub enum Record {
     Seq(u64),
     Txt {
@@ -71,7 +72,7 @@ pub struct SigData {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Signable<'a> {
-    pub bytes: &'a[u8],
+    pub bytes: &'a [u8],
     pub sig: Option<SigData>,
 }
 
@@ -107,7 +108,12 @@ impl Record {
 
     /// Creates a SIG record.
     pub fn sig(canonical: SName, handle: SName, sig: Vec<u8>, flags: u8) -> Self {
-        Record::Sig { flags, canonical, handle, sig }
+        Record::Sig {
+            flags,
+            canonical,
+            handle,
+            sig,
+        }
     }
 
     /// Creates an unknown record type (preserved for round-tripping).
@@ -382,7 +388,9 @@ impl RecordSet {
         while pos < data.len() {
             let rtype = data[pos];
             let mut rpos = pos + 1;
-            let Ok(rlen) = read_compact_size(data, &mut rpos) else { break };
+            let Ok(rlen) = read_compact_size(data, &mut rpos) else {
+                break;
+            };
             let rlen = rlen as usize;
             if rpos + rlen > data.len() {
                 break;
@@ -399,10 +407,12 @@ impl RecordSet {
             pos = rpos + rlen;
         }
 
-        Signable { bytes: data, sig: None }
+        Signable {
+            bytes: data,
+            sig: None,
+        }
     }
 }
-
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -510,15 +520,19 @@ fn parse_sig_rdata(rdata: &[u8]) -> Result<(SigData, usize), Error> {
     let rest = &rdata[1..];
     let canonical_ref = SNameRef::try_from(rest).map_err(|_| Error::InvalidSName)?;
     let after_canonical = canonical_ref.to_bytes().len();
-    let handle_ref = SNameRef::try_from(&rest[after_canonical..]).map_err(|_| Error::InvalidSName)?;
+    let handle_ref =
+        SNameRef::try_from(&rest[after_canonical..]).map_err(|_| Error::InvalidSName)?;
     let sig_offset = 1 + after_canonical + handle_ref.to_bytes().len();
     let sig_bytes = &rdata[sig_offset..];
-    Ok((SigData {
-        flags,
-        canonical: canonical_ref.to_owned(),
-        handle: handle_ref.to_owned(),
-        sig: sig_bytes.to_vec(),
-    }, sig_offset))
+    Ok((
+        SigData {
+            flags,
+            canonical: canonical_ref.to_owned(),
+            handle: handle_ref.to_owned(),
+            sig: sig_bytes.to_vec(),
+        },
+        sig_offset,
+    ))
 }
 
 fn parse_kv(data: &[u8]) -> Result<(String, &[u8]), Error> {
@@ -606,18 +620,33 @@ pub struct ParsedSig<'a> {
     pub sig: &'a [u8],
 }
 
-/// A zero-copy parsed record. Returned from [`RecordsIter::iter`].
+/// A zero-copy parsed record. Yielded by [`RecordsIter`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ParsedRecord<'a> {
     Seq(u64),
-    Txt { key: &'a str, value: TextValues<'a> },
-    Blob { key: &'a str, value: &'a [u8] },
-    Addr { key: &'a str, value: TextValues<'a> },
+    Txt {
+        key: &'a str,
+        value: TextValues<'a>,
+    },
+    Blob {
+        key: &'a str,
+        value: &'a [u8],
+    },
+    Addr {
+        key: &'a str,
+        value: TextValues<'a>,
+    },
     Sig(ParsedSig<'a>),
     /// Known record type but rdata could not be parsed.
-    Malformed { rtype: u8, rdata: &'a [u8] },
+    Malformed {
+        rtype: u8,
+        rdata: &'a [u8],
+    },
     /// Unknown record type.
-    Unknown { rtype: u8, rdata: &'a [u8] },
+    Unknown {
+        rtype: u8,
+        rdata: &'a [u8],
+    },
 }
 
 impl<'a> From<ParsedRecord<'a>> for Record {
@@ -701,7 +730,9 @@ fn parse_record<'a>(rtype: u8, rdata: &'a [u8]) -> ParsedRecord<'a> {
             let values = TextValues(val_bytes);
             let mut check = TextValuesIter(val_bytes);
             let mut count = 0;
-            while let Some(_) = check.next() { count += 1; }
+            for _ in check.by_ref() {
+                count += 1;
+            }
             if !check.0.is_empty() || (count == 0 && !val_bytes.is_empty()) {
                 return ParsedRecord::Malformed { rtype, rdata };
             }
@@ -715,7 +746,10 @@ fn parse_record<'a>(rtype: u8, rdata: &'a [u8]) -> ParsedRecord<'a> {
             let Some((key, val_bytes)) = parse_kv_ref(rdata) else {
                 return ParsedRecord::Malformed { rtype, rdata };
             };
-            ParsedRecord::Blob { key, value: val_bytes }
+            ParsedRecord::Blob {
+                key,
+                value: val_bytes,
+            }
         }
         TYPE_SIG => {
             if rdata.is_empty() {
@@ -731,7 +765,12 @@ fn parse_record<'a>(rtype: u8, rdata: &'a [u8]) -> ParsedRecord<'a> {
                 return ParsedRecord::Malformed { rtype, rdata };
             };
             let sig = &after_canonical[handle.to_bytes().len()..];
-            ParsedRecord::Sig(ParsedSig { flags, canonical, handle, sig })
+            ParsedRecord::Sig(ParsedSig {
+                flags,
+                canonical,
+                handle,
+                sig,
+            })
         }
         _ => ParsedRecord::Unknown { rtype, rdata },
     }
@@ -769,13 +808,19 @@ impl RecordSet {
             }
 
             if rtype == TYPE_SEQ {
-                if seen_seq { return Err(Error::DuplicateSeq); }
-                if index > 0 { return Err(Error::SeqNotFirst); }
+                if seen_seq {
+                    return Err(Error::DuplicateSeq);
+                }
+                if index > 0 {
+                    return Err(Error::SeqNotFirst);
+                }
                 seen_seq = true;
             }
 
             if rtype == TYPE_SIG {
-                if seen_sig { return Err(Error::DuplicateSig); }
+                if seen_sig {
+                    return Err(Error::DuplicateSig);
+                }
                 seen_sig = true;
                 last_was_sig = true;
             }
@@ -791,7 +836,7 @@ impl RecordSet {
 #[cfg(feature = "serde")]
 mod serde_impl {
     use super::*;
-    use base64::prelude::{Engine, BASE64_STANDARD};
+    use base64::prelude::{BASE64_STANDARD, Engine};
     use serde::de::{self, SeqAccess, Visitor};
     use serde::ser::SerializeSeq;
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -952,7 +997,8 @@ mod serde_impl {
         where
             S: Serializer,
         {
-            let records: Vec<Record> = self.iter()
+            let records: Vec<Record> = self
+                .iter()
                 .map_err(serde::ser::Error::custom)?
                 .map(|r| r.into())
                 .collect();
@@ -986,7 +1032,7 @@ mod serde_impl {
                     while let Some(record) = seq.next_element::<Record>()? {
                         records.push(record);
                     }
-                    Ok(RecordSet::pack(records).map_err(de::Error::custom)?)
+                    RecordSet::pack(records).map_err(de::Error::custom)
                 }
             }
 
@@ -1180,14 +1226,17 @@ mod tests {
         let rs = RecordSet::pack(vec![
             Record::txt("btc", &["bc1qtest"]),
             Record::sig(canonical.clone(), handle.clone(), sig_bytes.clone(), 0),
-        ]).unwrap();
+        ])
+        .unwrap();
 
         let signable = rs.signable();
 
         // signable bytes should not contain the raw signature
         assert!(!signable.bytes.is_empty());
-        assert!(signable.bytes.len() < rs.as_slice().len(),
-            "signable should be shorter than full record set");
+        assert!(
+            signable.bytes.len() < rs.as_slice().len(),
+            "signable should be shorter than full record set"
+        );
 
         // sig data should be present
         let sig = signable.sig.expect("should have sig");
@@ -1199,10 +1248,16 @@ mod tests {
         // signable bytes should include TXT record + SIG header (flags, canonical, handle)
         // but not the signature itself
         let full = rs.as_slice();
-        assert_eq!(&full[..signable.bytes.len()], signable.bytes,
-            "signable should be a prefix of the full record set");
-        assert_eq!(&full[signable.bytes.len()..], &sig_bytes,
-            "remainder should be exactly the sig bytes");
+        assert_eq!(
+            &full[..signable.bytes.len()],
+            signable.bytes,
+            "signable should be a prefix of the full record set"
+        );
+        assert_eq!(
+            &full[signable.bytes.len()..],
+            &sig_bytes,
+            "remainder should be exactly the sig bytes"
+        );
     }
 
     #[test]
@@ -1210,10 +1265,15 @@ mod tests {
         let rs = RecordSet::pack(vec![
             Record::txt("btc", &["bc1qtest"]),
             Record::txt("nostr", &["npub1abc"]),
-        ]).unwrap();
+        ])
+        .unwrap();
 
         let signable = rs.signable();
-        assert_eq!(signable.bytes, rs.as_slice(), "no SIG means signable == full record set");
+        assert_eq!(
+            signable.bytes,
+            rs.as_slice(),
+            "no SIG means signable == full record set"
+        );
         assert!(signable.sig.is_none());
     }
 
@@ -1224,9 +1284,13 @@ mod tests {
         let handle = SName::empty();
         let sig_bytes = vec![0x01, 0x02];
 
-        let rs = RecordSet::pack(vec![
-            Record::sig(canonical.clone(), handle.clone(), sig_bytes.clone(), 0),
-        ]).unwrap();
+        let rs = RecordSet::pack(vec![Record::sig(
+            canonical.clone(),
+            handle.clone(),
+            sig_bytes.clone(),
+            0,
+        )])
+        .unwrap();
 
         let sig = rs.sig().expect("should have sig");
         assert_eq!(sig.canonical, canonical);
@@ -1241,7 +1305,8 @@ mod tests {
         let err = RecordSet::pack(vec![
             Record::sig(canonical, SName::empty(), vec![0x01], 0),
             Record::txt("btc", &["bc1q"]),
-        ]).unwrap_err();
+        ])
+        .unwrap_err();
         assert_eq!(err, Error::SigNotLast);
     }
 
@@ -1253,7 +1318,8 @@ mod tests {
         let err = RecordSet::pack(vec![
             Record::sig(canonical.clone(), SName::empty(), vec![0x01], 0),
             Record::sig(canonical, SName::empty(), vec![0x02], 0),
-        ]).unwrap_err();
+        ])
+        .unwrap_err();
         assert_eq!(err, Error::SigNotLast);
     }
 
@@ -1500,7 +1566,13 @@ mod tests {
         let rs = RecordSet::new(data);
         let records = rs.unpack().unwrap();
         assert_eq!(records.len(), 1);
-        assert!(matches!(records[0], ParsedRecord::Malformed { rtype: TYPE_TXT, .. }));
+        assert!(matches!(
+            records[0],
+            ParsedRecord::Malformed {
+                rtype: TYPE_TXT,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -1519,7 +1591,13 @@ mod tests {
 
         let rs = RecordSet::new(data);
         let records = rs.unpack().unwrap();
-        assert!(matches!(records[0], ParsedRecord::Malformed { rtype: TYPE_ADDR, .. }));
+        assert!(matches!(
+            records[0],
+            ParsedRecord::Malformed {
+                rtype: TYPE_ADDR,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -1534,7 +1612,13 @@ mod tests {
 
         let rs = RecordSet::new(data);
         let records = rs.unpack().unwrap();
-        assert!(matches!(records[0], ParsedRecord::Malformed { rtype: TYPE_SEQ, .. }));
+        assert!(matches!(
+            records[0],
+            ParsedRecord::Malformed {
+                rtype: TYPE_SEQ,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -1542,21 +1626,26 @@ mod tests {
         // Value 1 encoded as 0xFD 0x01 0x00 (3 bytes) instead of just 0x01 (1 byte)
         // Craft: TYPE_SEQ + non-minimal rdlength(1) + rdata(0x01)
         let data = vec![
-            TYPE_SEQ,
-            0xFD, 0x01, 0x00, // non-minimal: value 1 using 3-byte encoding
-            0x01,              // version = 1
+            TYPE_SEQ, 0xFD, 0x01, 0x00, // non-minimal: value 1 using 3-byte encoding
+            0x01, // version = 1
         ];
         let rs = RecordSet::new(data);
-        assert!(rs.unpack().is_err(), "non-minimal compact size should be rejected");
-        assert!(rs.iter().is_err(), "structural validation should also reject");
+        assert!(
+            rs.unpack().is_err(),
+            "non-minimal compact size should be rejected"
+        );
+        assert!(
+            rs.iter().is_err(),
+            "structural validation should also reject"
+        );
     }
 
     #[test]
     fn non_minimal_compact_size_0xfe_rejected() {
         // Value 100 encoded as 0xFE (4-byte) instead of 1-byte
         let data = vec![
-            TYPE_SEQ,
-            0xFE, 0x64, 0x00, 0x00, 0x00, // non-minimal: value 100 using 5-byte encoding
+            TYPE_SEQ, 0xFE, 0x64, 0x00, 0x00,
+            0x00, // non-minimal: value 100 using 5-byte encoding
         ];
         let rs = RecordSet::new(data);
         assert!(rs.unpack().is_err());
@@ -1701,9 +1790,7 @@ mod tests {
 
     #[test]
     fn records_zero_copy_txt() {
-        let rs = RecordSet::pack(vec![
-            Record::txt("btc", &["bc1qtest", "bc1qother"]),
-        ]).unwrap();
+        let rs = RecordSet::pack(vec![Record::txt("btc", &["bc1qtest", "bc1qother"])]).unwrap();
 
         let parsed: Vec<_> = rs.iter().unwrap().collect();
         assert_eq!(parsed.len(), 1);
@@ -1719,9 +1806,7 @@ mod tests {
 
     #[test]
     fn records_zero_copy_addr() {
-        let rs = RecordSet::pack(vec![
-            Record::addr("eth", &["0xdead", "0xbeef"]),
-        ]).unwrap();
+        let rs = RecordSet::pack(vec![Record::addr("eth", &["0xdead", "0xbeef"])]).unwrap();
 
         let parsed: Vec<_> = rs.iter().unwrap().collect();
         match &parsed[0] {
@@ -1735,9 +1820,7 @@ mod tests {
 
     #[test]
     fn records_zero_copy_blob() {
-        let rs = RecordSet::pack(vec![
-            Record::blob("avatar", vec![0x89, 0x50]),
-        ]).unwrap();
+        let rs = RecordSet::pack(vec![Record::blob("avatar", vec![0x89, 0x50])]).unwrap();
 
         let parsed: Vec<_> = rs.iter().unwrap().collect();
         match &parsed[0] {
@@ -1758,7 +1841,8 @@ mod tests {
         let rs = RecordSet::pack(vec![
             Record::txt("btc", &["bc1q"]),
             Record::sig(canonical.clone(), handle.clone(), vec![0xAB, 0xCD], 0),
-        ]).unwrap();
+        ])
+        .unwrap();
 
         let parsed: Vec<_> = rs.iter().unwrap().collect();
         assert_eq!(parsed.len(), 2);
@@ -1775,10 +1859,7 @@ mod tests {
 
     #[test]
     fn records_zero_copy_seq() {
-        let rs = RecordSet::pack(vec![
-            Record::seq(42),
-            Record::txt("a", &["b"]),
-        ]).unwrap();
+        let rs = RecordSet::pack(vec![Record::seq(42), Record::txt("a", &["b"])]).unwrap();
 
         let parsed: Vec<_> = rs.iter().unwrap().collect();
         assert_eq!(parsed.len(), 2);
@@ -1798,7 +1879,13 @@ mod tests {
         let records = rs.iter().unwrap(); // structural validation passes
         let parsed: Vec<_> = records.collect();
         assert_eq!(parsed.len(), 1);
-        assert!(matches!(parsed[0], ParsedRecord::Malformed { rtype: TYPE_TXT, .. }));
+        assert!(matches!(
+            parsed[0],
+            ParsedRecord::Malformed {
+                rtype: TYPE_TXT,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -1810,7 +1897,10 @@ mod tests {
 
         let rs = RecordSet::new(data);
         let parsed: Vec<_> = rs.iter().unwrap().collect();
-        assert!(matches!(parsed[0], ParsedRecord::Unknown { rtype: 0xFF, .. }));
+        assert!(matches!(
+            parsed[0],
+            ParsedRecord::Unknown { rtype: 0xFF, .. }
+        ));
     }
 
     #[test]
@@ -1818,7 +1908,9 @@ mod tests {
         use core::str::FromStr;
         let canonical = SName::from_str("@bitcoin").unwrap();
         // Manually craft: SIG then TXT
-        let sig_bytes = Record::sig(canonical, SName::empty(), vec![0x01], 0).pack().unwrap();
+        let sig_bytes = Record::sig(canonical, SName::empty(), vec![0x01], 0)
+            .pack()
+            .unwrap();
         let txt_bytes = Record::txt("a", &["b"]).pack().unwrap();
         let mut data = sig_bytes;
         data.extend_from_slice(&txt_bytes);
@@ -1849,7 +1941,13 @@ mod tests {
         let parsed: Vec<_> = records.collect();
         assert_eq!(parsed.len(), 3);
         assert!(matches!(parsed[0], ParsedRecord::Txt { .. }));
-        assert!(matches!(parsed[1], ParsedRecord::Malformed { rtype: TYPE_TXT, .. }));
+        assert!(matches!(
+            parsed[1],
+            ParsedRecord::Malformed {
+                rtype: TYPE_TXT,
+                ..
+            }
+        ));
         assert!(matches!(parsed[2], ParsedRecord::Blob { .. }));
     }
 }

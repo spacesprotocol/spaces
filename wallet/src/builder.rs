@@ -1,27 +1,31 @@
 use crate::{
-    address::SpaceAddress, tx_event::TxRecord, DoubleUtxo, FullTxOut, SpaceScriptSigningInfo,
-    SpacesWallet,
+    DoubleUtxo, FullTxOut, SpaceScriptSigningInfo, SpacesWallet, address::SpaceAddress,
+    tx_event::TxRecord,
 };
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 
 use bdk_wallet::{
+    KeychainKind, TxBuilder, Utxo, WeightedUtxo,
     coin_selection::{
         CoinSelectionAlgorithm, CoinSelectionResult, DefaultCoinSelectionAlgorithm,
         InsufficientFunds,
     },
     error::CreateTxError,
     tx_builder::TxOrdering,
-    KeychainKind, TxBuilder, Utxo, WeightedUtxo,
 };
-use bitcoin::{absolute::LockTime, key::rand::RngCore, psbt::Input, script, script::PushBytesBuf, Address, Amount, FeeRate, Network, OutPoint, Psbt, Script, ScriptBuf, Sequence, Transaction, TxOut, Txid, Weight, Witness};
+use bitcoin::{
+    Address, Amount, FeeRate, Network, OutPoint, Psbt, Script, ScriptBuf, Sequence, Transaction,
+    TxOut, Txid, Weight, Witness, absolute::LockTime, key::rand::RngCore, psbt::Input, script,
+    script::PushBytesBuf,
+};
 
-use spaces_nums::{create_commitment_script, CommitmentOp, FullNumOut};
+use spaces_nums::{CommitmentOp, FullNumOut, create_commitment_script};
 use spaces_protocol::hasher::Hash;
 use spaces_protocol::script::{create_data_script, create_open_data, nop_script};
 use spaces_protocol::{
+    Covenant, FullSpaceOut, Space,
     bitcoin::absolute::Height,
     constants::{BID_PSBT_INPUT_SEQUENCE, BID_PSBT_TX_VERSION},
-    Covenant, FullSpaceOut, Space,
 };
 use std::{
     cmp::min,
@@ -145,7 +149,7 @@ pub struct NumTransfer {
     /// Whether this transfer is a delegation (authorize) rather than a regular transfer
     pub is_delegate: bool,
     /// Must be specified if num isn't owned by wallet
-    pub secret: Option<[u8;32]>,
+    pub secret: Option<[u8; 32]>,
 }
 
 #[derive(Debug, Clone)]
@@ -278,11 +282,10 @@ impl<'a, Cs: CoinSelectionAlgorithm> TxBuilderSpacesUtils<'a, Cs> for TxBuilder<
             .proprietary
             .insert(SpacesWallet::spaces_signer("tbs"), Vec::new());
 
-        let compressed_psbt = PushBytesBuf::try_from(SpacesWallet::compress_bid_psbt(
+        let compressed_psbt = PushBytesBuf::from(SpacesWallet::compress_bid_psbt(
             placeholder.auction.outpoint.vout as u8,
             &offer,
-        )?)
-        .expect("compressed psbt script bytes");
+        )?);
 
         let carrier = ScriptBuf::new_op_return(&compressed_psbt);
 
@@ -359,7 +362,7 @@ impl<'a, Cs: CoinSelectionAlgorithm> TxBuilderSpacesUtils<'a, Cs> for TxBuilder<
 }
 
 impl Builder {
-    #[allow(unused_assignments)]
+    #[allow(unused_assignments, clippy::too_many_arguments)]
     fn prepare_all(
         median_time: u64,
         w: &mut SpacesWallet,
@@ -413,7 +416,7 @@ impl Builder {
                 // Must be an odd number of outputs so that
                 // transfers align correctly
                 // TODO: use the actual change output instead of creating this
-                if vout % 2 == 0 {
+                if vout.is_multiple_of(2) {
                     let dust = match dust {
                         None => change_address.minimal_non_dust().mul(2),
                         Some(dust) => dust,
@@ -479,15 +482,15 @@ impl Builder {
             }
 
             builder.fee_rate(fee_rate);
-            let r = builder.finish().map_err(|e| match e {
+
+            builder.finish().map_err(|e| match e {
                 CreateTxError::CoinSelection(e) if confirmed_only => {
                     anyhow!("{} (replacements use confirmed balance only)", e)
                 }
                 _ => {
                     anyhow!("{}", e)
                 }
-            })?;
-            r
+            })?
         };
 
         let tx = w.sign(commit_psbt, None)?;
@@ -508,10 +511,7 @@ impl Iterator for BuilderIterator<'_> {
     type Item = anyhow::Result<TxRecord>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let op = match self.stack.pop() {
-            None => return None,
-            Some(req) => req,
-        };
+        let op = self.stack.pop()?;
 
         match op {
             // A Prepare tx could bundle all P2TR commitments for open and other scripts
@@ -521,18 +521,18 @@ impl Iterator for BuilderIterator<'_> {
 
                 // Push all open script commitments
                 for req in params.opens.iter() {
-                    let tap = Builder::create_open_tap_data(self.wallet.config.network, &req.name)
-                        .context("could not initialize tap data for name");
-                    if tap.is_err() {
-                        return Some(Err(tap.unwrap_err()));
+                    match Builder::create_open_tap_data(self.wallet.config.network, &req.name)
+                        .context("could not initialize tap data for name")
+                    {
+                        Ok(data) => reveals.push(data),
+                        Err(err) => return Some(Err(err)),
                     }
-                    reveals.push(tap.unwrap());
                 }
 
                 let (tx, commitments) = match Builder::prepare_all(
                     self.median_time,
                     self.wallet,
-                    params.bidouts.clone(),
+                    params.bidouts,
                     Some(&reveals),
                     params.transfers.clone(),
                     params.sends.clone(),
@@ -653,12 +653,19 @@ impl Iterator for BuilderIterator<'_> {
                 }))
             }
             StackOp::Num(params) => {
-                let transfers: Vec<_> = params.transfers.iter().map(|t| {
-                    (t.num.numout.num.name.to_string(), t.num.numout.num.id.to_string(), t.recipient.script_pubkey(), t.is_delegate)
-                }).collect();
-                let binds: Vec<_> = params.binds.iter().map(|b| {
-                    b.bind_spk.clone()
-                }).collect();
+                let transfers: Vec<_> = params
+                    .transfers
+                    .iter()
+                    .map(|t| {
+                        (
+                            t.num.numout.num.name.to_string(),
+                            t.num.numout.num.id.to_string(),
+                            t.recipient.script_pubkey(),
+                            t.is_delegate,
+                        )
+                    })
+                    .collect();
+                let binds: Vec<_> = params.binds.iter().map(|b| b.bind_spk.clone()).collect();
                 let tx = create_num_tx(
                     self.wallet,
                     self.median_time,
@@ -703,14 +710,19 @@ impl Iterator for BuilderIterator<'_> {
             }
             StackOp::Commitment(commitments) => {
                 let is_rollback = commitments.iter().all(|c| c.root.is_none());
-                let event_info: Vec<_> = commitments.iter().map(|c| {
-                    let root_hex = c.root.map(|r|
-                        r.iter().map(|b| format!("{:02x}", b)).collect::<String>()
-                    );
-                    let name = c.subject.clone()
-                        .unwrap_or_else(|| c.numout.numout.num.name.to_string());
-                    (name, root_hex)
-                }).collect();
+                let event_info: Vec<_> = commitments
+                    .iter()
+                    .map(|c| {
+                        let root_hex = c
+                            .root
+                            .map(|r| r.iter().map(|b| format!("{:02x}", b)).collect::<String>());
+                        let name = c
+                            .subject
+                            .clone()
+                            .unwrap_or_else(|| c.numout.numout.num.name.to_string());
+                        (name, root_hex)
+                    })
+                    .collect();
                 let tx = create_commitment_tx(
                     self.wallet,
                     self.median_time,
@@ -733,6 +745,12 @@ impl Iterator for BuilderIterator<'_> {
                 }))
             }
         }
+    }
+}
+
+impl Default for Builder {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -837,11 +855,10 @@ impl Builder {
         unspendables: Vec<OutPoint>,
         confirmed_only: bool,
     ) -> anyhow::Result<BuilderIterator<'_>> {
-        let fee_rate = self
+        let fee_rate = *self
             .fee_rate
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("fee_rate is required"))?
-            .clone();
+            .ok_or_else(|| anyhow::anyhow!("fee_rate is required"))?;
 
         let (open_count, bid_count) =
             self.requests
@@ -1060,7 +1077,7 @@ pub struct SelectionOutput {
 
 /// A coin selection algorithm that :
 /// 1. Guarantees required utxos are ordered first appending
-/// any funding/change outputs to the end of the selected utxos.
+///    any funding/change outputs to the end of the selected utxos.
 /// 2. Excludes all dust outputs to avoid accidentally spending space utxos
 /// 3. Enables adding additional output exclusions
 #[derive(Debug, Clone)]
@@ -1103,15 +1120,11 @@ impl CoinSelectionAlgorithm for SpacesAwareCoinSelection {
 
         // Filter out UTXOs that are either explicitly excluded or below the dust threshold
         optional_utxos.retain(|weighted_utxo| {
-            if self.confirmed_only {
-                match &weighted_utxo.utxo {
-                    Utxo::Local(local) => {
-                        if !local.chain_position.is_confirmed() {
-                            return false;
-                        }
-                    }
-                    _ => {}
-                }
+            if self.confirmed_only
+                && let Utxo::Local(local) = &weighted_utxo.utxo
+                && !local.chain_position.is_confirmed()
+            {
+                return false;
             }
 
             weighted_utxo.utxo.txout().value > SpacesAwareCoinSelection::DUST_THRESHOLD
@@ -1232,10 +1245,7 @@ fn create_num_delegate_tx(
         } else {
             num_utxo_dust(Amount::from_sat(1000))
         };
-        (
-            new_mint,
-            num_utxo_delegate_dust(d.num.numout.value),
-        )
+        (new_mint, num_utxo_delegate_dust(d.num.numout.value))
     };
     builder.add_recipient(d.unique_num_spk.clone(), a);
     builder.add_recipient(d.unique_num_spk, b);
@@ -1331,9 +1341,10 @@ fn create_num_tx(
                 proprietary: BTreeMap::new(),
                 ..Default::default()
             };
-            spend_input
-                .proprietary
-                .insert(SpacesWallet::spaces_signer("sign_with_custom_secret"), secret.to_vec());
+            spend_input.proprietary.insert(
+                SpacesWallet::spaces_signer("sign_with_custom_secret"),
+                secret.to_vec(),
+            );
             builder
                 .add_foreign_utxo_with_sequence(
                     outpoint,
@@ -1348,7 +1359,7 @@ fn create_num_tx(
                 .add_utxo(outpoint)
                 .map_err(|e| anyhow!("could not transfer num at {}:{}", outpoint, e))?;
         }
-        
+
         // add replacement output at the same index
         builder.add_recipient(
             transfer.recipient.script_pubkey(),
@@ -1362,11 +1373,11 @@ fn create_num_tx(
     }
 
     // Add data OP_RETURN if present (only makes sense with transfers)
-    if let Some(data) = params.data {
-        if has_transfers {
-            let script = create_data_script(&data);
-            builder.add_recipient(script, Amount::from_sat(0));
-        }
+    if let Some(data) = params.data
+        && has_transfers
+    {
+        let script = create_data_script(&data);
+        builder.add_recipient(script, Amount::from_sat(0));
     }
 
     let psbt = builder.finish()?;

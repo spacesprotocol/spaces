@@ -9,8 +9,8 @@ extern crate alloc;
 
 use alloc::vec;
 use bitcoin::hashes::Hash;
-use bitcoin::{secp256k1::schnorr, Amount, BlockHash, OutPoint, ScriptBuf, Txid};
-use borsh::{io, BorshDeserialize, BorshSerialize};
+use bitcoin::{Amount, BlockHash, OutPoint, ScriptBuf, Txid, secp256k1::schnorr};
+use borsh::{BorshDeserialize, BorshSerialize, io};
 
 /// Serialize a Txid
 pub fn serialize_txid<W: io::Write>(txid: &Txid, writer: &mut W) -> io::Result<()> {

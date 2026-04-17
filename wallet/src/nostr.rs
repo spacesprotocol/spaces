@@ -1,8 +1,8 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{anyhow, Result};
-use bitcoin::hashes::{sha256, Hash, HashEngine};
-use secp256k1::{schnorr::Signature, Keypair, Secp256k1, Signing, Verification, XOnlyPublicKey};
+use anyhow::{Result, anyhow};
+use bitcoin::hashes::{Hash, HashEngine, sha256};
+use secp256k1::{Keypair, Secp256k1, Signing, Verification, XOnlyPublicKey, schnorr::Signature};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -47,7 +47,7 @@ impl NostrEvent {
         self.tags
             .iter()
             .find(|tag| {
-                if tag.0.len() >= 1 {
+                if !tag.0.is_empty() {
                     tag.0[0] == "space"
                 } else {
                     false
@@ -100,10 +100,7 @@ impl NostrEvent {
             Some(sig) => sig,
         };
         let msg = secp256k1::Message::from_digest(digest.to_byte_array());
-        match ctx.verify_schnorr(&sig, &msg, pubkey) {
-            Ok(_) => true,
-            Err(_) => false,
-        }
+        ctx.verify_schnorr(&sig, &msg, pubkey).is_ok()
     }
 
     pub fn sign<C: Signing>(&mut self, ctx: Secp256k1<C>, keypair: &Keypair) -> Result<()> {
@@ -124,7 +121,7 @@ impl NostrEvent {
             return Err(anyhow!("wrong event id"));
         }
 
-        self.id = Some(digest.clone());
+        self.id = Some(digest);
         let msg_to_sign = secp256k1::Message::from_digest(digest.to_byte_array());
         self.sig = Some(ctx.sign_schnorr(&msg_to_sign, keypair));
         Ok(())

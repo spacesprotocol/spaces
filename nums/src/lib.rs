@@ -1,5 +1,4 @@
 pub mod constants;
-#[cfg(feature = "std")]
 pub mod num_id;
 pub mod snumeric;
 
@@ -430,7 +429,7 @@ impl TxContext {
     ) -> spaces_protocol::errors::Result<Option<TxContext>> {
         let has_num_outputs = is_num_minting_locktime(&tx.lock_time)
             && tx.output.iter().any(|out| out.is_ptr_output());
-        let has_spaces = spends_spaces || space_outputs.len() > 0;
+        let has_spaces = spends_spaces || !space_outputs.is_empty();
 
         let relevant = has_spaces || has_num_outputs || Self::spending_nums(src, tx)?;
         if !relevant {
@@ -500,13 +499,11 @@ impl TxContext {
             }
         }
         for input in &inputs {
-            let dk = DelegatorKey::from_id::<H>(
-                NumId::from_spk::<H>(input.numout.script_pubkey.clone()),
-            );
-            if !nums_with_delegations.contains(&dk) {
-                if src.get_delegator(&dk)?.is_some() {
-                    nums_with_delegations.push(dk);
-                }
+            let dk = DelegatorKey::from_id::<H>(NumId::from_spk::<H>(
+                input.numout.script_pubkey.clone(),
+            ));
+            if !nums_with_delegations.contains(&dk) && src.get_delegator(&dk)?.is_some() {
+                nums_with_delegations.push(dk);
             }
         }
 
@@ -536,6 +533,12 @@ pub fn rolling_hash<H: KeyHasher>(old: [u8; 32], new_root: [u8; 32]) -> [u8; 32]
     data[0..32].copy_from_slice(&old);
     data[32..64].copy_from_slice(&new_root);
     H::hash(&data)
+}
+
+impl Default for Validator {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Validator {
@@ -582,24 +585,22 @@ impl Validator {
 
         // Revoke num to num delegations only when the source num is spent
         // and a delegation actually exists at that address.
-        changeset.revoked_delegations.extend(
-            ctx.inputs
-                .iter()
-                .filter_map(|input| {
-                    let operator_id = NumId::from_spk::<H>(input.numout.script_pubkey.clone());
-                    if operator_id == input.numout.num.id {
-                        return None;
-                    }
-                    let dk = DelegatorKey::from_id::<H>(operator_id);
-                    if !ctx.nums_with_delegations.contains(&dk) {
-                        return None;
-                    }
-                    Some(DelegationInfo {
-                        subject: input.numout.num.name.to_slabel(),
-                        id: operator_id,
-                    })
-                }),
-        );
+        changeset
+            .revoked_delegations
+            .extend(ctx.inputs.iter().filter_map(|input| {
+                let operator_id = NumId::from_spk::<H>(input.numout.script_pubkey.clone());
+                if operator_id == input.numout.num.id {
+                    return None;
+                }
+                let dk = DelegatorKey::from_id::<H>(operator_id);
+                if !ctx.nums_with_delegations.contains(&dk) {
+                    return None;
+                }
+                Some(DelegationInfo {
+                    subject: input.numout.num.name.to_slabel(),
+                    id: operator_id,
+                })
+            }));
 
         // Clear revoked num ids so they can be redelegated in the same tx
         let revoked_keys: Vec<DelegatorKey> = changeset
@@ -642,13 +643,13 @@ impl Validator {
                 match &commitment_op {
                     Some(CommitmentOp::Rollback) => {
                         // Rollback applies to ALL delegates with pending commitments
-                        if let Some(pending) = delegate.pending_tip {
-                            if !pending.is_finalized(height) {
-                                changeset.revoked_commitments.push(CommitmentInfo {
-                                    space: delegate.subject.clone(),
-                                    commitment: pending,
-                                });
-                            }
+                        if let Some(pending) = delegate.pending_tip
+                            && !pending.is_finalized(height)
+                        {
+                            changeset.revoked_commitments.push(CommitmentInfo {
+                                space: delegate.subject.clone(),
+                                commitment: pending,
+                            });
                         }
                     }
                     Some(CommitmentOp::Commit(_)) => {
@@ -758,12 +759,13 @@ impl Validator {
         changeset
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn process_spend(
         &self,
         tx: &Transaction,
         input_index: usize,
         mut numout: NumOut,
-        new_space_utxos: &Vec<SpaceOut>,
+        new_space_utxos: &[SpaceOut],
         changeset: &mut TxChangeSet,
         height: u32,
         data: &Option<Bytes>,
@@ -795,10 +797,11 @@ impl Validator {
         // Only update data if:
         // 1. A data OP_RETURN is present
         // 2. PTR is P2TR and input uses SIGHASH_ALL (prevents malicious data injection)
-        if let Some(new_data) = data {
-            if numout.script_pubkey.is_p2tr() && is_p2tr_sighash_all(tx, input_index) {
-                ptr.data = Some(new_data.clone());
-            }
+        if let Some(new_data) = data
+            && numout.script_pubkey.is_p2tr()
+            && is_p2tr_sighash_all(tx, input_index)
+        {
+            ptr.data = Some(new_data.clone());
         }
         numout.n = output_index;
         numout.value = output.value;
@@ -821,8 +824,8 @@ pub enum NumOp {
 }
 
 /// To make a commitment, we use:
-/// Commit: OP_RETURN OP_PUSHNUM_2 OP_PUSHBYTES_x <data>
-/// Rollback: OP_RETURN OP_PUSHNUM_2 OP_PUSHBYTES_0
+/// - Commit: `OP_RETURN OP_PUSHNUM_2 OP_PUSHBYTES_x <data>`
+/// - Rollback: `OP_RETURN OP_PUSHNUM_2 OP_PUSHBYTES_0`
 pub fn find_op_commit(tx_outputs: &[TxOut]) -> Option<CommitmentOp> {
     tx_outputs.iter().find_map(|s| {
         let mut instructions = s.script_pubkey.instructions().skip(1);
@@ -857,7 +860,7 @@ pub fn create_commitment_script(op: &CommitmentOp) -> ScriptBuf {
     match op {
         CommitmentOp::Rollback => {
             // OP_RETURN OP_PUSHNUM_2 OP_PUSHBYTES_0
-            builder = builder.push_slice(&[]);
+            builder = builder.push_slice([]);
         }
         CommitmentOp::Commit(commitments) => {
             // OP_RETURN OP_PUSHNUM_2 OP_PUSHBYTES_N <commitments>
@@ -876,6 +879,7 @@ pub fn create_commitment_script(op: &CommitmentOp) -> ScriptBuf {
 /// Per BIP 341:
 /// - 64 bytes = SIGHASH_DEFAULT (0x00), equivalent to SIGHASH_ALL
 /// - 65 bytes with last byte 0x01 = SIGHASH_ALL
+///
 /// Note: 0x00 is never appended (always 64 bytes for default)
 fn is_p2tr_sighash_all(tx: &Transaction, input_index: usize) -> bool {
     let input = match tx.input.get(input_index) {

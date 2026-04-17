@@ -1,10 +1,10 @@
 pub mod integrity;
 
+use flate2::read::GzDecoder;
+use sha2::{Digest, Sha256};
 use std::fmt;
 use std::io::{Cursor, Read};
 use std::path::Path;
-use flate2::read::GzDecoder;
-use sha2::{Sha256, Digest};
 
 pub const CHECKPOINT_BASE_URL: &str = "https://checkpoints.spacesprotocol.org";
 
@@ -30,9 +30,10 @@ impl Checkpoint {
         let bytes = hex::decode(&self.digest)
             .map_err(|e| CheckpointError::Unavailable(format!("invalid digest hex: {}", e)))?;
         if bytes.len() != 32 {
-            return Err(CheckpointError::Unavailable(
-                format!("invalid digest length: {}", bytes.len()),
-            ));
+            return Err(CheckpointError::Unavailable(format!(
+                "invalid digest length: {}",
+                bytes.len()
+            )));
         }
         let mut arr = [0u8; 32];
         arr.copy_from_slice(&bytes);
@@ -41,7 +42,11 @@ impl Checkpoint {
 
     /// Build the download URL for this checkpoint.
     pub fn url(&self, base_url: &str) -> String {
-        format!("{}/checkpoint-{}.tar.gz", base_url.trim_end_matches('/'), self.height)
+        format!(
+            "{}/checkpoint-{}.tar.gz",
+            base_url.trim_end_matches('/'),
+            self.height
+        )
     }
 }
 
@@ -53,7 +58,9 @@ pub fn fetch_latest(base_url: &str) -> Result<Option<Checkpoint>, CheckpointErro
         Ok(r) => r,
         Err(_) => return Ok(None),
     };
-    let body: String = response.into_body().read_to_string()
+    let body: String = response
+        .into_body()
+        .read_to_string()
         .map_err(|e| CheckpointError::Unavailable(e.to_string()))?;
     let latest: Checkpoint = serde_json::from_str(&body)
         .map_err(|e| CheckpointError::Unavailable(format!("invalid latest.json: {}", e)))?;
@@ -80,8 +87,11 @@ impl fmt::Display for CheckpointError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             CheckpointError::Unavailable(msg) => write!(f, "checkpoint unavailable: {}", msg),
-            CheckpointError::DigestMismatch { expected, got } =>
-                write!(f, "checkpoint hash mismatch: expected {}, got {}", expected, got),
+            CheckpointError::DigestMismatch { expected, got } => write!(
+                f,
+                "checkpoint hash mismatch: expected {}, got {}",
+                expected, got
+            ),
             CheckpointError::Extract(e) => write!(f, "failed to extract checkpoint: {}", e),
             CheckpointError::Io(e) => write!(f, "io error: {}", e),
         }
@@ -121,7 +131,9 @@ pub fn ensure_checkpoint(
             let delay = std::time::Duration::from_secs(1 << attempt);
             tracing::warn!(
                 "checkpoint download attempt {}/{} failed, retrying in {:?}...",
-                attempt, MAX_RETRIES, delay
+                attempt,
+                MAX_RETRIES,
+                delay
             );
             std::thread::sleep(delay);
         }
@@ -134,7 +146,8 @@ pub fn ensure_checkpoint(
                 if attempt == MAX_RETRIES {
                     tracing::warn!(
                         "checkpoint unavailable after {} attempts: {} — falling back to full sync",
-                        MAX_RETRIES + 1, e
+                        MAX_RETRIES + 1,
+                        e
                     );
                     return Ok(false);
                 }
@@ -153,10 +166,13 @@ fn download_and_verify(
 ) -> Result<Vec<u8>, CheckpointError> {
     tracing::info!("downloading checkpoint from {}", url);
 
-    let response = ureq::get(url).call()
+    let response = ureq::get(url)
+        .call()
         .map_err(|e| CheckpointError::Unavailable(e.to_string()))?;
 
-    let total = response.headers().get("content-length")
+    let total = response
+        .headers()
+        .get("content-length")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(0);
@@ -165,7 +181,8 @@ fn download_and_verify(
     let mut data = Vec::with_capacity(total as usize);
     let mut buf = [0u8; 64 * 1024];
     loop {
-        let n = reader.read(&mut buf)
+        let n = reader
+            .read(&mut buf)
             .map_err(|e| CheckpointError::Unavailable(e.to_string()))?;
         if n == 0 {
             break;
@@ -194,7 +211,9 @@ fn extract(target_dir: &Path, data: &[u8]) -> Result<(), CheckpointError> {
     tracing::info!("extracting checkpoint...");
     let decoder = GzDecoder::new(Cursor::new(data));
     let mut archive = tar::Archive::new(decoder);
-    archive.unpack(target_dir).map_err(CheckpointError::Extract)?;
+    archive
+        .unpack(target_dir)
+        .map_err(CheckpointError::Extract)?;
     tracing::info!("checkpoint extracted to {:?}", target_dir);
     Ok(())
 }
@@ -203,8 +222,8 @@ fn extract(target_dir: &Path, data: &[u8]) -> Result<(), CheckpointError> {
 /// by inspecting the latest snapshot metadata in root.sdb.
 #[cfg(feature = "cli")]
 pub fn read_tip(data_dir: &Path) -> anyhow::Result<(String, u32)> {
-    use spacedb::db::Database;
     use spacedb::Sha256Hasher;
+    use spacedb::db::Database;
     use spaces_protocol::constants::ChainAnchor;
 
     let db_path = data_dir.join("root.sdb");
@@ -214,14 +233,20 @@ pub fn read_tip(data_dir: &Path) -> anyhow::Result<(String, u32)> {
 
     let config = spacedb::Configuration::standard();
     let db: Database<Sha256Hasher> = Database::open_with_config(
-        db_path.to_str().ok_or_else(|| anyhow::anyhow!("invalid path"))?,
+        db_path
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("invalid path"))?,
         config,
     )?;
 
-    let snapshot = db.iter().next()
+    let snapshot = db
+        .iter()
+        .next()
         .ok_or_else(|| anyhow::anyhow!("no snapshots in root.sdb"))?;
     let snapshot = snapshot?;
-    let anchor: ChainAnchor = snapshot.metadata().try_into()
+    let anchor: ChainAnchor = snapshot
+        .metadata()
+        .try_into()
         .map_err(|_| anyhow::anyhow!("could not read snapshot metadata"))?;
 
     Ok((anchor.hash.to_string(), anchor.height))
@@ -230,12 +255,9 @@ pub fn read_tip(data_dir: &Path) -> anyhow::Result<(String, u32)> {
 /// Build a checkpoint archive from a spaced data directory.
 /// Returns the SHA-256 digest of the produced archive.
 #[cfg(feature = "cli")]
-pub fn build_checkpoint(
-    data_dir: &Path,
-    output: &Path,
-) -> anyhow::Result<[u8; 32]> {
-    use flate2::write::GzEncoder;
+pub fn build_checkpoint(data_dir: &Path, output: &Path) -> anyhow::Result<[u8; 32]> {
     use flate2::Compression;
+    use flate2::write::GzEncoder;
     use std::fs::File;
 
     for name in CHECKPOINT_FILES {
@@ -274,15 +296,35 @@ pub fn checkpoint() -> super::Checkpoint {{
         digest: "{}".to_string(),
     }}
 }}"#,
-        height, block_hash, hex::encode(digest),
+        height,
+        block_hash,
+        hex::encode(digest),
     )
+}
+
+#[cfg(feature = "cli")]
+const INTEGRITY_PATH: &str = "checkpoint/src/integrity.rs";
+
+/// Write the checkpoint constant to integrity.rs.
+/// Must be run from the workspace root.
+#[cfg(feature = "cli")]
+pub fn write_integrity(height: u32, block_hash: &str, digest: &[u8; 32]) -> anyhow::Result<()> {
+    let path = Path::new(INTEGRITY_PATH);
+    if !path.exists() {
+        anyhow::bail!(
+            "{} not found — run checkpoint-builder from the workspace root",
+            INTEGRITY_PATH
+        );
+    }
+    std::fs::write(path, format_integrity_file(height, block_hash, digest))?;
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     #[test]
     fn download_reports_progress() {
@@ -307,10 +349,16 @@ mod tests {
         let applied = ensure_checkpoint(dir.path(), &url, &digest, Some(&*progress)).unwrap();
 
         assert!(applied, "checkpoint should be applied");
-        assert!(call_count.load(Ordering::SeqCst) > 1, "progress should be called multiple times");
+        assert!(
+            call_count.load(Ordering::SeqCst) > 1,
+            "progress should be called multiple times"
+        );
 
         let total = last_total.load(Ordering::SeqCst);
-        assert!(total > 0, "total bytes should be reported from content-length");
+        assert!(
+            total > 0,
+            "total bytes should be reported from content-length"
+        );
 
         let downloaded = last_downloaded.load(Ordering::SeqCst);
         assert_eq!(downloaded, total, "final downloaded should equal total");
@@ -320,22 +368,4 @@ mod tests {
             assert!(dir.path().join(name).exists(), "{} should exist", name);
         }
     }
-}
-
-#[cfg(feature = "cli")]
-const INTEGRITY_PATH: &str = "checkpoint/src/integrity.rs";
-
-/// Write the checkpoint constant to integrity.rs.
-/// Must be run from the workspace root.
-#[cfg(feature = "cli")]
-pub fn write_integrity(height: u32, block_hash: &str, digest: &[u8; 32]) -> anyhow::Result<()> {
-    let path = Path::new(INTEGRITY_PATH);
-    if !path.exists() {
-        anyhow::bail!(
-            "{} not found — run checkpoint-builder from the workspace root",
-            INTEGRITY_PATH
-        );
-    }
-    std::fs::write(path, format_integrity_file(height, block_hash, digest))?;
-    Ok(())
 }

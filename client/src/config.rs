@@ -12,17 +12,17 @@ use jsonrpsee::core::Serialize;
 use log::error;
 use rand::{
     distributions::Alphanumeric,
-    {thread_rng, Rng},
+    {Rng, thread_rng},
 };
 use serde::Deserialize;
 use spaces_protocol::bitcoin::Network;
 
+use crate::store::chain::{Chain, ROOT_ANCHORS_COUNT};
 use crate::{
     auth::{auth_token_from_cookie, auth_token_from_creds},
     source::{BitcoinRpc, BitcoinRpcAuth},
     spaces::Spaced,
 };
-use crate::store::chain::{Chain, ROOT_ANCHORS_COUNT};
 
 const RPC_OPTIONS: &str = "RPC Server Options";
 
@@ -72,7 +72,7 @@ pub struct Args {
     /// This option can be specified multiple times (default: 127.0.0.1 and ::1 i.e., localhost)
     #[arg(long, help_heading = Some(RPC_OPTIONS), default_values = ["127.0.0.1", "::1"], env = "SPACED_RPC_BIND")]
     rpc_bind: Vec<String>,
-    /// Listen for JSON-RPC connections on <port>
+    /// Listen for JSON-RPC connections on `<port>`
     #[arg(long, help_heading = Some(RPC_OPTIONS), env = "SPACED_RPC_PORT")]
     rpc_port: Option<u16>,
     /// Index blocks including the full transaction data
@@ -126,6 +126,7 @@ impl ExtendedNetwork {
         }
     }
 
+    #[allow(clippy::result_unit_err)]
     pub fn from_core_arg(arg: &str) -> Result<Self, ()> {
         match arg.to_lowercase().as_str() {
             "main" => Ok(ExtendedNetwork::Mainnet),
@@ -173,11 +174,8 @@ impl Args {
             })
             .collect();
 
-        let auth_token = if args.rpc_user.is_some() {
-            auth_token_from_creds(
-                args.rpc_user.as_ref().unwrap(),
-                args.rpc_password.as_ref().unwrap(),
-            )
+        let auth_token = if let Some(user) = args.rpc_user.as_ref() {
+            auth_token_from_creds(user, args.rpc_password.as_ref().unwrap())
         } else {
             let cookie = format!(
                 "__cookie__:{}",
@@ -200,13 +198,17 @@ impl Args {
 
         let bitcoin_rpc_auth = if let Some(cookie) = args.bitcoin_rpc_cookie {
             let cookie = std::fs::read_to_string(&cookie).map_err(|e| {
-                anyhow!("Failed to read Bitcoin RPC cookie '{}': {}", cookie.display(), e)
+                anyhow!(
+                    "Failed to read Bitcoin RPC cookie '{}': {}",
+                    cookie.display(),
+                    e
+                )
             })?;
             BitcoinRpcAuth::Cookie(cookie)
         } else if let Some(user) = args.bitcoin_rpc_user {
             BitcoinRpcAuth::UserPass(user, args.bitcoin_rpc_password.expect("password"))
-        } else if let Some(cookie) = default_bitcoin_cookie_path(&args.chain)
-            .and_then(|p| std::fs::read_to_string(&p).ok())
+        } else if let Some(cookie) =
+            default_bitcoin_cookie_path(&args.chain).and_then(|p| std::fs::read_to_string(&p).ok())
         {
             log::info!("Using Bitcoin Core cookie authentication");
             BitcoinRpcAuth::Cookie(cookie)
@@ -288,7 +290,9 @@ pub fn default_bitcoin_cookie_path(network: &ExtendedNetwork) -> Option<PathBuf>
     } else if cfg!(target_os = "macos") {
         home?.join("Library/Application Support/Bitcoin")
     } else if cfg!(target_os = "windows") {
-        std::env::var_os("APPDATA").map(PathBuf::from)?.join("Bitcoin")
+        std::env::var_os("APPDATA")
+            .map(PathBuf::from)?
+            .join("Bitcoin")
     } else {
         return None;
     };

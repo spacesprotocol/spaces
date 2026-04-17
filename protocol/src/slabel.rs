@@ -6,7 +6,7 @@ use core::{
 };
 
 #[cfg(feature = "serde")]
-use serde::{de::Error as ErrorUtil, Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as ErrorUtil};
 
 use crate::{constants::RESERVED_SPACES, errors::Error};
 
@@ -18,7 +18,7 @@ pub struct SLabel([u8; MAX_LABEL_LEN + 1]);
 
 #[cfg(feature = "borsh")]
 pub mod borsh_impl {
-    use borsh::{io, BorshDeserialize, BorshSerialize};
+    use borsh::{BorshDeserialize, BorshSerialize, io};
 
     use super::*;
 
@@ -165,12 +165,16 @@ impl<'a> TryFrom<&'a [u8]> for SLabelRef<'a> {
         if label[1] == b'#' {
             let content = &label[2..];
             // Find first dash (block-txpos boundary)
-            let d1 = content.iter().position(|&c| c == b'-')
+            let d1 = content
+                .iter()
+                .position(|&c| c == b'-')
                 .filter(|&p| p > 0)
                 .ok_or(Error::Name(NameErrorKind::InvalidCharacter))?;
             let rest = &content[d1 + 1..];
             // Find second dash (txpos-vout boundary)
-            let d2 = rest.iter().position(|&c| c == b'-')
+            let d2 = rest
+                .iter()
+                .position(|&c| c == b'-')
                 .filter(|&p| p > 0)
                 .ok_or(Error::Name(NameErrorKind::InvalidCharacter))?;
 
@@ -178,7 +182,9 @@ impl<'a> TryFrom<&'a [u8]> for SLabelRef<'a> {
             let tx_pos = &rest[..d2];
             let vout = &rest[d2 + 1..];
 
-            if block.is_empty() || tx_pos.is_empty() || vout.is_empty()
+            if block.is_empty()
+                || tx_pos.is_empty()
+                || vout.is_empty()
                 || !block.iter().all(|c| c.is_ascii_digit())
                 || !tx_pos.iter().all(|c| c.is_ascii_digit())
                 || !vout.iter().all(|c| c.is_ascii_digit())
@@ -253,8 +259,8 @@ impl TryFrom<&str> for SLabel {
         if value.starts_with('#') {
             return Self::from_str_unprefixed(value);
         }
-        if value.starts_with('@') {
-            return Self::from_str_unprefixed(&value[1..]);
+        if let Some(rest) = value.strip_prefix('@') {
+            return Self::from_str_unprefixed(rest);
         }
         Err(Error::Name(NameErrorKind::NotCanonical))
     }
@@ -273,7 +279,7 @@ impl Display for SLabel {
 
 impl Display for SLabelRef<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}", self)
+        Display::fmt(&self.to_owned(), f)
     }
 }
 
@@ -540,13 +546,22 @@ mod tests {
         assert!(SLabel::try_from("#123-4").is_err(), "missing vout");
 
         // No digits before first dash
-        assert!(SLabel::try_from("#-3-1").is_err(), "no digits before first dash");
+        assert!(
+            SLabel::try_from("#-3-1").is_err(),
+            "no digits before first dash"
+        );
 
         // No digits between dashes
-        assert!(SLabel::try_from("#3--1").is_err(), "no digits between dashes");
+        assert!(
+            SLabel::try_from("#3--1").is_err(),
+            "no digits between dashes"
+        );
 
         // No digits after second dash
-        assert!(SLabel::try_from("#3-4-").is_err(), "no digits after second dash");
+        assert!(
+            SLabel::try_from("#3-4-").is_err(),
+            "no digits after second dash"
+        );
 
         // Non-digit characters
         assert!(SLabel::try_from("#abc-3-1").is_err(), "letters in block");

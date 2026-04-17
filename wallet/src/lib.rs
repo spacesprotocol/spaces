@@ -1,25 +1,24 @@
-use std::{collections::BTreeMap, fmt, fmt::Debug, fs, ops::Mul, path::PathBuf, str::FromStr};
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
+use bdk_wallet::chain::keychain_txout::KeychainTxOutIndex;
 use bdk_wallet::{
-    chain,
+    AddressInfo, KeychainKind, LocalOutput, PersistedWallet, SignOptions, TxBuilder, Update,
+    Wallet, WalletTx, WeightedUtxo, chain,
     chain::{
+        BlockId, ChainPosition, Indexer,
         local_chain::{CannotConnectError, LocalChain},
         tx_graph::CalculateFeeError,
-        BlockId, ChainPosition, Indexer,
     },
     coin_selection::{CoinSelectionAlgorithm, CoinSelectionResult, Excess, InsufficientFunds},
     keys::DescriptorSecretKey,
     rusqlite::Connection,
     tx_builder::TxOrdering,
-    AddressInfo, KeychainKind, LocalOutput, PersistedWallet, SignOptions, TxBuilder, Update,
-    Wallet, WalletTx, WeightedUtxo,
 };
-use bdk_wallet::chain::keychain_txout::KeychainTxOutIndex;
-use borsh::{BorshDeserialize, BorshSerialize, io};
 use bitcoin::{
+    Amount, Block, BlockHash, FeeRate, Network, OutPoint, Psbt, Sequence, TapLeafHash,
+    TapSighashType, Transaction, TxIn, TxOut, Txid, Weight, Witness,
     absolute::{Height, LockTime},
     bip32::ChildNumber,
-    key::{rand::RngCore, TapTweak, TweakedKeypair},
+    key::{TapTweak, TweakedKeypair, rand::RngCore},
     psbt,
     psbt::raw::ProprietaryKey,
     script,
@@ -27,33 +26,36 @@ use bitcoin::{
     taproot,
     taproot::LeafVersion,
     transaction::Version,
-    Amount, Block, BlockHash, FeeRate, Network, OutPoint, Psbt, Sequence, TapLeafHash,
-    TapSighashType, Transaction, TxIn, TxOut, Txid, Weight, Witness,
 };
-use secp256k1::{schnorr, schnorr::Signature, Message};
-use serde::{ser::SerializeSeq, Deserialize, Deserializer, Serialize, Serializer};
+use borsh::{BorshDeserialize, BorshSerialize, io};
+use secp256k1::{Message, schnorr, schnorr::Signature};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, ser::SerializeSeq};
+use spaces_nums::snumeric::SNumeric;
+use spaces_nums::{
+    NumSource,
+    num_id::{NUM_HRP, NumId},
+};
 use spaces_protocol::{
+    Covenant, FullSpaceOut, Space,
     bitcoin::{
+        Address, ScriptBuf, XOnlyPublicKey,
         constants::genesis_block,
-        key::{rand, UntweakedKeypair},
+        key::{UntweakedKeypair, rand},
         opcodes,
         taproot::{ControlBlock, TaprootBuilder},
-        Address, ScriptBuf, XOnlyPublicKey,
     },
     constants::{BID_PSBT_INPUT_SEQUENCE, BID_PSBT_TX_LOCK_TIME},
     hasher::{KeyHasher, SpaceKey},
-    prepare::{is_magic_lock_time, SpacesSource, TrackableOutput},
+    prepare::{SpacesSource, TrackableOutput, is_magic_lock_time},
     slabel::SLabel,
-    Covenant, FullSpaceOut, Space,
 };
-use spaces_nums::{NumSource, num_id::{NumId, NUM_HRP}};
-use spaces_nums::snumeric::SNumeric;
+use std::{collections::BTreeMap, fmt, fmt::Debug, fs, ops::Mul, path::PathBuf, str::FromStr};
 
 use crate::{
     address::SpaceAddress,
     builder::{
-        is_connector_dust, is_space_dust, space_dust, tap_key_spend_weight,
-        SpacesAwareCoinSelection,
+        SpacesAwareCoinSelection, is_connector_dust, is_space_dust, space_dust,
+        tap_key_spend_weight,
     },
     nostr::NostrEvent,
     tx_event::{TxEvent, TxEventKind, TxRecord},
@@ -280,11 +282,11 @@ impl SpacesWallet {
                 config.space_descriptors.external.clone(),
                 config.space_descriptors.internal.clone(),
             )
-                .lookahead(50)
-                .network(config.network)
-                .genesis_hash(genesis_hash)
-                .create_wallet(&mut conn)
-                .context("could not create wallet")?
+            .lookahead(50)
+            .network(config.network)
+            .genesis_hash(genesis_hash)
+            .create_wallet(&mut conn)
+            .context("could not create wallet")?
         };
 
         let tx = conn
@@ -355,7 +357,7 @@ impl SpacesWallet {
         })
     }
 
-    pub fn transactions(&self) -> impl Iterator<Item=WalletTx<'_>> + '_ {
+    pub fn transactions(&self) -> impl Iterator<Item = WalletTx<'_>> + '_ {
         self.internal
             .transactions()
             .filter(|tx| !is_revert_tx(tx) && self.internal.spk_index().is_tx_relevant(&tx.tx_node))
@@ -402,8 +404,8 @@ impl SpacesWallet {
     ) -> anyhow::Result<TxBuilder<'_, SpacesAwareCoinSelection>> {
         let events = self.get_tx_events(txid)?;
         for event in events {
-            match event.kind {
-                TxEventKind::Bid => match self.get_tx(txid) {
+            if event.kind == TxEventKind::Bid {
+                match self.get_tx(txid) {
                     Some(tx) => {
                         if !tx.chain_position.is_confirmed() {
                             return Err(anyhow!(
@@ -413,8 +415,7 @@ impl SpacesWallet {
                         }
                     }
                     _ => continue,
-                },
-                _ => {}
+                }
             }
         }
 
@@ -453,11 +454,11 @@ impl SpacesWallet {
         self.internal.is_mine(script)
     }
 
-    pub fn list_unspent(&self) -> impl Iterator<Item=LocalOutput> + '_ {
+    pub fn list_unspent(&self) -> impl Iterator<Item = LocalOutput> + '_ {
         self.internal.list_unspent()
     }
 
-    pub fn list_output(&self) -> impl Iterator<Item=LocalOutput> + '_ {
+    pub fn list_output(&self) -> impl Iterator<Item = LocalOutput> + '_ {
         self.internal.list_output()
     }
 
@@ -480,7 +481,8 @@ impl SpacesWallet {
         let outpoint = match &subject {
             Subject::Label(label) if label.is_numeric() => {
                 let numeric: SNumeric = label.clone().try_into().unwrap();
-                let id = src.get_num_id(&numeric)?
+                let id = src
+                    .get_num_id(&numeric)?
                     .ok_or_else(|| anyhow::anyhow!("Numeric '{}' not found", numeric))?;
                 src.get_num_outpoint_by_id(&id)?
                     .ok_or_else(|| anyhow::anyhow!("Num id not found"))?
@@ -493,16 +495,19 @@ impl SpacesWallet {
                 src.get_space_outpoint(&space_key)?
                     .ok_or_else(|| anyhow::anyhow!("Space not found"))?
             }
-            Subject::NumId(id) => {
-                src.get_num_outpoint_by_id(id)?
-                    .ok_or_else(|| anyhow::anyhow!("Num id not found"))?
-            }
+            Subject::NumId(id) => src
+                .get_num_outpoint_by_id(id)?
+                .ok_or_else(|| anyhow::anyhow!("Num id not found"))?,
         };
 
         // We use list_output instead of get_utxo because the output might
         // be spent in a pending tx, so signatures are still valid until confirmed.
-        let utxo = self.internal.list_output().find(|o| o.outpoint == outpoint)
-            .clone().ok_or_else(|| anyhow::anyhow!("Not owned by wallet"))?;
+        let utxo = self
+            .internal
+            .list_output()
+            .find(|o| o.outpoint == outpoint)
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("Not owned by wallet"))?;
 
         let keypair = self
             .get_taproot_keypair(utxo.keychain, utxo.derivation_index)
@@ -520,11 +525,14 @@ impl SpacesWallet {
         let script_pubkey = match &subject {
             Subject::Label(label) if label.is_numeric() => {
                 let numeric: SNumeric = label.clone().try_into().unwrap();
-                let id = src.get_num_id(&numeric)?
+                let id = src
+                    .get_num_id(&numeric)?
                     .ok_or_else(|| anyhow::anyhow!("Numeric '{}' not found", numeric))?;
-                let outpoint = src.get_num_outpoint_by_id(&id)?
+                let outpoint = src
+                    .get_num_outpoint_by_id(&id)?
                     .ok_or_else(|| anyhow::anyhow!("Num id not found"))?;
-                let numout = src.get_numout(&outpoint)?
+                let numout = src
+                    .get_numout(&outpoint)?
                     .ok_or_else(|| anyhow::anyhow!("Num output not found"))?;
                 numout.script_pubkey
             }
@@ -533,16 +541,20 @@ impl SpacesWallet {
                     return Err(anyhow::anyhow!("Space tag does not match specified space"));
                 }
                 let space_key = SpaceKey::from(H::hash(label.as_ref()));
-                let outpoint = src.get_space_outpoint(&space_key)?
+                let outpoint = src
+                    .get_space_outpoint(&space_key)?
                     .ok_or_else(|| anyhow::anyhow!("Space not found"))?;
-                let spaceout = src.get_spaceout(&outpoint)?
+                let spaceout = src
+                    .get_spaceout(&outpoint)?
                     .ok_or_else(|| anyhow::anyhow!("Space not found"))?;
                 spaceout.script_pubkey
             }
             Subject::NumId(id) => {
-                let outpoint = src.get_num_outpoint_by_id(id)?
+                let outpoint = src
+                    .get_num_outpoint_by_id(id)?
                     .ok_or_else(|| anyhow::anyhow!("Num id not found"))?;
-                let numout = src.get_numout(&outpoint)?
+                let numout = src
+                    .get_numout(&outpoint)?
                     .ok_or_else(|| anyhow::anyhow!("Num output not found"))?;
                 numout.script_pubkey
             }
@@ -582,12 +594,13 @@ impl SpacesWallet {
         subject: Subject,
         message: &[u8],
     ) -> anyhow::Result<schnorr::Signature> {
-        use bitcoin::hashes::{sha256, Hash, HashEngine};
+        use bitcoin::hashes::{Hash, HashEngine, sha256};
 
         let outpoint = match &subject {
             Subject::Label(label) if label.is_numeric() => {
                 let numeric: SNumeric = label.clone().try_into().unwrap();
-                let id = src.get_num_id(&numeric)?
+                let id = src
+                    .get_num_id(&numeric)?
                     .ok_or_else(|| anyhow::anyhow!("Numeric '{}' not found", numeric))?;
                 src.get_num_outpoint_by_id(&id)?
                     .ok_or_else(|| anyhow::anyhow!("Num id not found"))?
@@ -597,16 +610,19 @@ impl SpacesWallet {
                 src.get_space_outpoint(&space_key)?
                     .ok_or_else(|| anyhow::anyhow!("Space not found"))?
             }
-            Subject::NumId(id) => {
-                src.get_num_outpoint_by_id(id)?
-                    .ok_or_else(|| anyhow::anyhow!("Num id not found"))?
-            }
+            Subject::NumId(id) => src
+                .get_num_outpoint_by_id(id)?
+                .ok_or_else(|| anyhow::anyhow!("Num id not found"))?,
         };
 
         // We use list_output instead of get_utxo because the output might
         // be spent in a pending tx, so signatures are still valid until confirmed.
-        let utxo = self.internal.list_output().find(|o| o.outpoint == outpoint)
-            .clone().ok_or_else(|| anyhow::anyhow!("Not owned by wallet"))?;
+        let utxo = self
+            .internal
+            .list_output()
+            .find(|o| o.outpoint == outpoint)
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("Not owned by wallet"))?;
 
         let keypair = self
             .get_taproot_keypair(utxo.keychain, utxo.derivation_index)
@@ -630,31 +646,38 @@ impl SpacesWallet {
         message: &[u8],
         signature: &schnorr::Signature,
     ) -> anyhow::Result<()> {
-        use bitcoin::hashes::{sha256, Hash, HashEngine};
+        use bitcoin::hashes::{Hash, HashEngine, sha256};
 
         let script_pubkey = match &subject {
             Subject::Label(label) if label.is_numeric() => {
                 let numeric: SNumeric = label.clone().try_into().unwrap();
-                let id = src.get_num_id(&numeric)?
+                let id = src
+                    .get_num_id(&numeric)?
                     .ok_or_else(|| anyhow::anyhow!("Numeric '{}' not found", numeric))?;
-                let outpoint = src.get_num_outpoint_by_id(&id)?
+                let outpoint = src
+                    .get_num_outpoint_by_id(&id)?
                     .ok_or_else(|| anyhow::anyhow!("Num id not found"))?;
-                let numout = src.get_numout(&outpoint)?
+                let numout = src
+                    .get_numout(&outpoint)?
                     .ok_or_else(|| anyhow::anyhow!("Num output not found"))?;
                 numout.script_pubkey
             }
             Subject::Label(label) => {
                 let space_key = SpaceKey::from(H::hash(label.as_ref()));
-                let outpoint = src.get_space_outpoint(&space_key)?
+                let outpoint = src
+                    .get_space_outpoint(&space_key)?
                     .ok_or_else(|| anyhow::anyhow!("Space not found"))?;
-                let spaceout = src.get_spaceout(&outpoint)?
+                let spaceout = src
+                    .get_spaceout(&outpoint)?
                     .ok_or_else(|| anyhow::anyhow!("Space not found"))?;
                 spaceout.script_pubkey
             }
             Subject::NumId(id) => {
-                let outpoint = src.get_num_outpoint_by_id(id)?
+                let outpoint = src
+                    .get_num_outpoint_by_id(id)?
                     .ok_or_else(|| anyhow::anyhow!("Num id not found"))?;
-                let numout = src.get_numout(&outpoint)?
+                let numout = src
+                    .get_numout(&outpoint)?
                     .ok_or_else(|| anyhow::anyhow!("Num output not found"))?;
                 numout.script_pubkey
             }
@@ -782,28 +805,28 @@ impl SpacesWallet {
     pub fn rebuild(self) -> anyhow::Result<Self> {
         let config = self.config;
         fs::remove_file(config.data_dir.join("wallet.db"))?;
-        Ok(SpacesWallet::new(config)?)
+        SpacesWallet::new(config)
     }
 
     pub fn get_info(&self) -> WalletInfo {
-        let mut descriptors = Vec::with_capacity(2);
-
-        descriptors.push(DescriptorInfo {
-            descriptor: self
-                .internal
-                .public_descriptor(KeychainKind::External)
-                .to_string(),
-            internal: false,
-            spaces: true,
-        });
-        descriptors.push(DescriptorInfo {
-            descriptor: self
-                .internal
-                .public_descriptor(KeychainKind::Internal)
-                .to_string(),
-            internal: true,
-            spaces: true,
-        });
+        let descriptors = vec![
+            DescriptorInfo {
+                descriptor: self
+                    .internal
+                    .public_descriptor(KeychainKind::External)
+                    .to_string(),
+                internal: false,
+                spaces: true,
+            },
+            DescriptorInfo {
+                descriptor: self
+                    .internal
+                    .public_descriptor(KeychainKind::Internal)
+                    .to_string(),
+                internal: true,
+                spaces: true,
+            },
+        ];
 
         WalletInfo {
             label: self.config.name.clone(),
@@ -831,16 +854,12 @@ impl SpacesWallet {
         block_id: BlockId,
     ) -> anyhow::Result<()> {
         self.internal
-            .apply_block_connected_to(&block, height, block_id)?;
+            .apply_block_connected_to(block, height, block_id)?;
         Ok(())
     }
 
-    pub fn apply_update(
-        &mut self,
-        update: impl Into<Update>,
-    ) -> Result<(), CannotConnectError> {
-        self.internal
-            .apply_update(update)
+    pub fn apply_update(&mut self, update: impl Into<Update>) -> Result<(), CannotConnectError> {
+        self.internal.apply_update(update)
     }
 
     pub fn apply_unconfirmed_tx(&mut self, tx: Transaction, seen: u64) {
@@ -873,7 +892,7 @@ impl SpacesWallet {
                 event.previous_spaceout,
                 event.details,
             )
-                .context("could not insert tx event into wallet db")?;
+            .context("could not insert tx event into wallet db")?;
         }
         db_tx
             .commit()
@@ -967,7 +986,7 @@ impl SpacesWallet {
         listing: &Listing,
         fee_rate: FeeRate,
     ) -> anyhow::Result<Transaction> {
-        let (seller, spaceout) = Self::verify_listing::<H>(src, &listing)?;
+        let (seller, spaceout) = Self::verify_listing::<H>(src, listing)?;
 
         let mut witness = Witness::new();
         witness.push(
@@ -975,7 +994,7 @@ impl SpacesWallet {
                 signature: listing.signature,
                 sighash_type: TapSighashType::SinglePlusAnyoneCanPay,
             }
-                .to_vec(),
+            .to_vec(),
         );
 
         let funded_psbt = {
@@ -1026,7 +1045,7 @@ impl SpacesWallet {
                 return Err(anyhow::anyhow!(
                     "Unknown space {} - no outpoint found",
                     listing.space
-                ))
+                ));
             }
             Some(outpoint) => outpoint,
         };
@@ -1047,7 +1066,7 @@ impl SpacesWallet {
         }
 
         let recipient = Self::verify_listing_signature(
-            &listing,
+            listing,
             outpoint,
             TxOut {
                 value: spaceout.value,
@@ -1111,7 +1130,7 @@ impl SpacesWallet {
         space: &str,
         asking_price: Amount,
     ) -> anyhow::Result<Listing> {
-        let label = SLabel::from_str(&space)?;
+        let label = SLabel::from_str(space)?;
         let spacehash = SpaceKey::from(H::hash(label.as_ref()));
         let space_outpoint = match src.get_space_outpoint(&spacehash)? {
             None => return Err(anyhow::anyhow!("Space not found")),
@@ -1133,7 +1152,7 @@ impl SpacesWallet {
                 return Err(anyhow::anyhow!(
                     "Wallet does not own a space with outpoint {}",
                     space_outpoint
-                ))
+                ));
             }
             Some(utxo) => utxo,
         };
@@ -1326,11 +1345,10 @@ impl SpacesWallet {
                 );
             }
 
-            if input.final_script_witness.is_none() && input.witness_utxo.is_some() {
-                if self
-                    .internal
-                    .is_mine(input.witness_utxo.as_ref().unwrap().script_pubkey.clone())
-                {
+            if input.final_script_witness.is_none()
+                && let Some(witness_utxo) = input.witness_utxo.as_ref()
+            {
+                if self.internal.is_mine(witness_utxo.script_pubkey.clone()) {
                     input
                         .proprietary
                         .insert(Self::spaces_signer("tbs"), Vec::new());
@@ -1340,10 +1358,7 @@ impl SpacesWallet {
 
                 let previous_output = psbt.unsigned_tx.input[input_index].previous_output;
                 let signing_info = self
-                    .get_signing_info(
-                        previous_output,
-                        &input.witness_utxo.as_ref().unwrap().script_pubkey,
-                    )
+                    .get_signing_info(previous_output, &witness_utxo.script_pubkey)
                     .context("could not retrieve signing info for script")?;
                 if let Some(info) = signing_info {
                     input
@@ -1390,7 +1405,7 @@ impl SpacesWallet {
         }
 
         let mut prevouts = Vec::new();
-        let extras = extra_prevouts.unwrap_or_else(|| BTreeMap::new());
+        let extras = extra_prevouts.unwrap_or_default();
 
         for input in tx.input.iter() {
             if let Some(prevout) = extras.get(&input.previous_output) {
@@ -1432,10 +1447,10 @@ impl SpacesWallet {
                     signature,
                     sighash_type,
                 }
-                    .to_vec(),
+                .to_vec(),
             );
             witness.push(&signing_info.script);
-            witness.push(&signing_info.control_block.serialize());
+            witness.push(signing_info.control_block.serialize());
         }
 
         // Sign inputs with externally-provided secret keys (taproot key-spend)
@@ -1555,7 +1570,7 @@ impl SpaceScriptSigningInfo {
         let key_pair = UntweakedKeypair::new(&secp256k1, &mut rand::thread_rng());
         let (public_key, _) = XOnlyPublicKey::from_keypair(&key_pair);
         let script = nop_script
-            .push_slice(&public_key.serialize())
+            .push_slice(public_key.serialize())
             .push_opcode(opcodes::all::OP_CHECKSIG)
             .into_script();
 

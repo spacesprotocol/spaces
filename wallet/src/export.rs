@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 /// Structure that contains the export of a wallet
 ///
-/// For a usage example see [this module](crate::wallet::export)'s documentation.
+/// For a usage example see [this module](crate::export)'s documentation.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WalletExport {
     pub descriptor: String,
