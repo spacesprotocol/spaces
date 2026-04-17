@@ -7,7 +7,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
-repository = "https://github.com/buffrr/spaces"
+repository = "https://github.com/spacesprotocol/spaces"
 homepage = "https://spacesprotocol.org"
 authors = ["Buffrr <contact@buffrr.dev>"]
 
