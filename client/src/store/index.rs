@@ -1,11 +1,11 @@
-use std::path::Path;
-use std::sync::{Mutex, RwLock};
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use borsh::BorshDeserialize;
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use spaces_nums::num_id::NumId;
 use spaces_nums::snumeric::SNumeric;
 use spaces_protocol::bitcoin::BlockHash;
+use std::path::Path;
+use std::sync::{Mutex, RwLock};
 
 use crate::client::{BlockMeta, NumBlockMeta};
 
@@ -89,7 +89,7 @@ impl SqliteIndex {
         let conn = self.conn.lock().unwrap();
         let mut stmt =
             conn.prepare_cached("SELECT data FROM spaces_blocks WHERE block_hash = ?1")?;
-        let result = stmt.query_row(params![<BlockHash as AsRef<[u8]>>::as_ref(&hash)], |row| {
+        let result = stmt.query_row(params![<BlockHash as AsRef<[u8]>>::as_ref(hash)], |row| {
             let data: Vec<u8> = row.get(0)?;
             Ok(data)
         });
@@ -125,9 +125,8 @@ impl SqliteIndex {
         }
         // Fall back to sqlite
         let conn = self.conn.lock().unwrap();
-        let mut stmt =
-            conn.prepare_cached("SELECT data FROM nums_blocks WHERE block_hash = ?1")?;
-        let result = stmt.query_row(params![<BlockHash as AsRef<[u8]>>::as_ref(&hash)], |row| {
+        let mut stmt = conn.prepare_cached("SELECT data FROM nums_blocks WHERE block_hash = ?1")?;
+        let result = stmt.query_row(params![<BlockHash as AsRef<[u8]>>::as_ref(hash)], |row| {
             let data: Vec<u8> = row.get(0)?;
             Ok(data)
         });
@@ -144,12 +143,11 @@ impl SqliteIndex {
     // --- SNumeric index ---
 
     pub fn insert_snumeric(&self, snum: &SNumeric, id: NumId) {
-        self.staged.write().unwrap().snumeric.push((
-            snum.block(),
-            snum.tx_pos(),
-            snum.vout(),
-            id,
-        ));
+        self.staged
+            .write()
+            .unwrap()
+            .snumeric
+            .push((snum.block(), snum.tx_pos(), snum.vout(), id));
     }
 
     pub fn get_snumeric(&self, snum: &SNumeric) -> Result<Option<NumId>> {
@@ -203,7 +201,11 @@ impl SqliteIndex {
             )?;
             for (hash, height, meta) in staged.spaces_blocks.drain(..) {
                 let data = borsh::to_vec(&meta)?;
-                stmt.execute(params![height, <BlockHash as AsRef<[u8]>>::as_ref(&hash), data])?;
+                stmt.execute(params![
+                    height,
+                    <BlockHash as AsRef<[u8]>>::as_ref(&hash),
+                    data
+                ])?;
             }
         }
 
@@ -213,7 +215,11 @@ impl SqliteIndex {
             )?;
             for (hash, height, meta) in staged.nums_blocks.drain(..) {
                 let data = borsh::to_vec(&meta)?;
-                stmt.execute(params![height, <BlockHash as AsRef<[u8]>>::as_ref(&hash), data])?;
+                stmt.execute(params![
+                    height,
+                    <BlockHash as AsRef<[u8]>>::as_ref(&hash),
+                    data
+                ])?;
             }
         }
 
@@ -222,7 +228,12 @@ impl SqliteIndex {
                 "INSERT OR REPLACE INTO snumeric (block_height, tx_pos, vout, num_id) VALUES (?1, ?2, ?3, ?4)",
             )?;
             for (block_height, tx_pos, vout, id) in staged.snumeric.drain(..) {
-                stmt.execute(params![block_height, tx_pos as u32, vout as u32, id.as_slice()])?;
+                stmt.execute(params![
+                    block_height,
+                    tx_pos as u32,
+                    vout as u32,
+                    id.as_slice()
+                ])?;
             }
         }
 

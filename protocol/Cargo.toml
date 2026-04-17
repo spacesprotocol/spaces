@@ -1,14 +1,20 @@
 [package]
 name = "spaces_protocol"
-version = "0.0.7"
-edition = "2021"
+description = "Core protocol types and consensus rules for the Spaces Protocol."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
 
 [dependencies]
 bitcoin = { version = "0.32.8", features = ["base64", "serde"], default-features = false }
 
 ## optional features
 borsh = { version = "1.5", default-features = false, features = ["derive"], optional = true }
-borsh_utils = { path = "../borsh_utils", optional = true }
+borsh_utils = { workspace = true, optional = true }
 serde = { version = "1.0", features = ["derive"], default-features = false, optional = true }
 
 [dev-dependencies]

@@ -5,9 +5,8 @@ use std::str::FromStr;
 // https://github.com/bitcoindevkit/bdk/blob/bcff89d51d0e1d91058e4430eda8cc57fb7f0f08/crates/chain/src/rusqlite_impl.rs#L55
 use bdk_wallet::rusqlite;
 use bdk_wallet::rusqlite::{
-    named_params,
+    OptionalExtension, ToSql, Transaction, named_params,
     types::{FromSql, FromSqlError, FromSqlResult, ToSqlOutput, ValueRef},
-    OptionalExtension, ToSql, Transaction,
 };
 
 use crate::*;
@@ -18,7 +17,10 @@ pub struct Impl<T>(pub T);
 
 /// Initialize the schema table.
 fn init_schemas_table(db_tx: &Transaction) -> rusqlite::Result<()> {
-    let sql = format!("CREATE TABLE IF NOT EXISTS {}( name TEXT PRIMARY KEY NOT NULL, version INTEGER NOT NULL ) STRICT", SCHEMAS_TABLE_NAME);
+    let sql = format!(
+        "CREATE TABLE IF NOT EXISTS {}( name TEXT PRIMARY KEY NOT NULL, version INTEGER NOT NULL ) STRICT",
+        SCHEMAS_TABLE_NAME
+    );
     db_tx.execute(&sql, ())?;
     Ok(())
 }

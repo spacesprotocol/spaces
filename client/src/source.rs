@@ -1,28 +1,28 @@
-use std::{
-    collections::BTreeMap,
-    fmt,
-    sync::{
-        atomic::{AtomicU64, AtomicUsize, Ordering},
-        mpsc::Receiver,
-        Arc,
-    },
-    time::Duration,
-};
-use std::error::Error;
+use crate::client::BlockFilterRpc;
+use crate::{client::BlockSource, std_wait};
 use base64::Engine;
 use bitcoin::{Block, BlockHash, Txid};
 use hex::FromHexError;
 use log::{error, warn};
 use reqwest::StatusCode;
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
+use spaces_protocol::bitcoin::Network;
 use spaces_protocol::constants::ChainAnchor;
 use spaces_wallet::{bitcoin, bitcoin::Transaction};
+use std::error::Error;
+use std::{
+    collections::BTreeMap,
+    fmt,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+        mpsc::Receiver,
+    },
+    time::Duration,
+};
 use threadpool::ThreadPool;
 use tokio::time::Instant;
-use spaces_protocol::bitcoin::Network;
-use crate::{client::BlockSource, std_wait};
-use crate::client::BlockFilterRpc;
 
 const BITCOIN_RPC_IN_WARMUP: i32 = -28; // Client still warming up
 const BITCOIN_RPC_CLIENT_NOT_CONNECTED: i32 = -9; // Bitcoin is not connected
@@ -35,7 +35,7 @@ pub struct BitcoinRpc {
     id: Arc<AtomicU64>,
     auth_token: Option<String>,
     url: String,
-    legacy: bool
+    legacy: bool,
 }
 
 pub struct BlockFetcher {
@@ -161,7 +161,7 @@ impl BitcoinRpc {
             "method": method,
             "params": params,
         });
-        return BitcoinRpcRequest { id, body };
+        BitcoinRpcRequest { id, body }
     }
 
     pub fn get_block_count(&self) -> BitcoinRpcRequest {
@@ -224,8 +224,9 @@ impl BitcoinRpc {
 
     pub fn send_raw_transaction(&self, tx: &Transaction) -> BitcoinRpcRequest {
         let raw_hex = bitcoin::consensus::encode::serialize_hex(&tx);
-        let params =
-            serde_json::json!([raw_hex, /* max fee rate */ 0, /* max burn amount */ 21_000_000]);
+        let params = serde_json::json!([
+            raw_hex, /* max fee rate */ 0, /* max burn amount */ 21_000_000
+        ]);
 
         self.make_request("sendrawtransaction", params)
     }
@@ -306,7 +307,7 @@ impl BitcoinRpc {
                 Ok(res) => return Self::clean_rpc_response(res).await,
                 Err(e) if e.is_temporary() && attempt < max_retries - 1 => {
                     log_rpc_error(&request.body, &e, delay);
-                    last_error = Some(e.into());
+                    last_error = Some(e);
                     tokio::time::sleep(delay).await;
                     delay *= 2;
                 }
@@ -339,7 +340,7 @@ impl BitcoinRpc {
                 Ok(res) => return Self::clean_rpc_response_blocking(res),
                 Err(e) if e.is_temporary() && attempt < max_retries - 1 => {
                     log_rpc_error(&request.body, &e, delay);
-                    last_error = Some(e.into());
+                    last_error = Some(e);
                     std::thread::sleep(delay);
                     delay *= 2;
                 }
@@ -385,7 +386,7 @@ impl BitcoinRpc {
 
     fn parse_error_bytes(status: StatusCode, res_bytes: &[u8]) -> BitcoinRpcError {
         let parsed_response: Result<JsonRpcResponse<Option<String>>, serde_json::Error> =
-            serde_json::from_slice(&res_bytes);
+            serde_json::from_slice(res_bytes);
 
         match parsed_response {
             Ok(json) => {
@@ -589,7 +590,7 @@ impl BlockFetcher {
         source: &BitcoinBlockSource,
         hash: &BlockHash,
     ) -> Result<Block, BitcoinRpcError> {
-        let block_req = source.rpc.get_block(&hash);
+        let block_req = source.rpc.get_block(hash);
         let id = block_req.id;
         let response = source
             .rpc
@@ -598,7 +599,7 @@ impl BlockFetcher {
         let mut raw = response.bytes()?.to_vec();
 
         let start_needle = "{\"result\":\"";
-        let end_needle = format!("\",\"error\":null,\"id\":\"{}\"}}\n", id.to_string());
+        let end_needle = format!("\",\"error\":null,\"id\":\"{}\"}}\n", id);
 
         // Check if we can quickly extract block
         let hex_block =
@@ -608,13 +609,17 @@ impl BlockFetcher {
                 raw
             } else {
                 // fallback to decoding json
-                let hex_block: JsonRpcResponse<Option<String>> = serde_json::from_slice(raw.as_slice())
-                    .map_err(|e| BitcoinRpcError::Other(format!("fetch block {}: {}",hash, e.to_string())))?;
+                let hex_block: JsonRpcResponse<Option<String>> =
+                    serde_json::from_slice(raw.as_slice()).map_err(|e| {
+                        BitcoinRpcError::Other(format!("fetch block {}: {}", hash, e))
+                    })?;
                 if let Some(e) = hex_block.error {
                     return Err(BitcoinRpcError::Rpc(e));
                 }
-                let block = hex_block.result
-                    .ok_or(BitcoinRpcError::Other(format!("could not find block with hash {}", hash)))?;
+                let block = hex_block.result.ok_or(BitcoinRpcError::Other(format!(
+                    "could not find block with hash {}",
+                    hash
+                )))?;
                 block.into_bytes()
             };
 
@@ -625,12 +630,12 @@ impl BlockFetcher {
         }
 
         let raw_block = hex_to_bytes(hex_block).map_err(|e| {
-            BitcoinRpcError::Other(format!("Hex deserialize error: {}", e.to_string()))
+            BitcoinRpcError::Other(format!("Hex deserialize error: {}", e))
         })?;
 
         let block: Block =
             bitcoin::consensus::encode::deserialize(raw_block.as_slice()).map_err(|e| {
-                BitcoinRpcError::Other(format!("Block Deserialize error: {}", e.to_string()))
+                BitcoinRpcError::Other(format!("Block Deserialize error: {}", e))
             })?;
         Ok(block)
     }
@@ -680,7 +685,7 @@ impl Workers {
 
             self.last_emitted = id;
             self.ordered_sender
-                .send(BlockEvent::Block(id.clone(), block))
+                .send(BlockEvent::Block(id, block))
                 .map_err(|_| BlockFetchError::ChannelClosed)?;
             return Ok(true);
         }
@@ -789,16 +794,16 @@ impl BitcoinRpcError {
                 if e.is_timeout() || e.is_connect() {
                     return true;
                 }
-                if let Some(status) = e.status() {
-                    match status {
-                        StatusCode::REQUEST_TIMEOUT
-                        | StatusCode::TOO_MANY_REQUESTS
-                        | StatusCode::INTERNAL_SERVER_ERROR
-                        | StatusCode::BAD_GATEWAY
-                        | StatusCode::SERVICE_UNAVAILABLE
-                        | StatusCode::GATEWAY_TIMEOUT => return true,
-                        _ => {}
-                    }
+                if let Some(
+                    StatusCode::REQUEST_TIMEOUT
+                    | StatusCode::TOO_MANY_REQUESTS
+                    | StatusCode::INTERNAL_SERVER_ERROR
+                    | StatusCode::BAD_GATEWAY
+                    | StatusCode::SERVICE_UNAVAILABLE
+                    | StatusCode::GATEWAY_TIMEOUT,
+                ) = e.status()
+                {
+                    return true;
                 }
                 false
             }
@@ -856,15 +861,17 @@ impl ErrorForRpc for reqwest::Response {
             Ok(rpc_res) => rpc_res,
             Err(e) => {
                 // Try to decode without result
-                let error_res: Option<JsonRpcResponse<Option<String>>> = serde_json::from_str(&text).ok();
+                let error_res: Option<JsonRpcResponse<Option<String>>> =
+                    serde_json::from_str(&text).ok();
                 if let Some(error_res) = error_res {
                     if let Some(error) = error_res.error {
                         return Err(BitcoinRpcError::Rpc(error));
                     }
                 }
-                return Err(BitcoinRpcError::Other(
-                    format!("Expected a JSON response, got '{}': {}", text, e),
-                ));
+                return Err(BitcoinRpcError::Other(format!(
+                    "Expected a JSON response, got '{}': {}",
+                    text, e
+                )));
             }
         };
 
@@ -878,25 +885,26 @@ impl ErrorForRpc for reqwest::Response {
 
 impl ErrorForRpcBlocking for reqwest::blocking::Response {
     fn error_for_rpc<T: DeserializeOwned>(self) -> Result<T, BitcoinRpcError> {
-        let text = self.text().map_err(|e| BitcoinRpcError::Other(
-            format!("Could not read response body: {}", e),
-        ))?;
+        let text = self
+            .text()
+            .map_err(|e| BitcoinRpcError::Other(format!("Could not read response body: {}", e)))?;
 
         // Attempt to deserialize the text as JSON
-        let rpc_res: JsonRpcResponse<T> = match serde_json::from_str(&text)
-             {
+        let rpc_res: JsonRpcResponse<T> = match serde_json::from_str(&text) {
             Ok(rpc_res) => rpc_res,
             Err(e) => {
                 // try to decode without result
-                let error_res : Option<JsonRpcResponse<Option<String>>> = serde_json::from_str(&text).ok();
+                let error_res: Option<JsonRpcResponse<Option<String>>> =
+                    serde_json::from_str(&text).ok();
                 if let Some(error_res) = error_res {
                     if let Some(error) = error_res.error {
                         return Err(BitcoinRpcError::Rpc(error));
                     }
                 }
-                return Err(BitcoinRpcError::Other(
-                    format!("Expected a JSON response, got '{}': {}", text, e),
-                ))
+                return Err(BitcoinRpcError::Other(format!(
+                    "Expected a JSON response, got '{}': {}",
+                    text, e
+                )));
             }
         };
 
@@ -913,7 +921,6 @@ pub struct BlockQueueResult {
     pub pending: u32,
     pub completed: u32,
 }
-
 
 #[derive(Clone)]
 pub struct BitcoinBlockSource {
@@ -935,13 +942,12 @@ impl BitcoinBlockSource {
 
 impl BlockSource for BitcoinBlockSource {
     fn get_block_hash(&self, height: u32) -> Result<BlockHash, BitcoinRpcError> {
-        Ok(self
-            .rpc
-            .send_json_blocking(&self.client, &self.rpc.get_block_hash(height))?)
+        self.rpc
+            .send_json_blocking(&self.client, &self.rpc.get_block_hash(height))
     }
 
     fn get_block(&self, hash: &BlockHash) -> Result<Option<Block>, BitcoinRpcError> {
-        BlockFetcher::fetch_block(self, hash).map(|b| Some(b))
+        BlockFetcher::fetch_block(self, hash).map(Some)
     }
 
     fn get_median_time(&self) -> Result<u64, BitcoinRpcError> {
@@ -982,12 +988,15 @@ impl BlockSource for BitcoinBlockSource {
     }
 
     fn get_block_count(&self) -> Result<u64, BitcoinRpcError> {
-        Ok(self
-            .rpc
-            .send_json_blocking(&self.client, &self.rpc.get_block_count())?)
+        self.rpc
+            .send_json_blocking(&self.client, &self.rpc.get_block_count())
     }
 
-    fn get_best_chain(&self, tip: Option<u32>, expected_chain: Network) -> Result<BestChain, BitcoinRpcError> {
+    fn get_best_chain(
+        &self,
+        tip: Option<u32>,
+        expected_chain: Network,
+    ) -> Result<BestChain, BitcoinRpcError> {
         #[derive(Deserialize)]
         struct Info {
             pub chain: String,
@@ -1007,18 +1016,21 @@ impl BlockSource for BitcoinBlockSource {
             Network::Bitcoin => "main",
             Network::Regtest => "regtest",
             Network::Signet => "signet",
-            _ => "test"
+            _ => "test",
         };
         if info.chain.starts_with("test") {
             info.chain = "test".to_string()
         }
         if info.chain != expected_chain {
-            warn!("Invalid chain from connected rpc node - expected {}, got {}", expected_chain, info.chain);
+            warn!(
+                "Invalid chain from connected rpc node - expected {}, got {}",
+                expected_chain, info.chain
+            );
             return Ok(BestChain::None);
         }
 
         let synced = info.headers == info.blocks;
-        let best_chain =  if !synced {
+        let best_chain = if !synced {
             let block_hash = self.get_block_hash(info.blocks)?;
             ChainAnchor {
                 hash: block_hash,
@@ -1039,7 +1051,9 @@ impl BlockSource for BitcoinBlockSource {
         Ok(BestChain::Tip(best_chain))
     }
 
-    fn get_blockchain_info(&self) -> anyhow::Result<crate::client::BlockchainInfo, BitcoinRpcError> {
+    fn get_blockchain_info(
+        &self,
+    ) -> anyhow::Result<crate::client::BlockchainInfo, BitcoinRpcError> {
         let mut info: crate::client::BlockchainInfo = self
             .rpc
             .send_json_blocking(&self.client, &self.rpc.get_blockchain_info())?;
@@ -1049,7 +1063,10 @@ impl BlockSource for BitcoinBlockSource {
         Ok(info)
     }
 
-    fn get_block_filter_by_height(&self, height: u32) -> anyhow::Result<Option<BlockFilterRpc>, BitcoinRpcError> {
+    fn get_block_filter_by_height(
+        &self,
+        height: u32,
+    ) -> anyhow::Result<Option<BlockFilterRpc>, BitcoinRpcError> {
         let filter: Option<BlockFilterRpc> = self
             .rpc
             .send_json_blocking(&self.client, &self.rpc.get_block_filter_by_height(height))?;
@@ -1057,30 +1074,29 @@ impl BlockSource for BitcoinBlockSource {
     }
 
     fn queue_blocks(&self, heights: Vec<u32>) -> anyhow::Result<(), BitcoinRpcError> {
-         self
-            .rpc
+        self.rpc
             .send_json_blocking::<()>(&self.client, &self.rpc.queue_blocks(heights))?;
         Ok(())
     }
 
     fn queue_filters(&self) -> anyhow::Result<(), BitcoinRpcError> {
-        self
-            .rpc
+        self.rpc
             .send_json_blocking::<()>(&self.client, &self.rpc.queue_filters())?;
         Ok(())
     }
 }
 
 fn log_rpc_error(request: &Value, e: &BitcoinRpcError, delay: Duration) {
-    let rpc_method = serde_json::to_string(&request.get("method"))
-        .unwrap_or("".to_string());
-    let rpc_params = serde_json::to_string(&request.get("params"))
-        .unwrap_or("".to_string());
+    let rpc_method = serde_json::to_string(&request.get("method")).unwrap_or("".to_string());
+    let rpc_params = serde_json::to_string(&request.get("params")).unwrap_or("".to_string());
     let src = match e {
-        BitcoinRpcError::Transport(e) =>
-            e.source().map(|s| format!("({:?})", s)),
-        _ => None
-    }.unwrap_or("".to_string());
+        BitcoinRpcError::Transport(e) => e.source().map(|s| format!("({:?})", s)),
+        _ => None,
+    }
+    .unwrap_or("".to_string());
 
-    error!("Rpc {}{}: {}{} - retrying in {:?}...", rpc_method, rpc_params, e, src, delay);
+    error!(
+        "Rpc {}{}: {}{} - retrying in {:?}...",
+        rpc_method, rpc_params, e, src, delay
+    );
 }

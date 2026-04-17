@@ -1,66 +1,12 @@
-use std::{
-    collections::BTreeMap, fs, fs::File, io::Write, net::SocketAddr, path::PathBuf, str::FromStr,
-    sync::Arc,
-};
-use std::collections::HashSet;
-use anyhow::{anyhow, Context};
-use bdk::{
-    bitcoin::{Amount, BlockHash, FeeRate, Network, Txid},
-    chain::BlockId,
-    keys::{
-        bip39::{Language, Mnemonic, WordCount},
-        DerivableKey, ExtendedKey, GeneratableKey, GeneratedKey,
-    },
-    miniscript::Tap,
-    KeychainKind,
-};
-use jsonrpsee::{
-    core::async_trait,
-    proc_macros::rpc,
-    server::{middleware::http::ProxyGetRequestLayer, Server},
-    types::ErrorObjectOwned,
-};
-use log::info;
-use serde::{Deserialize, Serialize};
-use spacedb::tx::ProofType;
-use spaces_protocol::{
-    bitcoin,
-    bitcoin::{
-        bip32::Xpriv,
-        Network::{Regtest, Testnet},
-        OutPoint,
-    },
-    constants::ChainAnchor,
-    hasher::{KeyHasher, OutpointKey, SpaceKey},
-    prepare::SpacesSource,
-    slabel::SLabel,
-    validate::TxChangeSet,
-    Bytes, Covenant, FullSpaceOut, SpaceOut,
-};
-use spaces_wallet::{
-    bdk_wallet as bdk, bdk_wallet::template::Bip86, bitcoin::hashes::Hash as BitcoinHash,
-    bitcoin::secp256k1::schnorr,
-    export::WalletExport, Balance, DoubleUtxo, Listing, SpacesWallet,
-    WalletConfig, WalletDescriptors, WalletOutput,
-};
-pub use spaces_wallet::Subject;
-use tokio::{
-    select,
-    sync::{broadcast, mpsc, oneshot, RwLock},
-    task::JoinSet,
-};
-use spaces_protocol::bitcoin::ScriptBuf;
-use spaces_protocol::hasher::Hash;
-use spaces_nums::{NumSource, FullNumOut, NumOut, Commitment, CommitmentTipKey, CommitmentKey, DelegatorKey, NumOutpointKey, RootAnchor, ChainProofRequest, NumKeyKind};
-use spaces_nums::snumeric::SNumeric;
-use spaces_nums::num_id::NumId;
-use spaces_wallet::bitcoin::hashes::sha256;
 use crate::auth::BasicAuthLayer;
+use crate::store::Sha256;
+use crate::store::chain::{CACHED_SNAPSHOT_LOOKBACK, COMMIT_BLOCK_INTERVAL, Chain};
+use crate::store::spaces::RolloutEntry;
 use crate::wallets::WalletInfoWithProgress;
 use crate::{
     calc_progress,
     checker::TxChecker,
-    client::{BlockMeta, NumBlockMeta, TxEntry, BlockchainInfo},
+    client::{BlockMeta, BlockchainInfo, NumBlockMeta, TxEntry},
     config::ExtendedNetwork,
     deserialize_base64, serialize_base64,
     source::BitcoinRpc,
@@ -69,9 +15,64 @@ use crate::{
         WalletCommand, WalletResponse,
     },
 };
-use crate::store::chain::{Chain, COMMIT_BLOCK_INTERVAL, CACHED_SNAPSHOT_LOOKBACK};
-use crate::store::Sha256;
-use crate::store::spaces::RolloutEntry;
+use anyhow::{Context, anyhow};
+use bdk::{
+    KeychainKind,
+    bitcoin::{Amount, BlockHash, FeeRate, Network, Txid},
+    chain::BlockId,
+    keys::{
+        DerivableKey, ExtendedKey, GeneratableKey, GeneratedKey,
+        bip39::{Language, Mnemonic, WordCount},
+    },
+    miniscript::Tap,
+};
+use jsonrpsee::{
+    core::async_trait,
+    proc_macros::rpc,
+    server::{Server, middleware::http::ProxyGetRequestLayer},
+    types::ErrorObjectOwned,
+};
+use log::info;
+use serde::{Deserialize, Serialize};
+use spacedb::tx::ProofType;
+use spaces_nums::num_id::NumId;
+use spaces_nums::snumeric::SNumeric;
+use spaces_nums::{
+    ChainProofRequest, Commitment, CommitmentKey, CommitmentTipKey, DelegatorKey, FullNumOut,
+    NumKeyKind, NumOut, NumOutpointKey, NumSource, RootAnchor,
+};
+use spaces_protocol::bitcoin::ScriptBuf;
+use spaces_protocol::hasher::Hash;
+use spaces_protocol::{
+    Bytes, Covenant, FullSpaceOut, SpaceOut, bitcoin,
+    bitcoin::{
+        Network::{Regtest, Testnet},
+        OutPoint,
+        bip32::Xpriv,
+    },
+    constants::ChainAnchor,
+    hasher::{KeyHasher, OutpointKey, SpaceKey},
+    prepare::SpacesSource,
+    slabel::SLabel,
+    validate::TxChangeSet,
+};
+pub use spaces_wallet::Subject;
+use spaces_wallet::bitcoin::hashes::sha256;
+use spaces_wallet::{
+    Balance, DoubleUtxo, Listing, SpacesWallet, WalletConfig, WalletDescriptors, WalletOutput,
+    bdk_wallet as bdk, bdk_wallet::template::Bip86, bitcoin::hashes::Hash as BitcoinHash,
+    bitcoin::secp256k1::schnorr, export::WalletExport,
+};
+use std::collections::HashSet;
+use std::{
+    collections::BTreeMap, fs, fs::File, io::Write, net::SocketAddr, path::PathBuf, str::FromStr,
+    sync::Arc,
+};
+use tokio::{
+    select,
+    sync::{RwLock, broadcast, mpsc, oneshot},
+    task::JoinSet,
+};
 
 pub(crate) type Responder<T> = oneshot::Sender<T>;
 
@@ -86,7 +87,6 @@ pub struct ServerInfo {
     pub ready: bool,
     pub progress: f32,
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -219,7 +219,6 @@ pub struct AsyncChainState {
     sender: mpsc::Sender<ChainStateCommand>,
 }
 
-
 #[rpc(server, client)]
 pub trait Rpc {
     #[method(name = "getserverinfo")]
@@ -241,26 +240,23 @@ pub trait Rpc {
     async fn get_spaceout(&self, outpoint: OutPoint) -> Result<Option<SpaceOut>, ErrorObjectOwned>;
 
     #[method(name = "getnum")]
-    async fn get_num(
-        &self,
-        subject: Subject,
-    ) -> Result<Option<FullNumOut>, ErrorObjectOwned>;
+    async fn get_num(&self, subject: Subject) -> Result<Option<FullNumOut>, ErrorObjectOwned>;
 
     #[method(name = "getnumowner")]
-    async fn get_num_owner(
-        &self,
-        subject: Subject,
-    ) -> Result<Option<OutPoint>, ErrorObjectOwned>;
+    async fn get_num_owner(&self, subject: Subject) -> Result<Option<OutPoint>, ErrorObjectOwned>;
 
     #[method(name = "getnumout")]
     async fn get_numout(&self, outpoint: OutPoint) -> Result<Option<NumOut>, ErrorObjectOwned>;
 
     #[method(name = "getcommitment")]
-    async fn get_commitment(&self, subject: Subject, root: Option<sha256::Hash>) -> Result<Option<Commitment>, ErrorObjectOwned>;
+    async fn get_commitment(
+        &self,
+        subject: Subject,
+        root: Option<sha256::Hash>,
+    ) -> Result<Option<Commitment>, ErrorObjectOwned>;
 
     #[method(name = "getdelegation")]
     async fn get_delegation(&self, subject: Subject) -> Result<Option<NumId>, ErrorObjectOwned>;
-
 
     #[method(name = "getdelegator")]
     async fn get_delegator(&self, subject: Subject) -> Result<Option<SLabel>, ErrorObjectOwned>;
@@ -301,7 +297,6 @@ pub trait Rpc {
     #[method(name = "walletimport")]
     async fn wallet_import(&self, wallet: WalletExport) -> Result<(), ErrorObjectOwned>;
 
-
     #[method(name = "walletcanoperate")]
     async fn wallet_can_operate(
         &self,
@@ -327,7 +322,7 @@ pub trait Rpc {
 
     #[method(name = "walletgetinfo")]
     async fn wallet_get_info(&self, name: &str)
-                             -> Result<WalletInfoWithProgress, ErrorObjectOwned>;
+    -> Result<WalletInfoWithProgress, ErrorObjectOwned>;
 
     #[method(name = "walletexport")]
     async fn wallet_export(&self, name: &str) -> Result<WalletExport, ErrorObjectOwned>;
@@ -447,7 +442,11 @@ pub trait Rpc {
 
     /// Debug method to set a space's expire height (regtest only)
     #[method(name = "debugsetexpireheight")]
-    async fn debug_set_expire_height(&self, space: &str, expire_height: u32) -> Result<(), ErrorObjectOwned>;
+    async fn debug_set_expire_height(
+        &self,
+        space: &str,
+        expire_height: u32,
+    ) -> Result<(), ErrorObjectOwned>;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -604,7 +603,6 @@ pub struct RpcServerImpl {
     client: reqwest::Client,
 }
 
-
 /// Combined proof result for a chain proof request containing subtrees from both
 /// spaces and ptrs trees at the same snapshot height.
 #[derive(Clone, Serialize, Deserialize)]
@@ -679,7 +677,11 @@ impl WalletManager {
         Ok(export)
     }
 
-    pub async fn create_wallet(&self, client: &reqwest::Client, name: &str) -> anyhow::Result<String> {
+    pub async fn create_wallet(
+        &self,
+        client: &reqwest::Client,
+        name: &str,
+    ) -> anyhow::Result<String> {
         let mnemonic: GeneratedKey<_, Tap> =
             Mnemonic::generate((WordCount::Words12, Language::English))
                 .map_err(|_| anyhow!("Mnemonic generation error"))?;
@@ -690,7 +692,12 @@ impl WalletManager {
         Ok(mnemonic.to_string())
     }
 
-    pub async fn recover_wallet(&self, client: &reqwest::Client, name: &str, mnemonic: &str) -> anyhow::Result<()> {
+    pub async fn recover_wallet(
+        &self,
+        client: &reqwest::Client,
+        name: &str,
+        mnemonic: &str,
+    ) -> anyhow::Result<()> {
         let start_block = self.get_wallet_start_block(client).await?;
         self.setup_new_wallet(name.to_string(), mnemonic.to_string(), start_block)?;
         self.load_wallet(name).await?;
@@ -836,13 +843,13 @@ impl WalletManager {
     async fn get_wallet_start_block(&self, client: &reqwest::Client) -> anyhow::Result<BlockId> {
         let count: i32 = self
             .rpc
-            .send_json(&client, &self.rpc.get_block_count())
+            .send_json(client,&self.rpc.get_block_count())
             .await?;
         let height = std::cmp::max(count - 1, 0) as u32;
 
         let hash = self
             .rpc
-            .send_json(&client, &self.rpc.get_block_hash(height))
+            .send_json(client,&self.rpc.get_block_hash(height))
             .await?;
 
         Ok(BlockId { height, hash })
@@ -913,16 +920,19 @@ impl RpcServerImpl {
 
             let mut module = self.clone().into_rpc();
             let methods: Vec<String> = module.method_names().map(|s| s.to_string()).collect();
-            module.register_method("rpc.discover", move |_, _| {
-                serde_json::json!({ "methods": methods })
-            }).expect("register rpc.discover");
+            module
+                .register_method(
+                    "rpc.discover",
+                    move |_, _| serde_json::json!({ "methods": methods }),
+                )
+                .expect("register rpc.discover");
 
             #[cfg(feature = "schema")]
             {
                 let spec = crate::rpc_schema::full_spec();
-                module.register_method("rpc.schema", move |_, _| {
-                    spec.clone()
-                }).expect("register rpc.schema");
+                module
+                    .register_method("rpc.schema", move |_, _| spec.clone())
+                    .expect("register rpc.schema");
             }
 
             let handle = listener.start(module);
@@ -1028,7 +1038,11 @@ impl RpcServer for RpcServerImpl {
         Ok(spaceout)
     }
 
-    async fn get_commitment(&self, subject: Subject, root: Option<sha256::Hash>) -> Result<Option<Commitment>, ErrorObjectOwned> {
+    async fn get_commitment(
+        &self,
+        subject: Subject,
+        root: Option<sha256::Hash>,
+    ) -> Result<Option<Commitment>, ErrorObjectOwned> {
         let c = self
             .store
             .get_commitment(subject, root.map(|r| *r.as_ref()))
@@ -1054,7 +1068,6 @@ impl RpcServer for RpcServerImpl {
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))?;
         Ok(delegator)
     }
-
 
     async fn check_package(
         &self,
@@ -1152,7 +1165,7 @@ impl RpcServer for RpcServerImpl {
         subject: Subject,
         message: Bytes,
     ) -> Result<Bytes, ErrorObjectOwned> {
-        self.wallet(&wallet)
+        self.wallet(wallet)
             .await?
             .send_sign_schnorr(subject, message.to_vec())
             .await
@@ -1165,7 +1178,7 @@ impl RpcServer for RpcServerImpl {
         wallet: &str,
         subject: Subject,
     ) -> Result<bool, ErrorObjectOwned> {
-        self.wallet(&wallet)
+        self.wallet(wallet)
             .await?
             .send_can_operate(subject)
             .await
@@ -1189,7 +1202,7 @@ impl RpcServer for RpcServerImpl {
         &self,
         wallet: &str,
     ) -> Result<WalletInfoWithProgress, ErrorObjectOwned> {
-        self.wallet(&wallet)
+        self.wallet(wallet)
             .await?
             .send_get_info()
             .await
@@ -1228,7 +1241,7 @@ impl RpcServer for RpcServerImpl {
         request: RpcWalletTxBuilder,
     ) -> Result<WalletResponse, ErrorObjectOwned> {
         let result = self
-            .wallet(&wallet)
+            .wallet(wallet)
             .await?
             .send_batch_tx(request)
             .await
@@ -1241,7 +1254,7 @@ impl RpcServer for RpcServerImpl {
         wallet: &str,
         kind: AddressKind,
     ) -> Result<String, ErrorObjectOwned> {
-        self.wallet(&wallet)
+        self.wallet(wallet)
             .await?
             .send_get_new_address(kind)
             .await
@@ -1253,7 +1266,7 @@ impl RpcServer for RpcServerImpl {
         wallet: &str,
         kind: AddressKind,
     ) -> Result<String, ErrorObjectOwned> {
-        self.wallet(&wallet)
+        self.wallet(wallet)
             .await?
             .send_increment_address(kind)
             .await
@@ -1267,7 +1280,7 @@ impl RpcServer for RpcServerImpl {
         fee_rate: FeeRate,
         skip_tx_check: bool,
     ) -> Result<Vec<TxResponse>, ErrorObjectOwned> {
-        self.wallet(&wallet)
+        self.wallet(wallet)
             .await?
             .send_fee_bump(txid, fee_rate, skip_tx_check)
             .await
@@ -1281,7 +1294,7 @@ impl RpcServer for RpcServerImpl {
         fee_rate: Option<FeeRate>,
         skip_tx_check: bool,
     ) -> Result<TxResponse, ErrorObjectOwned> {
-        self.wallet(&wallet)
+        self.wallet(wallet)
             .await?
             .send_buy(listing, fee_rate, skip_tx_check)
             .await
@@ -1294,7 +1307,7 @@ impl RpcServer for RpcServerImpl {
         space: String,
         amount: u64,
     ) -> Result<Listing, ErrorObjectOwned> {
-        self.wallet(&wallet)
+        self.wallet(wallet)
             .await?
             .send_sell(space, amount)
             .await
@@ -1332,7 +1345,7 @@ impl RpcServer for RpcServerImpl {
         count: usize,
         skip: usize,
     ) -> Result<Vec<TxInfo>, ErrorObjectOwned> {
-        self.wallet(&wallet)
+        self.wallet(wallet)
             .await?
             .send_list_transactions(count, skip)
             .await
@@ -1345,7 +1358,7 @@ impl RpcServer for RpcServerImpl {
         outpoint: OutPoint,
         fee_rate: FeeRate,
     ) -> Result<TxResponse, ErrorObjectOwned> {
-        self.wallet(&wallet)
+        self.wallet(wallet)
             .await?
             .send_force_spend(outpoint, fee_rate)
             .await
@@ -1356,7 +1369,7 @@ impl RpcServer for RpcServerImpl {
         &self,
         wallet: &str,
     ) -> Result<ListSpacesResponse, ErrorObjectOwned> {
-        self.wallet(&wallet)
+        self.wallet(wallet)
             .await?
             .send_list_spaces()
             .await
@@ -1369,7 +1382,7 @@ impl RpcServer for RpcServerImpl {
         kind: Option<String>,
     ) -> Result<ListNumsResponse, ErrorObjectOwned> {
         let external = kind.as_deref() == Some("external");
-        self.wallet(&wallet)
+        self.wallet(wallet)
             .await?
             .send_list_nums(external)
             .await
@@ -1380,7 +1393,7 @@ impl RpcServer for RpcServerImpl {
         &self,
         wallet: &str,
     ) -> Result<Vec<WalletOutput>, ErrorObjectOwned> {
-        self.wallet(&wallet)
+        self.wallet(wallet)
             .await?
             .send_list_unspent()
             .await
@@ -1388,7 +1401,7 @@ impl RpcServer for RpcServerImpl {
     }
 
     async fn wallet_list_bidouts(&self, wallet: &str) -> Result<Vec<DoubleUtxo>, ErrorObjectOwned> {
-        self.wallet(&wallet)
+        self.wallet(wallet)
             .await?
             .send_list_bidouts()
             .await
@@ -1396,34 +1409,42 @@ impl RpcServer for RpcServerImpl {
     }
 
     async fn wallet_get_balance(&self, wallet: &str) -> Result<Balance, ErrorObjectOwned> {
-        self.wallet(&wallet)
+        self.wallet(wallet)
             .await?
             .send_get_balance()
             .await
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
     }
 
-    async fn get_fallback(&self, subject: Subject) -> Result<Option<FallbackResponse>, ErrorObjectOwned> {
-        let data = match &subject {
-            Subject::Label(label) if !label.is_numeric() => {
-                let space_hash = SpaceKey::from(Sha256::hash(label.as_ref()));
-                let fso = self.store.get_space(space_hash).await
-                    .map_err(|e| ErrorObjectOwned::owned(-1, e.to_string(), None::<String>))?;
-                fso.and_then(|fso| {
-                    if let Some(space) = &fso.spaceout.space {
-                        if let Covenant::Transfer { data, .. } = &space.covenant {
-                            return data.as_ref().map(|b| b.clone().to_vec());
+    async fn get_fallback(
+        &self,
+        subject: Subject,
+    ) -> Result<Option<FallbackResponse>, ErrorObjectOwned> {
+        let data =
+            match &subject {
+                Subject::Label(label) if !label.is_numeric() => {
+                    let space_hash = SpaceKey::from(Sha256::hash(label.as_ref()));
+                    let fso =
+                        self.store.get_space(space_hash).await.map_err(|e| {
+                            ErrorObjectOwned::owned(-1, e.to_string(), None::<String>)
+                        })?;
+                    fso.and_then(|fso| {
+                        if let Some(space) = &fso.spaceout.space {
+                            if let Covenant::Transfer { data, .. } = &space.covenant {
+                                return data.as_ref().map(|b| b.clone().to_vec());
+                            }
                         }
-                    }
-                    None
-                })
-            }
-            _ => {
-                let fpt = self.store.get_ptr(subject).await
-                    .map_err(|e| ErrorObjectOwned::owned(-1, e.to_string(), None::<String>))?;
-                fpt.and_then(|fpt| fpt.numout.num.data.map(|b| b.to_vec()))
-            }
-        };
+                        None
+                    })
+                }
+                _ => {
+                    let fpt =
+                        self.store.get_ptr(subject).await.map_err(|e| {
+                            ErrorObjectOwned::owned(-1, e.to_string(), None::<String>)
+                        })?;
+                    fpt.and_then(|fpt| fpt.numout.num.data.map(|b| b.to_vec()))
+                }
+            };
 
         match data {
             None => Ok(None),
@@ -1440,16 +1461,28 @@ impl RpcServer for RpcServerImpl {
         }
     }
 
-    async fn debug_set_expire_height(&self, space: &str, expire_height: u32) -> Result<(), ErrorObjectOwned> {
+    async fn debug_set_expire_height(
+        &self,
+        space: &str,
+        expire_height: u32,
+    ) -> Result<(), ErrorObjectOwned> {
         // Only allow on regtest
-        let info = self.store.get_server_info().await
+        let info = self
+            .store
+            .get_server_info()
+            .await
             .map_err(|e| ErrorObjectOwned::owned(-1, e.to_string(), None::<String>))?;
         if info.network != ExtendedNetwork::Regtest {
-            return Err(ErrorObjectOwned::owned(-1, "debug_set_expire_height is only available on regtest", None::<String>));
+            return Err(ErrorObjectOwned::owned(
+                -1,
+                "debug_set_expire_height is only available on regtest",
+                None::<String>,
+            ));
         }
 
-        let space_label = SLabel::from_str(space)
-            .map_err(|e| ErrorObjectOwned::owned(-1, format!("Invalid space name: {}", e), None::<String>))?;
+        let space_label = SLabel::from_str(space).map_err(|e| {
+            ErrorObjectOwned::owned(-1, format!("Invalid space name: {}", e), None::<String>)
+        })?;
 
         self.store
             .debug_set_expire_height(space_label, expire_height)
@@ -1470,7 +1503,7 @@ impl AsyncChainState {
         rpc: &BitcoinRpc,
     ) -> Result<Option<TxEntry>, anyhow::Error> {
         let info: serde_json::Value = rpc
-            .send_json(client, &rpc.get_raw_transaction(&txid, true))
+            .send_json(client, &rpc.get_raw_transaction(txid, true))
             .await
             .map_err(|e| anyhow!("Could not retrieve tx ({})", e))?;
 
@@ -1478,13 +1511,8 @@ impl AsyncChainState {
             BlockHash::from_str(info.get("blockhash").and_then(|t| t.as_str()).ok_or_else(
                 || anyhow!("Could not retrieve block hash for tx (is it in the mempool?)"),
             )?)?;
-        let block = Self::get_indexed_block(
-            state,
-            HeightOrHash::Hash(block_hash),
-            client,
-            rpc,
-        )
-            .await?;
+        let block =
+            Self::get_indexed_block(state, HeightOrHash::Hash(block_hash), client, rpc).await?;
 
         Ok(block
             .block_meta
@@ -1633,16 +1661,22 @@ impl AsyncChainState {
                 let _ = resp.send(result);
             }
             ChainStateCommand::GetNum { subject, resp } => {
-                let result = resolve_num_id(state, &subject)
-                    .and_then(|id| state.get_num_info(&id));
+                let result = resolve_num_id(state, &subject).and_then(|id| state.get_num_info(&id));
                 let _ = resp.send(result);
             }
             ChainStateCommand::GetNumOutpoint { subject, resp } => {
-                let result = resolve_num_id(state, &subject)
-                    .and_then(|id| state.get_num_outpoint_by_id(&id).context("could not fetch numout"));
+                let result = resolve_num_id(state, &subject).and_then(|id| {
+                    state
+                        .get_num_outpoint_by_id(&id)
+                        .context("could not fetch numout")
+                });
                 let _ = resp.send(result);
             }
-            ChainStateCommand::GetCommitment { subject, root, resp } => {
+            ChainStateCommand::GetCommitment {
+                subject,
+                root,
+                resp,
+            } => {
                 let result = get_commitment(state, &subject, root);
                 let _ = resp.send(result);
             }
@@ -1651,9 +1685,11 @@ impl AsyncChainState {
                 let _ = resp.send(result);
             }
             ChainStateCommand::GetDelegator { subject, resp } => {
-                let result = resolve_num_id(state, &subject)
-                    .and_then(|id| state.get_delegator(&DelegatorKey::from_id::<Sha256>(id))
-                        .map_err(|e| anyhow!("could not get delegator: {}", e)));
+                let result = resolve_num_id(state, &subject).and_then(|id| {
+                    state
+                        .get_delegator(&DelegatorKey::from_id::<Sha256>(id))
+                        .map_err(|e| anyhow!("could not get delegator: {}", e))
+                });
                 let _ = resp.send(result);
             }
             ChainStateCommand::GetNumOut { outpoint, resp } => {
@@ -1666,18 +1702,14 @@ impl AsyncChainState {
                 height_or_hash,
                 resp,
             } => {
-                let res =
-                    Self::get_indexed_block(state, height_or_hash, client, rpc)
-                        .await;
+                let res = Self::get_indexed_block(state, height_or_hash, client, rpc).await;
                 let _ = resp.send(res);
             }
             ChainStateCommand::GetNumBlockMeta {
                 height_or_hash,
                 resp,
             } => {
-                let res =
-                    Self::get_indexed_ptr_block(state, height_or_hash, client, rpc)
-                        .await;
+                let res = Self::get_indexed_ptr_block(state, height_or_hash, client, rpc).await;
                 let _ = resp.send(res);
             }
             ChainStateCommand::GetTxMeta { txid, resp } => {
@@ -1693,11 +1725,14 @@ impl AsyncChainState {
                 _ = resp.send(rollouts);
             }
             ChainStateCommand::VerifyListing { listing, resp } => {
-                _ = resp.send(
-                    SpacesWallet::verify_listing::<Sha256>(state, &listing).map(|_| ()),
-                );
+                _ = resp.send(SpacesWallet::verify_listing::<Sha256>(state, &listing).map(|_| ()));
             }
-            ChainStateCommand::VerifySchnorr { subject, message, signature, resp } => {
+            ChainStateCommand::VerifySchnorr {
+                subject,
+                message,
+                signature,
+                resp,
+            } => {
                 let result = (|| {
                     let sig = schnorr::Signature::from_slice(&signature)
                         .map_err(|_| anyhow!("Invalid signature format"))?;
@@ -1719,8 +1754,16 @@ impl AsyncChainState {
             ChainStateCommand::GetRootAnchors { resp } => {
                 _ = resp.send(Self::handle_get_anchor(anchors_path, state));
             }
-            ChainStateCommand::DebugSetExpireHeight { space, expire_height, resp } => {
-                _ = resp.send(Self::handle_debug_set_expire_height(state, space, expire_height));
+            ChainStateCommand::DebugSetExpireHeight {
+                space,
+                expire_height,
+                resp,
+            } => {
+                _ = resp.send(Self::handle_debug_set_expire_height(
+                    state,
+                    space,
+                    expire_height,
+                ));
             }
         }
     }
@@ -1731,18 +1774,26 @@ impl AsyncChainState {
         expire_height: u32,
     ) -> anyhow::Result<()> {
         let space_key = SpaceKey::from(Sha256::hash(space.as_ref()));
-        let outpoint = state.get_space_outpoint(&space_key)?
+        let outpoint = state
+            .get_space_outpoint(&space_key)?
             .ok_or_else(|| anyhow::anyhow!("Space not found: {}", space))?;
-        let mut spaceout = state.get_spaceout(&outpoint)?
+        let mut spaceout = state
+            .get_spaceout(&outpoint)?
             .ok_or_else(|| anyhow::anyhow!("Spaceout not found for outpoint"))?;
 
         // Update expire_height in the covenant
         if let Some(ref mut space_data) = spaceout.space {
             match &mut space_data.covenant {
-                Covenant::Transfer { expire_height: ref mut eh, .. } => {
+                Covenant::Transfer {
+                    expire_height: eh, ..
+                } => {
                     *eh = expire_height;
                 }
-                _ => return Err(anyhow::anyhow!("Space is not in Transfer covenant (not owned)")),
+                _ => {
+                    return Err(anyhow::anyhow!(
+                        "Space is not in Transfer covenant (not owned)"
+                    ));
+                }
             }
         } else {
             return Err(anyhow::anyhow!("SpaceOut has no space data"));
@@ -1761,9 +1812,9 @@ impl AsyncChainState {
         if let Some(anchors_path) = anchors_path {
             let anchors: Vec<RootAnchor> = serde_json::from_reader(
                 File::open(anchors_path)
-                    .or_else(|e| Err(anyhow!("Could not open anchors file: {}", e)))?,
+                    .map_err(|e| anyhow!("Could not open anchors file: {}", e))?,
             )
-                .or_else(|e| Err(anyhow!("Could not read anchors file: {}", e)))?;
+            .map_err(|e| anyhow!("Could not read anchors file: {}", e))?;
             return Ok(anchors);
         }
 
@@ -1773,7 +1824,10 @@ impl AsyncChainState {
 
         // Try to compute PTR root if we're past PTR genesis
         let ptrs_root = if state.can_scan_nums(meta.height) {
-            state.nums_mut().state.inner()
+            state
+                .nums_mut()
+                .state
+                .inner()
                 .ok()
                 .and_then(|s| s.compute_root().ok())
         } else {
@@ -1823,8 +1877,8 @@ impl AsyncChainState {
             space_tree_keys.insert(outpoint_key.into());
             if let Some(space) = &fso.spaceout.space {
                 if let Covenant::Transfer { expire_height, .. } = &space.covenant {
-                    let last_update = expire_height
-                        .saturating_sub(spaces_protocol::constants::RENEWAL_INTERVAL);
+                    let last_update =
+                        expire_height.saturating_sub(spaces_protocol::constants::RENEWAL_INTERVAL);
                     most_recent_update = std::cmp::max(most_recent_update, last_update);
                 }
             }
@@ -1838,44 +1892,45 @@ impl AsyncChainState {
                 NumKeyKind::Num(numeric) => {
                     let id = state.get_num_id(&numeric)?;
                     if let Some(id) = id {
-                        let fpt = state.get_num_info(&id)?
+                        let fpt = state
+                            .get_num_info(&id)?
                             .expect("num id must exist if numeric exists");
-                        num_tree_keys.insert(
-                            NumOutpointKey::from_outpoint::<Sha256>(fpt.outpoint()).into()
-                        );
-                        most_recent_update = std::cmp::max(most_recent_update, fpt.numout.num.last_update);
+                        num_tree_keys
+                            .insert(NumOutpointKey::from_outpoint::<Sha256>(fpt.outpoint()).into());
+                        most_recent_update =
+                            std::cmp::max(most_recent_update, fpt.numout.num.last_update);
 
                         // insert delegate information
                         let operator_id = NumId::from_spk::<Sha256>(fpt.numout.script_pubkey);
                         let operator = state.get_num_info(&operator_id)?;
                         if let Some(operator) = operator {
                             num_tree_keys.insert(
-                                NumOutpointKey::from_outpoint::<Sha256>(operator.outpoint()).into()
+                                NumOutpointKey::from_outpoint::<Sha256>(operator.outpoint()).into(),
                             );
 
-                            most_recent_update = std::cmp::max(most_recent_update, operator.numout.num.last_update);
-
+                            most_recent_update =
+                                std::cmp::max(most_recent_update, operator.numout.num.last_update);
                         } else {
                             num_tree_keys.insert(operator_id.into());
                         }
-
                     }
                 }
                 NumKeyKind::Id(id) => {
                     if let Some(fpt) = state.get_num_info(&id)? {
-                        num_tree_keys.insert(
-                            NumOutpointKey::from_outpoint::<Sha256>(fpt.outpoint()).into()
-                        );
-                        most_recent_update = std::cmp::max(most_recent_update, fpt.numout.num.last_update);
+                        num_tree_keys
+                            .insert(NumOutpointKey::from_outpoint::<Sha256>(fpt.outpoint()).into());
+                        most_recent_update =
+                            std::cmp::max(most_recent_update, fpt.numout.num.last_update);
 
                         // insert delegate information
                         let operator_id = NumId::from_spk::<Sha256>(fpt.numout.script_pubkey);
                         let operator = state.get_num_info(&operator_id)?;
                         if let Some(operator) = operator {
                             num_tree_keys.insert(
-                                NumOutpointKey::from_outpoint::<Sha256>(operator.outpoint()).into()
+                                NumOutpointKey::from_outpoint::<Sha256>(operator.outpoint()).into(),
                             );
-                            most_recent_update = std::cmp::max(most_recent_update, operator.numout.num.last_update);
+                            most_recent_update =
+                                std::cmp::max(most_recent_update, operator.numout.num.last_update);
                         } else {
                             num_tree_keys.insert(operator_id.into());
                         }
@@ -1886,10 +1941,10 @@ impl AsyncChainState {
                 }
                 NumKeyKind::Commitment(k) => {
                     num_tree_keys.insert(k.into());
-                },
+                }
                 NumKeyKind::CommitmentTip(k) => {
                     num_tree_keys.insert(k.into());
-                },
+                }
             }
         }
 
@@ -1900,23 +1955,25 @@ impl AsyncChainState {
             let blocks_remaining = next_commit - tip.height;
             return Err(anyhow!(
                 "Cannot prove: data updated at block {} is not yet committed. Try again in {} block(s)",
-                most_recent_update, blocks_remaining
+                most_recent_update,
+                blocks_remaining
             ));
         }
 
-        let num_tree_keys : Vec<_> = num_tree_keys.into_iter().collect();
-        let space_tree_keys : Vec<_> = space_tree_keys.into_iter().collect();
+        let num_tree_keys: Vec<_> = num_tree_keys.into_iter().collect();
+        let space_tree_keys: Vec<_> = space_tree_keys.into_iter().collect();
 
         let cached_height = Self::cached_snapshot_height(tip.height);
-        let use_cached = !prefer_recent
-            && cached_height.is_some_and(|h| most_recent_update <= h);
+        let use_cached = !prefer_recent && cached_height.is_some_and(|h| most_recent_update <= h);
 
         let (spaces_proof, spaces_root, block_anchor, ptrs_proof, ptrs_root) = if use_cached {
             let height = cached_height.unwrap();
             let snapshot = state.snapshot_at(height)?;
 
             let spaces_anchor: ChainAnchor = snapshot.spaces.metadata().try_into()?;
-            let spaces_proof = snapshot.spaces.prove(&space_tree_keys, ProofType::Standard)?;
+            let spaces_proof = snapshot
+                .spaces
+                .prove(&space_tree_keys, ProofType::Standard)?;
             let spaces_root = spaces_proof.compute_root()?;
 
             let ptrs_anchor: ChainAnchor = snapshot.nums.metadata().try_into()?;
@@ -1929,7 +1986,13 @@ impl AsyncChainState {
             let ptrs_proof = snapshot.nums.prove(&num_tree_keys, ProofType::Standard)?;
             let ptrs_root = ptrs_proof.compute_root()?;
 
-            (spaces_proof, spaces_root, spaces_anchor, ptrs_proof, ptrs_root)
+            (
+                spaces_proof,
+                spaces_root,
+                spaces_anchor,
+                ptrs_proof,
+                ptrs_root,
+            )
         } else {
             let spaces_snapshot = state.spaces_inner()?;
             let spaces_root = spaces_snapshot.compute_root()?;
@@ -1948,7 +2011,13 @@ impl AsyncChainState {
             let ptrs_proof = ptrs_snapshot.prove(&num_tree_keys, ProofType::Standard)?;
             let ptrs_root = ptrs_proof.compute_root()?;
 
-            (spaces_proof, spaces_root, spaces_anchor, ptrs_proof, ptrs_root)
+            (
+                spaces_proof,
+                spaces_root,
+                spaces_anchor,
+                ptrs_proof,
+                ptrs_root,
+            )
         };
 
         let spaces_buf = spaces_proof.to_vec()?;
@@ -2044,10 +2113,18 @@ impl AsyncChainState {
         resp_rx.await?
     }
 
-    pub async fn debug_set_expire_height(&self, space: SLabel, expire_height: u32) -> anyhow::Result<()> {
+    pub async fn debug_set_expire_height(
+        &self,
+        space: SLabel,
+        expire_height: u32,
+    ) -> anyhow::Result<()> {
         let (resp, resp_rx) = oneshot::channel();
         self.sender
-            .send(ChainStateCommand::DebugSetExpireHeight { space, expire_height, resp })
+            .send(ChainStateCommand::DebugSetExpireHeight {
+                space,
+                expire_height,
+                resp,
+            })
             .await?;
         resp_rx.await?
     }
@@ -2127,10 +2204,18 @@ impl AsyncChainState {
         resp_rx.await?
     }
 
-    pub async fn get_commitment(&self, subject: Subject, root: Option<Hash>) -> anyhow::Result<Option<Commitment>> {
+    pub async fn get_commitment(
+        &self,
+        subject: Subject,
+        root: Option<Hash>,
+    ) -> anyhow::Result<Option<Commitment>> {
         let (resp, resp_rx) = oneshot::channel();
         self.sender
-            .send(ChainStateCommand::GetCommitment { subject, root, resp })
+            .send(ChainStateCommand::GetCommitment {
+                subject,
+                root,
+                resp,
+            })
             .await?;
         resp_rx.await?
     }
@@ -2193,7 +2278,8 @@ fn resolve_num_id(state: &mut Chain, subject: &Subject) -> anyhow::Result<NumId>
         Subject::NumId(id) => Ok(*id),
         Subject::Label(label) if label.is_numeric() => {
             let numeric: SNumeric = label.clone().try_into().unwrap();
-            state.get_num_id(&numeric)?
+            state
+                .get_num_id(&numeric)?
                 .ok_or_else(|| anyhow!("numeric '{}' not found", numeric))
         }
         Subject::Label(_) => Err(anyhow!("expected a num id or numeric, not a space")),
@@ -2259,12 +2345,12 @@ async fn get_server_info(
     })
 }
 
-
 fn resolve_label(state: &mut Chain, subject: &Subject) -> anyhow::Result<SLabel> {
     match subject {
         Subject::Label(label) => Ok(label.clone()),
         Subject::NumId(id) => {
-            let info = state.get_num_info(id)?
+            let info = state
+                .get_num_info(id)?
                 .ok_or_else(|| anyhow!("num id '{}' not found", id))?;
             Ok(info.numout.num.name.to_slabel())
         }
@@ -2281,18 +2367,22 @@ fn get_delegation(state: &mut Chain, subject: &Subject) -> anyhow::Result<Option
             let Some(num_info) = state.get_num_info(&num_id)? else {
                 return Ok(None);
             };
-            (NumId::from_spk::<Sha256>(num_info.numout.script_pubkey), num.clone())
-        },
-        Subject::Label(space) => {
-            let info = match state.get_space_info(
-                &SpaceKey::from(Sha256::hash(space.as_ref()))
-            )? {
-                None => return Ok(None),
-                Some(info) => info
-            };
-            (NumId::from_spk::<Sha256>(info.spaceout.script_pubkey), space.clone())
+            (
+                NumId::from_spk::<Sha256>(num_info.numout.script_pubkey),
+                num.clone(),
+            )
         }
-        Subject::NumId(id) => return Ok(Some(id.clone()))
+        Subject::Label(space) => {
+            let info = match state.get_space_info(&SpaceKey::from(Sha256::hash(space.as_ref())))? {
+                None => return Ok(None),
+                Some(info) => info,
+            };
+            (
+                NumId::from_spk::<Sha256>(info.spaceout.script_pubkey),
+                space.clone(),
+            )
+        }
+        Subject::NumId(id) => return Ok(Some(*id)),
     };
 
     let delegate = state.get_delegator(&DelegatorKey::from_id::<Sha256>(id))?;
@@ -2304,13 +2394,18 @@ fn get_delegation(state: &mut Chain, subject: &Subject) -> anyhow::Result<Option
     }
 }
 
-fn get_commitment(state: &mut Chain, subject: &Subject, root: Option<Hash>) -> anyhow::Result<Option<Commitment>> {
+fn get_commitment(
+    state: &mut Chain,
+    subject: &Subject,
+    root: Option<Hash>,
+) -> anyhow::Result<Option<Commitment>> {
     let label = resolve_label(state, subject)?;
     let root = match root {
         None => {
             let rk = CommitmentTipKey::from_slabel::<Sha256>(&label);
-            let k = state.get_commitments_tip(&rk)
-                    .map_err(|e| anyhow!("could not fetch state root: {}", e))?;
+            let k = state
+                .get_commitments_tip(&rk)
+                .map_err(|e| anyhow!("could not fetch state root: {}", e))?;
             if let Some(k) = k {
                 k
             } else {
@@ -2321,8 +2416,11 @@ fn get_commitment(state: &mut Chain, subject: &Subject, root: Option<Hash>) -> a
     };
 
     let ck = CommitmentKey::new::<Sha256>(&label, root);
-    state.get_commitment(&ck)
-        .map_err(|e|
-            anyhow!("could not fetch commitment with root: {}: {}", hex::encode(root), e)
+    state.get_commitment(&ck).map_err(|e| {
+        anyhow!(
+            "could not fetch commitment with root: {}: {}",
+            hex::encode(root),
+            e
         )
+    })
 }

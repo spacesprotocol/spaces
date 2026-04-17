@@ -1,41 +1,39 @@
 extern crate core;
 
-use std::{
-    fs, io,
-    io::Write,
-    path::PathBuf,
-};
-use std::str::FromStr;
 use anyhow::anyhow;
 use clap::{Parser, Subcommand};
 use colored::{Color, Colorize};
 use jsonrpsee::{
-    core::{client::Error, ClientError},
+    core::{ClientError, client::Error},
     http_client::HttpClient,
 };
+use spaces_client::rpc::{
+    CommitParams, CreateNumParams, DelegateParams, OperateParams, SetFallbackParams,
+};
+use spaces_client::store::Sha256;
 use spaces_client::{
     auth::{auth_token_from_cookie, auth_token_from_creds, http_client_with_auth},
-    config::{default_cookie_path, default_spaces_rpc_port, ExtendedNetwork},
+    config::{ExtendedNetwork, default_cookie_path, default_spaces_rpc_port},
     format::{
-        print_error_rpc_response, print_list_bidouts, print_list_nums_response,
+        Format, print_error_rpc_response, print_list_bidouts, print_list_nums_response,
         print_list_spaces_response, print_list_transactions, print_list_unspent,
-        print_list_wallets, print_server_info, print_wallet_balance_response,
-        print_wallet_info, print_wallet_response, Format,
+        print_list_wallets, print_server_info, print_wallet_balance_response, print_wallet_info,
+        print_wallet_response,
     },
     rpc::{
-        BidParams, OpenParams, RegisterParams, RpcClient, RpcWalletRequest,
-        RpcWalletTxBuilder, SendCoinsParams, Subject, TransferSpacesParams,
+        BidParams, OpenParams, RegisterParams, RpcClient, RpcWalletRequest, RpcWalletTxBuilder,
+        SendCoinsParams, Subject, TransferSpacesParams,
     },
     wallets::{AddressKind, WalletResponse},
 };
-use spaces_client::rpc::{CommitParams, CreateNumParams, DelegateParams, OperateParams, SetFallbackParams};
-use spaces_client::store::Sha256;
+use spaces_nums::num_id::NumId;
 use spaces_protocol::bitcoin::{Amount, FeeRate, OutPoint, Txid};
 use spaces_protocol::slabel::SLabel;
-use spaces_nums::num_id::NumId;
-use spaces_wallet::{bitcoin::secp256k1::schnorr::Signature, export::WalletExport, Listing};
-use spaces_wallet::bitcoin::hashes::sha256;
 use spaces_wallet::bitcoin::ScriptBuf;
+use spaces_wallet::bitcoin::hashes::sha256;
+use spaces_wallet::{Listing, bitcoin::secp256k1::schnorr::Signature, export::WalletExport};
+use std::str::FromStr;
+use std::{fs, io, io::Write, path::PathBuf};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -479,7 +477,7 @@ impl SpaceCli {
             Self {
                 wallet: args.wallet.clone(),
                 format: args.output_format,
-                dust: args.dust.map(|d| Amount::from_sat(d)),
+                dust: args.dust.map(Amount::from_sat),
                 force: args.force,
                 skip_tx_check: args.skip_tx_check,
                 network: args.chain,
@@ -538,7 +536,7 @@ async fn main() -> anyhow::Result<()> {
 
     match result {
         Ok(_) => {}
-        Err(error) => match ClientError::from(error) {
+        Err(error) => match error {
             Error::Call(rpc) => {
                 print_error_rpc_response(rpc.code(), rpc.message().to_string(), cli.format);
             }
@@ -634,7 +632,7 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
             let result = cli.client.wallet_export(&cli.wallet).await?;
             let content = serde_json::to_string_pretty(&result).expect("result");
             fs::write(path, content).map_err(|e| {
-                ClientError::Custom(format!("Could not save to path: {}", e.to_string()))
+                ClientError::Custom(format!("Could not save to path: {}", e))
             })?;
         }
         Commands::GetWalletInfo => {
@@ -698,12 +696,16 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
             .await?
         }
         Commands::Renew { spaces, fee_rate } => {
-            let spaces: Vec<_> = spaces.into_iter().map(|s| {
-                let normalized = normalize_space(&s);
-                Subject::Label(SLabel::from_str(&normalized).expect("valid space"))
-            }).collect();
+            let spaces: Vec<_> = spaces
+                .into_iter()
+                .map(|s| {
+                    let normalized = normalize_space(&s);
+                    Subject::Label(SLabel::from_str(&normalized).expect("valid space"))
+                })
+                .collect();
             cli.send_request(
-                Some(RpcWalletRequest::Transfer(TransferSpacesParams { secret: None,
+                Some(RpcWalletRequest::Transfer(TransferSpacesParams {
+                    secret: None,
                     spaces,
                     to: None,
                     data: None,
@@ -722,8 +724,9 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
         } => {
             let secret = if secret_stdin {
                 let mut input = String::new();
-                io::stdin().read_line(&mut input)
-                    .map_err(|e| ClientError::Custom(format!("failed to read secret from stdin: {}", e)))?;
+                io::stdin().read_line(&mut input).map_err(|e| {
+                    ClientError::Custom(format!("failed to read secret from stdin: {}", e))
+                })?;
                 Some(input.trim().to_string())
             } else {
                 None
@@ -768,13 +771,17 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
             use base64::Engine;
             let data = if let Some(raw_b64) = raw {
                 // Raw base64-encoded wire-format bytes
-                base64::engine::general_purpose::STANDARD.decode(&raw_b64)
-                    .map_err(|e| ClientError::Custom(format!("Could not base64 decode data: {}", e)))?
+                base64::engine::general_purpose::STANDARD
+                    .decode(&raw_b64)
+                    .map_err(|e| {
+                        ClientError::Custom(format!("Could not base64 decode data: {}", e))
+                    })?
             } else if stdin {
                 // Read JSON records from stdin
                 let mut input = String::new();
-                io::stdin().read_line(&mut input).map_err(|e|
-                    ClientError::Custom(format!("Failed to read stdin: {}", e)))?;
+                io::stdin()
+                    .read_line(&mut input)
+                    .map_err(|e| ClientError::Custom(format!("Failed to read stdin: {}", e)))?;
                 let record_set: sip7::RecordSet = serde_json::from_str(input.trim())
                     .map_err(|e| ClientError::Custom(format!("Invalid SIP-7 JSON: {}", e)))?;
                 record_set.to_bytes()
@@ -782,15 +789,29 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
                 // Build from --txt and --blob flags
                 let mut records = Vec::new();
                 for txt in &txt_records {
-                    let (key, value) = txt.split_once('=').ok_or_else(||
-                        ClientError::Custom(format!("Invalid --txt format '{}': expected key=value", txt)))?;
+                    let (key, value) = txt.split_once('=').ok_or_else(|| {
+                        ClientError::Custom(format!(
+                            "Invalid --txt format '{}': expected key=value",
+                            txt
+                        ))
+                    })?;
                     records.push(sip7::Record::txt(key, &[value]));
                 }
                 for blob in &blob_records {
-                    let (key, b64_value) = blob.split_once('=').ok_or_else(||
-                        ClientError::Custom(format!("Invalid --blob format '{}': expected key=base64", blob)))?;
-                    let value = base64::engine::general_purpose::STANDARD.decode(b64_value)
-                        .map_err(|e| ClientError::Custom(format!("Invalid base64 in --blob '{}': {}", key, e)))?;
+                    let (key, b64_value) = blob.split_once('=').ok_or_else(|| {
+                        ClientError::Custom(format!(
+                            "Invalid --blob format '{}': expected key=base64",
+                            blob
+                        ))
+                    })?;
+                    let value = base64::engine::general_purpose::STANDARD
+                        .decode(b64_value)
+                        .map_err(|e| {
+                            ClientError::Custom(format!(
+                                "Invalid base64 in --blob '{}': {}",
+                                key, e
+                            ))
+                        })?;
                     records.push(sip7::Record::blob(key, value));
                 }
                 sip7::RecordSet::pack(records)
@@ -798,21 +819,22 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
                     .to_bytes()
             } else {
                 return Err(ClientError::Custom(
-                    "No data specified. Use --txt, --blob, --raw, or --stdin".to_string()
+                    "No data specified. Use --txt, --blob, --raw, or --stdin".to_string(),
                 ));
             };
 
             cli.send_request(
-                Some(RpcWalletRequest::SetFallback(SetFallbackParams { subject, data })),
+                Some(RpcWalletRequest::SetFallback(SetFallbackParams {
+                    subject,
+                    data,
+                })),
                 None,
                 fee_rate,
                 false,
             )
             .await?;
         }
-        Commands::GetFallback {
-            subject,
-        } => {
+        Commands::GetFallback { subject } => {
             let response = cli.client.get_fallback(subject).await?;
             println!("{}", serde_json::to_string_pretty(&response)?);
         }
@@ -944,10 +966,10 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
             println!("{} Listing verified", "✓".color(Color::Green));
         }
         Commands::GenerateKey => {
-            use spaces_wallet::bitcoin::secp256k1::{Secp256k1, Keypair};
             use spaces_wallet::bitcoin::key::TapTweak;
-            use spaces_wallet::bitcoin::script::Builder;
             use spaces_wallet::bitcoin::opcodes::all::OP_PUSHNUM_1;
+            use spaces_wallet::bitcoin::script::Builder;
+            use spaces_wallet::bitcoin::secp256k1::{Keypair, Secp256k1};
 
             let secp = Secp256k1::new();
             let (secret_key, _) = secp.generate_keypair(&mut rand::thread_rng());
@@ -970,8 +992,10 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
         Commands::CreateNum { bind_spk, fee_rate } => {
             let spk = match bind_spk {
                 Some(hex) => {
-                    let spk = ScriptBuf::from(hex::decode(hex)
-                        .map_err(|_| ClientError::Custom("Invalid spk hex".to_string()))?);
+                    let spk = ScriptBuf::from(
+                        hex::decode(hex)
+                            .map_err(|_| ClientError::Custom("Invalid spk hex".to_string()))?,
+                    );
                     let num_id = NumId::from_spk::<Sha256>(spk.clone());
                     println!("Creating num id: {}", num_id);
                     Some(spk)
@@ -989,7 +1013,7 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
                 fee_rate,
                 false,
             )
-                .await?
+            .await?
         }
         Commands::GetNum { subject } => {
             let num = cli
@@ -1010,17 +1034,19 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
         }
         Commands::Operate { subject, fee_rate } => {
             cli.send_request(
-                Some(RpcWalletRequest::Operate(OperateParams {
-                    subject,
-                })),
+                Some(RpcWalletRequest::Operate(OperateParams { subject })),
                 None,
                 fee_rate,
                 false,
             )
-                .await?;
+            .await?;
             println!("Operate setup should be complete once tx is confirmed");
         }
-        Commands::Commit { subject, root, fee_rate } => {
+        Commands::Commit {
+            subject,
+            root,
+            fee_rate,
+        } => {
             cli.send_request(
                 Some(RpcWalletRequest::Commit(CommitParams {
                     subject,
@@ -1030,7 +1056,7 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
                 fee_rate,
                 false,
             )
-                .await?;
+            .await?;
         }
         Commands::Rollback { subject, fee_rate } => {
             cli.send_request(
@@ -1042,20 +1068,21 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
                 fee_rate,
                 false,
             )
-                .await?;
+            .await?;
             println!("Rollback transaction sent");
         }
-        Commands::Delegate { subject, to, fee_rate } => {
+        Commands::Delegate {
+            subject,
+            to,
+            fee_rate,
+        } => {
             cli.send_request(
-                Some(RpcWalletRequest::Delegate(DelegateParams {
-                    subject,
-                    to,
-                })),
+                Some(RpcWalletRequest::Delegate(DelegateParams { subject, to })),
                 None,
                 fee_rate,
                 false,
             )
-                .await?;
+            .await?;
         }
         Commands::GetDelegator { subject } => {
             let delegator = cli

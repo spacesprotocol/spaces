@@ -18,7 +18,7 @@ fn main() -> io::Result<()> {
     fs::create_dir_all(&target_dir)?;
 
     // Unpack the ZIP file
-    let zip_file = fs::File::open(&zip_path)?;
+    let zip_file = fs::File::open(zip_path)?;
     let mut archive = zip::ZipArchive::new(zip_file)?;
 
     for i in 0..archive.len() {

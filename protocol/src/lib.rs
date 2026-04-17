@@ -7,16 +7,15 @@ pub extern crate bitcoin;
 
 use alloc::{vec, vec::Vec};
 
-#[cfg(feature = "borsh")]
-use borsh::{BorshDeserialize, BorshSerialize};
 use bitcoin::{
-    psbt,
-    secp256k1::{schnorr, Message},
+    Amount, OutPoint, ScriptBuf, Transaction, TxIn, TxOut, Txid, Witness, psbt,
+    secp256k1::{Message, schnorr},
     sighash::{Prevouts, SighashCache, TapSighashType},
     taproot,
     transaction::Version,
-    Amount, OutPoint, ScriptBuf, Transaction, TxIn, TxOut, Txid, Witness,
 };
+#[cfg(feature = "borsh")]
+use borsh::{BorshDeserialize, BorshSerialize};
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
@@ -31,8 +30,8 @@ pub mod hasher;
 pub mod prepare;
 pub mod script;
 pub mod slabel;
-pub mod validate;
 pub mod sname;
+pub mod validate;
 
 #[derive(Clone, PartialEq, Debug)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
@@ -256,7 +255,7 @@ pub mod serde_bytes_impl {
 pub mod borsh_bytes_impl {
     use alloc::vec::Vec;
 
-    use borsh::{io, BorshDeserialize, BorshSerialize};
+    use borsh::{BorshDeserialize, BorshSerialize, io};
 
     use super::Bytes;
 
@@ -278,17 +277,17 @@ impl Space {
     pub fn is_expired(&self, height: u32) -> bool {
         match self.covenant {
             Covenant::Transfer { expire_height, .. } => expire_height < height,
-            _ => return false,
+            _ => false,
         }
     }
 
     pub fn is_owned(&self) -> bool {
-        return matches!(self.covenant, Covenant::Transfer { .. });
+        matches!(self.covenant, Covenant::Transfer { .. })
     }
 
     pub fn claim_height(&self) -> Option<u32> {
         match &self.covenant {
-            Covenant::Bid { claim_height, .. } => claim_height.clone(),
+            Covenant::Bid { claim_height, .. } => *claim_height,
             _ => None,
         }
     }
@@ -311,20 +310,14 @@ impl Space {
 
     pub fn data(&self) -> Option<&[u8]> {
         match &self.covenant {
-            Covenant::Transfer { data, .. } => match &data {
-                None => None,
-                Some(data) => Some(data.as_slice()),
-            },
+            Covenant::Transfer { data: Some(data), .. } => Some(data.as_slice()),
             _ => None,
         }
     }
 
     pub fn data_owned(&self) -> Option<Bytes> {
         match &self.covenant {
-            Covenant::Transfer { data, .. } => match &data {
-                None => None,
-                Some(data) => Some(data.clone()),
-            },
+            Covenant::Transfer { data, .. } => data.clone(),
             _ => None,
         }
     }
@@ -384,9 +377,7 @@ impl FullSpaceOut {
     pub fn refund_signing_info(
         &self,
     ) -> Option<(Transaction, Prevouts<'_, TxOut>, schnorr::Signature)> {
-        if self.spaceout.space.is_none() {
-            return None;
-        }
+        self.spaceout.space.as_ref()?;
 
         match &self.spaceout.space.as_ref().unwrap().covenant {
             Covenant::Bid {
@@ -404,7 +395,7 @@ impl FullSpaceOut {
                             script_pubkey: self.spaceout.script_pubkey.clone(),
                         },
                     ),
-                    signature.clone(),
+                    *signature,
                 ))
             }
             _ => None,
@@ -412,9 +403,7 @@ impl FullSpaceOut {
     }
 
     pub fn refund_psbt_data(&self) -> Option<(psbt::Input, TxOut)> {
-        if self.spaceout.space.is_none() {
-            return None;
-        }
+        self.spaceout.space.as_ref()?;
 
         match &self.spaceout.space.as_ref().unwrap().covenant {
             Covenant::Bid {
@@ -426,7 +415,7 @@ impl FullSpaceOut {
                 let mut witness = Witness::default();
                 witness.push(
                     taproot::Signature {
-                        signature: signature.clone(),
+                        signature: *signature,
                         sighash_type: TapSighashType::SinglePlusAnyoneCanPay,
                     }
                     .to_vec(),
@@ -460,13 +449,14 @@ impl FullSpaceOut {
         let mut witness = Witness::default();
         witness.push(
             taproot::Signature {
-                signature: signature.clone(),
+                signature: *signature,
                 sighash_type: TapSighashType::SinglePlusAnyoneCanPay,
             }
             .to_vec(),
         );
 
-        let tx = Transaction {
+        
+        Transaction {
             version: BID_PSBT_TX_VERSION,
             lock_time: BID_PSBT_TX_LOCK_TIME,
             input: vec![TxIn {
@@ -482,7 +472,6 @@ impl FullSpaceOut {
                 value: refund_amount,
                 script_pubkey: auctioned_utxo.spaceout.script_pubkey.clone(),
             }],
-        };
-        tx
+        }
     }
 }

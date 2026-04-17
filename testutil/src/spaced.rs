@@ -7,7 +7,12 @@ use std::{
 
 use anyhow::Result;
 use assert_cmd::cargo::CommandCargoExt;
-use bitcoind::{anyhow, anyhow::anyhow, get_available_port, tempfile::{tempdir, TempDir}};
+use bitcoind::{
+    anyhow,
+    anyhow::anyhow,
+    get_available_port,
+    tempfile::{TempDir, tempdir},
+};
 use spaces_client::{
     auth::{auth_token_from_creds, http_client_with_auth},
     jsonrpsee::{http_client::HttpClient, tokio},
@@ -50,34 +55,35 @@ impl SpaceD {
 
         let args: Vec<_> = conf.args.into_iter().map(String::from).collect();
         let data_dir = conf.data_dir.clone();
-        let (process, tempdir_handle) = tokio::task::spawn_blocking(move || -> Result<(Child, Option<TempDir>)> {
-            let (data_dir_path, tempdir_handle) = match data_dir {
-                Some(path) => (path, None),
-                None => {
-                    let td = tempdir()?;
-                    let path = td.path().to_path_buf();
-                    (path, Some(td))
-                }
-            };
+        let (process, tempdir_handle) =
+            tokio::task::spawn_blocking(move || -> Result<(Child, Option<TempDir>)> {
+                let (data_dir_path, tempdir_handle) = match data_dir {
+                    Some(path) => (path, None),
+                    None => {
+                        let td = tempdir()?;
+                        let path = td.path().to_path_buf();
+                        (path, Some(td))
+                    }
+                };
 
-            #[allow(deprecated)]
-            let child = std::process::Command::cargo_bin("spaced")?
-                .args(args)
-                .arg("--rpc-port")
-                .arg(rpc_port.to_string())
-                .arg("--data-dir")
-                .arg(&data_dir_path)
-                .arg("--rpc-user")
-                .arg("user")
-                .arg("--rpc-password")
-                .arg("pass")
-                .stdout(stdout)
-                .spawn()?;
+                #[allow(deprecated)]
+                let child = std::process::Command::cargo_bin("spaced")?
+                    .args(args)
+                    .arg("--rpc-port")
+                    .arg(rpc_port.to_string())
+                    .arg("--data-dir")
+                    .arg(&data_dir_path)
+                    .arg("--rpc-user")
+                    .arg("user")
+                    .arg("--rpc-password")
+                    .arg("pass")
+                    .stdout(stdout)
+                    .spawn()?;
 
-            Ok((child, tempdir_handle))
-        })
-        .await
-        .expect("spawn blocking task")?;
+                Ok((child, tempdir_handle))
+            })
+            .await
+            .expect("spawn blocking task")?;
 
         let client =
             http_client_with_auth(&rpc_url(rpc_port), &auth_token_from_creds("user", "pass"))?;

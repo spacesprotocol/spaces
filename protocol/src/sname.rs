@@ -1,8 +1,8 @@
+use crate::slabel::{SLabel, SLabelRef};
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::{Display, Formatter};
 use core::str::FromStr;
-use crate::slabel::{SLabel, SLabelRef};
 
 pub const MAX_SPACE_LEN: usize = 255;
 pub const MAX_LABEL_LEN: usize = 62;
@@ -20,8 +20,8 @@ pub struct Subname(SLabel);
 #[cfg(feature = "borsh")]
 mod borsh_impl {
     use super::*;
-    use borsh::{BorshDeserialize, BorshSerialize};
     use borsh::io::{Read, Write};
+    use borsh::{BorshDeserialize, BorshSerialize};
 
     impl BorshSerialize for SName {
         fn serialize<W: Write>(&self, writer: &mut W) -> borsh::io::Result<()> {
@@ -45,8 +45,9 @@ mod borsh_impl {
     impl BorshDeserialize for Subname {
         fn deserialize_reader<R: Read>(reader: &mut R) -> borsh::io::Result<Self> {
             let bytes: Vec<u8> = BorshDeserialize::deserialize_reader(reader)?;
-            let slabel = SLabel::try_from(bytes.as_slice())
-                .map_err(|e| borsh::io::Error::new(borsh::io::ErrorKind::InvalidData, alloc::format!("{}", e)))?;
+            let slabel = SLabel::try_from(bytes.as_slice()).map_err(|e| {
+                borsh::io::Error::new(borsh::io::ErrorKind::InvalidData, alloc::format!("{}", e))
+            })?;
             Ok(Subname(slabel))
         }
     }
@@ -60,7 +61,10 @@ impl Subname {
 
 impl Display for Subname {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-        let s = self.0.to_string_unprefixed().map_err(|_| core::fmt::Error)?;
+        let s = self
+            .0
+            .to_string_unprefixed()
+            .map_err(|_| core::fmt::Error)?;
         write!(f, "{}", s)
     }
 }
@@ -81,7 +85,9 @@ impl Display for Error {
         match self {
             Error::Empty => write!(f, "name is empty"),
             Error::TooLong => write!(f, "name exceeds maximum length of {} bytes", MAX_SPACE_LEN),
-            Error::LabelTooLong => write!(f, "label exceeds maximum length of {} bytes", MAX_LABEL_LEN),
+            Error::LabelTooLong => {
+                write!(f, "label exceeds maximum length of {} bytes", MAX_LABEL_LEN)
+            }
             Error::MissingNullTerminator => write!(f, "missing null terminator"),
             Error::InvalidLabelLength => write!(f, "invalid label length byte"),
             Error::InvalidCharacter => write!(f, "invalid character"),
@@ -117,7 +123,7 @@ pub trait NameLike {
 
     fn label_count(&self) -> usize {
         let mut count = 0;
-        let mut slice = &self.inner_bytes()[..];
+        let mut slice = self.inner_bytes();
         while !slice.is_empty() && slice[0] != 0 {
             slice = &slice[slice[0] as usize + 1..];
             count += 1;
@@ -127,7 +133,7 @@ pub trait NameLike {
 
     #[inline(always)]
     fn iter(&self) -> LabelIterator<'_> {
-        LabelIterator(&self.inner_bytes()[..])
+        LabelIterator(self.inner_bytes())
     }
 }
 
@@ -285,8 +291,7 @@ impl TryFrom<&str> for SName {
                 continue;
             }
 
-            let slabel = SLabel::from_str_unprefixed(label)
-                .map_err(|_| Error::InvalidCharacter)?;
+            let slabel = SLabel::from_str_unprefixed(label).map_err(|_| Error::InvalidCharacter)?;
             let slabel_bytes = slabel.as_ref();
             let slabel_len = slabel_bytes.len();
 
@@ -392,8 +397,8 @@ impl<'a> Iterator for LabelIterator<'a> {
 #[cfg(feature = "serde")]
 mod serde_impl {
     use super::*;
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use serde::de::{Error as DeError, SeqAccess, Visitor};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
     impl Serialize for SName {
         fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -443,7 +448,7 @@ mod serde_impl {
         {
             if deserializer.is_human_readable() {
                 let s = <String as Deserialize>::deserialize(deserializer)?;
-                SName::from_str(&s).map_err(|e| serde::de::Error::custom(e))
+                SName::from_str(&s).map_err(serde::de::Error::custom)
             } else {
                 deserializer.deserialize_seq(SNameVisitorBytes)
             }
@@ -505,23 +510,27 @@ mod tests {
 
         assert!(SName::try_from(b"\x03bob\x07bitcoin\x00").is_ok());
         assert_eq!(
-            SName::try_from(b"\x03bob\x07bitcoin\x00").unwrap().label_count(),
+            SName::try_from(b"\x03bob\x07bitcoin\x00")
+                .unwrap()
+                .label_count(),
             2,
         );
 
         let mut max_label = vec![0x3e];
-        max_label.extend_from_slice(&vec![b'a'; 62]);
+        max_label.extend_from_slice(&[b'a'; 62]);
         max_label.push(0x00);
         assert!(SName::try_from(&max_label).is_ok());
 
         let mut too_long_label = vec![0x3f];
-        too_long_label.extend_from_slice(&vec![b'a'; 63]);
+        too_long_label.extend_from_slice(&[b'a'; 63]);
         too_long_label.push(0x00);
         assert!(SName::try_from(&too_long_label).is_err());
 
         assert!(SName::try_from(b"\x03bob\x00\x03foo").is_ok());
         assert_eq!(
-            SName::try_from(b"\x03bob\x00\x03foo").unwrap().label_count(),
+            SName::try_from(b"\x03bob\x00\x03foo")
+                .unwrap()
+                .label_count(),
             1,
         );
 

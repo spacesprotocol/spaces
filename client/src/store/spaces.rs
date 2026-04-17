@@ -1,31 +1,28 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
-    fs,
-    io,
-    io::ErrorKind,
-    mem,
+    fs, io, mem,
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
 };
 
-use anyhow::{anyhow, Context, Result};
+use crate::store::{EncodableOutpoint, ReadTx, Sha256, SpaceDb, WriteMemory, WriteTx, open_db};
+use anyhow::{Context, Result, anyhow};
 use borsh::{BorshDeserialize, BorshSerialize};
 use jsonrpsee::core::Serialize;
 use serde::Deserialize;
 use spacedb::{
+    Hash, Sha256Hasher,
     db::{Database, SnapshotIterator},
     tx::KeyIterator,
-    Hash, Sha256Hasher,
 };
+use spaces_nums::RootAnchor;
 use spaces_protocol::{
+    Covenant, FullSpaceOut, SpaceOut,
     bitcoin::{BlockHash, OutPoint},
     constants::{ChainAnchor, ROLLOUT_BATCH_SIZE},
     hasher::{BidKey, KeyHash, OutpointKey, SpaceKey},
     prepare::SpacesSource,
-    Covenant, FullSpaceOut, SpaceOut,
 };
-use spaces_nums::RootAnchor;
-use crate::store::{open_db, EncodableOutpoint, ReadTx, Sha256, SpaceDb, WriteMemory, WriteTx};
 
 #[derive(Clone)]
 pub struct SpStore(SpaceDb);
@@ -69,7 +66,7 @@ impl SpStore {
     }
 
     pub fn iter(&self) -> SnapshotIterator<'_, Sha256Hasher> {
-        return self.0.iter();
+        self.0.iter()
     }
 
     pub fn write(&self) -> Result<WriteTx<'_>> {
@@ -111,8 +108,8 @@ impl SpStore {
 
     pub fn begin(&self, genesis_block: &ChainAnchor) -> Result<SpLiveSnapshot> {
         let snapshot = self.0.begin_read()?;
-        let anchor: ChainAnchor = if snapshot.metadata().len() == 0 {
-            genesis_block.clone()
+        let anchor: ChainAnchor = if snapshot.metadata().is_empty() {
+            *genesis_block
         } else {
             snapshot.metadata().try_into()?
         };
@@ -195,7 +192,7 @@ impl SpacesState for SpLiveSnapshot {
 impl SpLiveSnapshot {
     #[inline]
     pub fn is_dirty(&self) -> bool {
-        self.staged.read().expect("read").memory.len() > 0
+        !self.staged.read().expect("read").memory.is_empty()
     }
 
     pub fn restore(&self, checkpoint: ChainAnchor) {
@@ -212,11 +209,13 @@ impl SpLiveSnapshot {
     }
 
     pub fn read_at(&self, block_height: u32) -> anyhow::Result<ReadTx> {
-        self.db.iter()
+        self.db
+            .iter()
             .filter_map(|s| s.ok())
             .find(|s| {
-                s.metadata().try_into()
-                    .map_or(false, |a: ChainAnchor| a.height == block_height)
+                s.metadata()
+                    .try_into()
+                    .is_ok_and(|a: ChainAnchor| a.height == block_height)
             })
             .ok_or_else(|| anyhow!("Snapshot at block {} not found", block_height))
     }
@@ -243,9 +242,8 @@ impl SpLiveSnapshot {
     ) -> spacedb::Result<Option<T>> {
         match self.get_raw(&key.into())? {
             Some(value) => {
-                let decoded: T = borsh::from_slice(&value)
-                    .map_err(|e| {
-                    spacedb::Error::IO(io::Error::new(ErrorKind::Other, e.to_string()))
+                let decoded: T = borsh::from_slice(&value).map_err(|e| {
+                    spacedb::Error::IO(io::Error::other(e.to_string()))
                 })?;
                 Ok(Some(decoded))
             }
@@ -279,7 +277,7 @@ impl SpLiveSnapshot {
         if self.snapshot.0 != version {
             self.snapshot.1 = self.db.begin_read().context("could not read snapshot")?;
             let anchor: ChainAnchor = self.snapshot.1.metadata().try_into().map_err(|_| {
-                std::io::Error::new(std::io::ErrorKind::Other, "could not parse metdata")
+                std::io::Error::other("could not parse metdata")
             })?;
 
             assert_eq!(version, anchor.hash, "inconsistent db state");
@@ -302,7 +300,7 @@ impl SpLiveSnapshot {
         drop(rlock);
 
         self.update_snapshot(version).map_err(|error| {
-            spacedb::Error::IO(std::io::Error::new(std::io::ErrorKind::Other, error))
+            spacedb::Error::IO(std::io::Error::other(error))
         })?;
         self.snapshot.1.get(key)
     }
@@ -319,11 +317,7 @@ impl SpLiveSnapshot {
 
         for (key, value) in changes.memory {
             match value {
-                None => {
-                    _ = {
-                        tx = tx.delete(key)?;
-                    }
-                }
+                None => tx = tx.delete(key)?,
                 Some(value) => tx = tx.insert(key, value)?,
             }
         }
@@ -404,7 +398,7 @@ impl SpLiveSnapshot {
                     None
                 }
             })
-            .map(|x| Ok(x))
+            .map(Ok)
             .collect();
 
         drop(rlock);
@@ -440,7 +434,7 @@ impl SpacesSource for SpLiveSnapshot {
         space_hash: &SpaceKey,
     ) -> spaces_protocol::errors::Result<Option<OutPoint>> {
         let result: Option<EncodableOutpoint> = self.get(*space_hash).map_err(|err| {
-            spaces_protocol::errors::Error::IO(format!("getspaceoutpoint: {}", err.to_string()))
+            spaces_protocol::errors::Error::IO(format!("getspaceoutpoint: {}", err))
         })?;
         Ok(result.map(|out| out.into()))
     }
@@ -451,13 +445,11 @@ impl SpacesSource for SpLiveSnapshot {
     ) -> spaces_protocol::errors::Result<Option<SpaceOut>> {
         let h = OutpointKey::from_outpoint::<Sha256>(*outpoint);
         let result = self.get(h).map_err(|err| {
-            spaces_protocol::errors::Error::IO(format!("getspaceout: {}", err.to_string()))
+            spaces_protocol::errors::Error::IO(format!("getspaceout: {}", err))
         })?;
         Ok(result)
     }
 }
-
-
 
 pub struct RolloutIterator {
     inner: KeyIterator<Sha256Hasher>,
@@ -493,7 +485,7 @@ struct KeyRolloutIterator {
 impl Iterator for KeyRolloutIterator {
     type Item = anyhow::Result<(BidKey, SpaceKey)>;
     fn next(&mut self) -> Option<Self::Item> {
-        while let Some(result) = self.iter.next() {
+        for result in self.iter.by_ref() {
             match result {
                 Ok((key, value)) if BidKey::is_valid(&key) => {
                     let spacehash = SpaceKey::from_slice_unchecked(value.as_slice());

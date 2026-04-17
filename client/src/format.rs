@@ -3,9 +3,11 @@ use colored::{Color, Colorize};
 use jsonrpsee::core::Serialize;
 use serde::Deserialize;
 use spaces_protocol::{
-    bitcoin::{Amount, Network, OutPoint}, Covenant
+    Covenant,
+    bitcoin::{Amount, Network, OutPoint},
 };
 use spaces_wallet::{
+    Balance, DoubleUtxo, WalletOutput,
     address::SpaceAddress,
     bdk_wallet::KeychainKind,
     bitcoin::{Address, Txid},
@@ -13,15 +15,14 @@ use spaces_wallet::{
         BidEventDetails, BidoutEventDetails, OpenEventDetails, SendEventDetails,
         TransferEventDetails, TxEventKind,
     },
-    Balance, DoubleUtxo, WalletOutput,
 };
 use tabled::{Table, Tabled};
 
+use crate::wallets::{WalletInfoWithProgress, WalletStatus};
 use crate::{
     rpc::ServerInfo,
     wallets::{ListNumsResponse, ListSpacesResponse, TxInfo, TxResponse, WalletResponse},
 };
-use crate::wallets::{WalletInfoWithProgress, WalletStatus};
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug, ValueEnum, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -184,7 +185,10 @@ pub fn print_wallet_info(prog: WalletInfoWithProgress, format: Format) {
     match format {
         Format::Text => {
             println!("WALLET: {}", prog.info.label);
-            println!("  Tip {}\n  Birthday {}", prog.info.tip, prog.info.start_block);
+            println!(
+                "  Tip {}\n  Birthday {}",
+                prog.info.tip, prog.info.start_block
+            );
 
             println!("  Public descriptors");
             for desc in prog.info.descriptors {
@@ -195,7 +199,7 @@ pub fn print_wallet_info(prog: WalletInfoWithProgress, format: Format) {
             println!("  Sync Status:");
             let p = prog.sync.progress.unwrap_or(0.0);
             match prog.sync.status {
-                WalletStatus::HeadersSync  => {
+                WalletStatus::HeadersSync => {
                     println!("    Syncing block headers");
                 }
                 WalletStatus::ChainSync => {
@@ -204,20 +208,23 @@ pub fn print_wallet_info(prog: WalletInfoWithProgress, format: Format) {
                 WalletStatus::SpacesSync => {
                     println!("    Spaces Syncing: {:.1}%", p * 100.0);
                 }
-                WalletStatus::CbfFilterSync  => {
+                WalletStatus::CbfFilterSync => {
                     println!("    Filters Syncing: {:.1}%", p * 100.0);
                 }
                 WalletStatus::CbfProcessFilters => {
-                    println!("    Processing Filters: {:.1}%", p* 100.0);
+                    println!("    Processing Filters: {:.1}%", p * 100.0);
                 }
                 WalletStatus::CbfDownloadMatchingBlocks => {
                     println!("    Downloading Matching Blocks: {:.1}%", p * 100.0);
                 }
                 WalletStatus::CbfProcessMatchingBlocks => {
-                    println!("    Processing Matching Blocks: {:.1}%",p * 100.0);
+                    println!("    Processing Matching Blocks: {:.1}%", p * 100.0);
                 }
                 WalletStatus::Syncing => {
-                    println!("    Syncing: In progress ({:.1}%):", prog.info.progress * 100.0);
+                    println!(
+                        "    Syncing: In progress ({:.1}%):",
+                        prog.info.progress * 100.0
+                    );
                 }
                 WalletStatus::CbfApplyUpdate => {
                     println!("    Applying compact filters update");
@@ -225,7 +232,6 @@ pub fn print_wallet_info(prog: WalletInfoWithProgress, format: Format) {
                 WalletStatus::Complete => {
                     println!("    Complete");
                 }
-
             }
 
             println!();
@@ -238,7 +244,7 @@ pub fn print_wallet_info(prog: WalletInfoWithProgress, format: Format) {
 
 fn ascii_table<I, T>(iter: I) -> String
 where
-    I: IntoIterator<Item=T>,
+    I: IntoIterator<Item = T>,
     T: Tabled,
 {
     Table::new(iter)
@@ -282,7 +288,9 @@ pub fn print_list_spaces_response(
             let mut winnings = Vec::new();
             let mut owned = Vec::new();
             for slabel in response.pending {
-                pendings.push(PendingSpaces { space: slabel.to_string() });
+                pendings.push(PendingSpaces {
+                    space: slabel.to_string(),
+                });
             }
             for res in response.outbid {
                 let space = res.spaceout.space.as_ref().expect("space");
@@ -291,16 +299,14 @@ pub fn print_list_spaces_response(
                     last_confirmed_bid: 0,
                     days_left: "".to_string(),
                 };
-                match space.covenant {
-                    Covenant::Bid {
-                        total_burned,
-                        claim_height,
-                        ..
-                    } => {
-                        outbid.last_confirmed_bid = total_burned.to_sat();
-                        outbid.days_left = format_days_left(current_block, claim_height);
-                    }
-                    _ => {}
+                if let Covenant::Bid {
+                    total_burned,
+                    claim_height,
+                    ..
+                } = space.covenant
+                {
+                    outbid.last_confirmed_bid = total_burned.to_sat();
+                    outbid.days_left = format_days_left(current_block, claim_height);
                 }
                 outbids.push(outbid);
             }
@@ -313,22 +319,20 @@ pub fn print_list_spaces_response(
                     days_left: "--".to_string(),
                     claim_at: "--".to_string(),
                 };
-                match space.covenant {
-                    Covenant::Bid {
-                        total_burned,
-                        claim_height,
-                        ..
-                    } => {
-                        winning.bid = total_burned.to_sat();
-                        winning.claim_at = claim_height
-                            .map(|h| h.to_string())
-                            .unwrap_or("--".to_string());
-                        winning.days_left = format_days_left(current_block, claim_height);
-                        if winning.days_left == "0.00" {
-                            winning.days_left = "Ready to claim".to_string();
-                        }
+                if let Covenant::Bid {
+                    total_burned,
+                    claim_height,
+                    ..
+                } = space.covenant
+                {
+                    winning.bid = total_burned.to_sat();
+                    winning.claim_at = claim_height
+                        .map(|h| h.to_string())
+                        .unwrap_or("--".to_string());
+                    winning.days_left = format_days_left(current_block, claim_height);
+                    if winning.days_left == "0.00" {
+                        winning.days_left = "Ready to claim".to_string();
                     }
-                    _ => {}
                 }
                 winnings.push(winning);
             }
@@ -340,19 +344,18 @@ pub fn print_list_spaces_response(
                     days_left: "--".to_string(),
                     utxo: res.outpoint(),
                 };
-                match &space.covenant {
-                    Covenant::Transfer { expire_height, .. } => {
-                        registered.expire_at = *expire_height as _;
-                        registered.days_left =
-                            format_days_left(current_block, Some(*expire_height));
-                    }
-                    _ => {}
+                if let Covenant::Transfer { expire_height, .. } = &space.covenant {
+                    registered.expire_at = *expire_height as _;
+                    registered.days_left = format_days_left(current_block, Some(*expire_height));
                 }
                 owned.push(registered);
             }
 
             if !pendings.is_empty() {
-                println!("⏳ PENDING ({} spaces): ", pendings.len().to_string().bold());
+                println!(
+                    "⏳ PENDING ({} spaces): ",
+                    pendings.len().to_string().bold()
+                );
                 let table = ascii_table(pendings);
                 println!("{}", table);
             }
@@ -374,11 +377,7 @@ pub fn print_list_spaces_response(
             }
 
             if !owned.is_empty() {
-                println!(
-                    "{} ({} spaces): ",
-                    "🔑 OWNED",
-                    owned.len().to_string().bold()
-                );
+                println!("🔑 OWNED ({} spaces): ", owned.len().to_string().bold());
                 let table = ascii_table(owned);
                 println!("{}", table);
             }
@@ -411,15 +410,17 @@ pub fn print_wallet_response_text(network: Network, response: WalletResponse) {
     let mut secondary_txs = Vec::new();
 
     for tx in response.result {
-        if tx.events.iter().any(|event| match event.kind {
-            TxEventKind::Open
-            | TxEventKind::Bid
-            | TxEventKind::Register
-            | TxEventKind::Transfer
-            | TxEventKind::Send
-            | TxEventKind::Renew
-            | TxEventKind::Buy => true,
-            _ => false,
+        if tx.events.iter().any(|event| {
+            matches!(
+                event.kind,
+                TxEventKind::Open
+                    | TxEventKind::Bid
+                    | TxEventKind::Register
+                    | TxEventKind::Transfer
+                    | TxEventKind::Send
+                    | TxEventKind::Renew
+                    | TxEventKind::Buy
+            )
         }) {
             main_txs.push(tx);
         } else {

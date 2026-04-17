@@ -2,15 +2,15 @@ use std::collections::BTreeMap;
 
 use anyhow::anyhow;
 use spaces_protocol::{
+    Covenant, RevokeReason, SpaceOut,
     bitcoin::{OutPoint, Transaction},
     hasher::{KeyHasher, SpaceKey},
     prepare::{SpacesSource, TxContext},
     validate::{TxChangeSet, UpdateKind, Validator},
-    Covenant, RevokeReason, SpaceOut,
 };
 
-use crate::store::chain::Chain;
 use crate::store::Sha256;
+use crate::store::chain::Chain;
 
 pub struct TxChecker<'a> {
     pub original: &'a mut Chain,
@@ -46,7 +46,7 @@ impl<'a> TxChecker<'a> {
     ) -> anyhow::Result<Option<TxChangeSet>> {
         let changeset = self.apply_tx(height, tx)?;
         if let Some(changeset) = changeset.as_ref() {
-            Self::check(&changeset)?;
+            Self::check(changeset)?;
         }
         Ok(changeset)
     }
@@ -115,29 +115,27 @@ impl<'a> TxChecker<'a> {
             .iter()
             .any(|spend| spend.script_error.is_some())
         {
-            return Err(anyhow!("tx-check: transaction not broadcasted as it may have an open that will be rejected"));
+            return Err(anyhow!(
+                "tx-check: transaction not broadcasted as it may have an open that will be rejected"
+            ));
         }
         for create in changset.creates.iter() {
             if let Some(space) = create.space.as_ref() {
-                match space.covenant {
-                    Covenant::Reserved => {
-                        return Err(anyhow!("tx-check: transaction not broadcasted as it may cause spaces to use a reserved covenant"))
-                    }
-                    _ => {}
+                if matches!(space.covenant, Covenant::Reserved) {
+                    return Err(anyhow!(
+                        "tx-check: transaction not broadcasted as it may cause spaces to use a reserved covenant"
+                    ));
                 }
             }
         }
         for update in changset.updates.iter() {
-            match update.kind {
-                UpdateKind::Revoke(kind) => {
-                    match kind {
-                        RevokeReason::Expired => {}
-                        _ => {
-                            return Err(anyhow!("tx-check: transaction not broadcasted as it may cause a space to be revoked (code: {:?})", kind))
-                        }
-                    }
-                }
-                _ => {}
+            if let UpdateKind::Revoke(kind) = update.kind
+                && !matches!(kind, RevokeReason::Expired)
+            {
+                return Err(anyhow!(
+                    "tx-check: transaction not broadcasted as it may cause a space to be revoked (code: {:?})",
+                    kind
+                ));
             }
         }
         Ok(())
@@ -150,8 +148,8 @@ impl SpacesSource for TxChecker<'_> {
         space_hash: &SpaceKey,
     ) -> spaces_protocol::errors::Result<Option<OutPoint>> {
         match self.spaces.get(space_hash) {
-            None => self.original.get_space_outpoint(space_hash.into()),
-            Some(res) => Ok(res.clone()),
+            None => self.original.get_space_outpoint(space_hash),
+            Some(res) => Ok(*res),
         }
     }
 

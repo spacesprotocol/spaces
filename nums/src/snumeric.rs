@@ -10,17 +10,27 @@ pub struct SNumeric {
 
 impl SNumeric {
     pub fn new(block: u32, tx_pos: u16, vout: u16) -> Self {
-        Self { block, tx_pos, vout }
+        Self {
+            block,
+            tx_pos,
+            vout,
+        }
     }
 
     #[inline]
-    pub fn block(&self) -> u32 { self.block }
+    pub fn block(&self) -> u32 {
+        self.block
+    }
 
     #[inline]
-    pub fn tx_pos(&self) -> u16 { self.tx_pos }
+    pub fn tx_pos(&self) -> u16 {
+        self.tx_pos
+    }
 
     #[inline]
-    pub fn vout(&self) -> u16 { self.vout }
+    pub fn vout(&self) -> u16 {
+        self.vout
+    }
 
     pub fn to_slabel(&self) -> SLabel {
         SLabel::from_str(&self.to_string()).expect("valid numeric label")
@@ -31,7 +41,9 @@ impl TryFrom<SLabel> for SNumeric {
     type Error = SNumericParseError;
 
     fn try_from(label: SLabel) -> Result<Self, Self::Error> {
-        let s = label.as_str_unprefixed().map_err(|_| SNumericParseError::MissingPrefix)?;
+        let s = label
+            .as_str_unprefixed()
+            .map_err(|_| SNumericParseError::MissingPrefix)?;
         SNumeric::from_str(s)
     }
 }
@@ -49,7 +61,9 @@ impl fmt::Display for SNumericParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             SNumericParseError::MissingPrefix => f.write_str("expected '#' prefix"),
-            SNumericParseError::InvalidFormat => f.write_str("expected '#<block>-<tx_pos>-<vout>' format"),
+            SNumericParseError::InvalidFormat => {
+                f.write_str("expected '#<block>-<tx_pos>-<vout>' format")
+            }
             SNumericParseError::InvalidBlock(e) => write!(f, "invalid block number: {e}"),
             SNumericParseError::InvalidTxPos(e) => write!(f, "invalid tx position: {e}"),
             SNumericParseError::InvalidVout(e) => write!(f, "invalid vout: {e}"),
@@ -57,6 +71,7 @@ impl fmt::Display for SNumericParseError {
     }
 }
 
+#[cfg(feature = "std")]
 impl std::error::Error for SNumericParseError {}
 
 impl fmt::Display for SNumeric {
@@ -69,15 +84,27 @@ impl FromStr for SNumeric {
     type Err = SNumericParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let s = s.strip_prefix('#').ok_or(SNumericParseError::MissingPrefix)?;
+        let s = s
+            .strip_prefix('#')
+            .ok_or(SNumericParseError::MissingPrefix)?;
         let mut parts = s.splitn(3, '-');
         let block_str = parts.next().ok_or(SNumericParseError::InvalidFormat)?;
         let pos_str = parts.next().ok_or(SNumericParseError::InvalidFormat)?;
         let vout_str = parts.next().ok_or(SNumericParseError::InvalidFormat)?;
-        let block = block_str.parse::<u32>().map_err(SNumericParseError::InvalidBlock)?;
-        let tx_pos = pos_str.parse::<u16>().map_err(SNumericParseError::InvalidTxPos)?;
-        let vout = vout_str.parse::<u16>().map_err(SNumericParseError::InvalidVout)?;
-        Ok(SNumeric { block, tx_pos, vout })
+        let block = block_str
+            .parse::<u32>()
+            .map_err(SNumericParseError::InvalidBlock)?;
+        let tx_pos = pos_str
+            .parse::<u16>()
+            .map_err(SNumericParseError::InvalidTxPos)?;
+        let vout = vout_str
+            .parse::<u16>()
+            .map_err(SNumericParseError::InvalidVout)?;
+        Ok(SNumeric {
+            block,
+            tx_pos,
+            vout,
+        })
     }
 }
 
@@ -121,8 +148,8 @@ impl<'de> serde::Deserialize<'de> for SNumeric {
 
 #[cfg(feature = "borsh")]
 mod borsh_impl {
-    use borsh::{io, BorshDeserialize, BorshSerialize};
     use super::*;
+    use borsh::{BorshDeserialize, BorshSerialize, io};
 
     impl BorshSerialize for SNumeric {
         fn serialize<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
@@ -137,7 +164,11 @@ mod borsh_impl {
             let block = u32::deserialize_reader(reader)?;
             let tx_pos = u16::deserialize_reader(reader)?;
             let vout = u16::deserialize_reader(reader)?;
-            Ok(SNumeric { block, tx_pos, vout })
+            Ok(SNumeric {
+                block,
+                tx_pos,
+                vout,
+            })
         }
     }
 }

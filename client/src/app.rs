@@ -1,14 +1,14 @@
-use std::path::PathBuf;
-use std::sync::Arc;
-use anyhow::anyhow;
-use tokio::sync::{broadcast, mpsc};
-use tokio::task::{JoinHandle, JoinSet};
 use crate::config::Args;
 use crate::rpc::{AsyncChainState, RpcServerImpl, WalletLoadRequest, WalletManager};
 use crate::source::{BitcoinBlockSource, BitcoinRpc};
 use crate::spaces::Spaced;
-use crate::store::chain::{Chain};
+use crate::store::chain::Chain;
 use crate::wallets::RpcWallet;
+use anyhow::anyhow;
+use std::path::PathBuf;
+use std::sync::Arc;
+use tokio::sync::{broadcast, mpsc};
+use tokio::task::{JoinHandle, JoinSet};
 
 pub struct App {
     shutdown: broadcast::Sender<()>,
@@ -23,7 +23,12 @@ impl App {
         }
     }
 
-    async fn setup_rpc_wallet(&mut self, spaced: &Spaced, rx: mpsc::Receiver<WalletLoadRequest>, cbf: bool) {
+    async fn setup_rpc_wallet(
+        &mut self,
+        spaced: &Spaced,
+        rx: mpsc::Receiver<WalletLoadRequest>,
+        cbf: bool,
+    ) {
         let wallet_service = RpcWallet::service(
             spaced.network,
             spaced.rpc.clone(),
@@ -31,7 +36,7 @@ impl App {
             rx,
             self.shutdown.clone(),
             spaced.num_workers,
-            cbf
+            cbf,
         );
 
         self.services.spawn(async move {
@@ -59,7 +64,7 @@ impl App {
             chain_state,
             self.shutdown.subscribe(),
         )
-            .await;
+        .await;
 
         self.services.spawn(async {
             async_chain_state_handle
@@ -79,7 +84,8 @@ impl App {
                 .map_err(|e| anyhow!("RPC Server error: {}", e))
         });
 
-        self.setup_rpc_wallet(spaced, wallet_loader_rx, spaced.cbf).await;
+        self.setup_rpc_wallet(spaced, wallet_loader_rx, spaced.cbf)
+            .await;
     }
 
     async fn setup_sync_service(&mut self, mut spaced: Spaced) {
@@ -123,15 +129,7 @@ async fn create_async_store(
     let async_store = AsyncChainState::new(tx);
     let client = reqwest::Client::new();
     let handle = tokio::spawn(async move {
-        AsyncChainState::handler(
-            &client,
-            rpc,
-            anchors,
-            state,
-            rx,
-            shutdown,
-        )
-            .await
+        AsyncChainState::handler(&client, rpc, anchors, state, rx, shutdown).await
     });
     (async_store, handle)
 }

@@ -1,8 +1,12 @@
-use core::{fmt, str::FromStr};
-use bech32::{self, Hrp, Bech32m};
-use bitcoin::{ScriptBuf};
+use crate::{KeyKind, ns_hash};
+#[cfg(feature = "bech32")]
+use bech32::{Bech32m, Hrp};
+use bitcoin::ScriptBuf;
+#[cfg(feature = "bech32")]
+use core::fmt;
+#[cfg(feature = "bech32")]
+use core::str::FromStr;
 use spaces_protocol::hasher::{Hash, KeyHash, KeyHasher};
-use crate::{ns_hash, KeyKind};
 
 pub const NUM_HRP: &str = "num";
 
@@ -11,17 +15,22 @@ impl KeyHash for NumId {}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NumId(pub(crate) [u8; 32]);
 
-
 impl NumId {
     #[inline]
-    pub fn from_bytes(bytes: [u8; 32]) -> Self { Self(bytes) }
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
     #[inline]
-    pub fn as_slice(&self) -> &[u8] { &self.0 }
+    pub fn as_slice(&self) -> &[u8] {
+        &self.0
+    }
     #[inline]
-    pub fn to_bytes(self) -> [u8; 32] { self.0 }
+    pub fn to_bytes(self) -> [u8; 32] {
+        self.0
+    }
 
     pub fn from_spk<H: KeyHasher>(spk: ScriptBuf) -> Self {
-        Self(ns_hash::<H>(KeyKind::NumId, H::hash(&spk.as_bytes())))
+        Self(ns_hash::<H>(KeyKind::NumId, H::hash(spk.as_bytes())))
     }
 }
 
@@ -31,6 +40,7 @@ impl From<NumId> for Hash {
     }
 }
 
+#[cfg(feature = "bech32")]
 #[derive(Debug)]
 pub enum NumIdParseError {
     Bech32(bech32::DecodeError),
@@ -38,6 +48,7 @@ pub enum NumIdParseError {
     InvalidLen,
 }
 
+#[cfg(feature = "bech32")]
 impl fmt::Display for NumIdParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -48,9 +59,10 @@ impl fmt::Display for NumIdParseError {
     }
 }
 
+#[cfg(all(feature = "std", feature = "bech32"))]
 impl std::error::Error for NumIdParseError {}
 
-#[cfg(feature = "serde")]
+#[cfg(all(feature = "serde", feature = "bech32"))]
 impl serde::Serialize for NumId {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -60,7 +72,7 @@ impl serde::Serialize for NumId {
     }
 }
 
-#[cfg(feature = "serde")]
+#[cfg(all(feature = "serde", feature = "bech32"))]
 impl<'de> serde::Deserialize<'de> for NumId {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -74,8 +86,8 @@ impl<'de> serde::Deserialize<'de> for NumId {
 
 #[cfg(feature = "borsh")]
 mod borsh_impl {
-    use borsh::{io, BorshDeserialize, BorshSerialize};
     use super::*;
+    use borsh::{BorshDeserialize, BorshSerialize, io};
 
     impl BorshSerialize for NumId {
         fn serialize<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
@@ -92,10 +104,14 @@ mod borsh_impl {
     }
 }
 
+#[cfg(feature = "bech32")]
 impl From<bech32::DecodeError> for NumIdParseError {
-    fn from(e: bech32::DecodeError) -> Self { NumIdParseError::Bech32(e) }
+    fn from(e: bech32::DecodeError) -> Self {
+        NumIdParseError::Bech32(e)
+    }
 }
 
+#[cfg(feature = "bech32")]
 impl fmt::Display for NumId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let hrp = Hrp::parse(NUM_HRP).map_err(|_| fmt::Error)?;
@@ -104,13 +120,18 @@ impl fmt::Display for NumId {
     }
 }
 
+#[cfg(feature = "bech32")]
 impl FromStr for NumId {
     type Err = NumIdParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let (hrp, data) = bech32::decode(s)?;
-        if hrp.as_str() != NUM_HRP { return Err(NumIdParseError::InvalidHrp); }
-        if data.len() != 32 { return Err(NumIdParseError::InvalidLen); }
+        if hrp.as_str() != NUM_HRP {
+            return Err(NumIdParseError::InvalidHrp);
+        }
+        if data.len() != 32 {
+            return Err(NumIdParseError::InvalidLen);
+        }
         let mut arr = [0u8; 32];
         arr.copy_from_slice(&data);
         Ok(NumId(arr))
@@ -120,7 +141,7 @@ impl FromStr for NumId {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bech32::{Bech32m};
+    use bech32::Bech32m;
 
     #[test]
     fn num_id_roundtrip() {
