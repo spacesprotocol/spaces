@@ -192,7 +192,8 @@ async fn it_should_insert_txout_for_bids(rig: &TestRig) -> anyhow::Result<()> {
         .client
         .wallet_list_transactions(BOB, 10, 0)
         .await?
-        .iter().find(|tx| tx.events.iter().any(|event| event.kind == TxEventKind::Bid))
+        .iter()
+        .find(|tx| tx.events.iter().any(|event| event.kind == TxEventKind::Bid))
         .expect("a bid")
         .clone();
 
@@ -506,9 +507,10 @@ async fn it_should_allow_applying_script_in_batch(rig: &TestRig) -> anyhow::Resu
     all_spaces_2.owned.iter().for_each(|s| {
         let space = s.spaceout.space.as_ref().expect("space");
         if let Covenant::Transfer {
-                expire_height,
-                data,
-            } = &space.covenant {
+            expire_height,
+            data,
+        } = &space.covenant
+        {
             assert_eq!(
                 *expire_height, expected_expire_height,
                 "must refresh expire height"
@@ -1101,9 +1103,11 @@ async fn it_can_batch_txs(rig: &TestRig) -> anyhow::Result<()> {
         _ => panic!("must be a bid"),
     }
 
-    for space in ["@test10000".to_string(),
+    for space in [
+        "@test10000".to_string(),
         "@test9999".to_string(),
-        "@test9998".to_string()] {
+        "@test9998".to_string(),
+    ] {
         let space = alice_spaces
             .owned
             .iter()

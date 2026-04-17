@@ -482,7 +482,7 @@ impl Builder {
             }
 
             builder.fee_rate(fee_rate);
-            
+
             builder.finish().map_err(|e| match e {
                 CreateTxError::CoinSelection(e) if confirmed_only => {
                     anyhow!("{} (replacements use confirmed balance only)", e)

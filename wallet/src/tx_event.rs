@@ -445,10 +445,7 @@ impl TxRecord {
             space: Some(space),
             previous_spaceout: None,
             details: Some(
-                serde_json::to_value(OpenEventDetails {
-                    initial_bid,
-                })
-                .expect("json value"),
+                serde_json::to_value(OpenEventDetails { initial_bid }).expect("json value"),
             ),
         });
     }

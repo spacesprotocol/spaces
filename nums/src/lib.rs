@@ -502,10 +502,9 @@ impl TxContext {
             let dk = DelegatorKey::from_id::<H>(NumId::from_spk::<H>(
                 input.numout.script_pubkey.clone(),
             ));
-            if !nums_with_delegations.contains(&dk)
-                && src.get_delegator(&dk)?.is_some() {
-                    nums_with_delegations.push(dk);
-                }
+            if !nums_with_delegations.contains(&dk) && src.get_delegator(&dk)?.is_some() {
+                nums_with_delegations.push(dk);
+            }
         }
 
         // Output script pubkeys that already have a num (skip minting duplicates)

@@ -404,17 +404,19 @@ impl SpacesWallet {
     ) -> anyhow::Result<TxBuilder<'_, SpacesAwareCoinSelection>> {
         let events = self.get_tx_events(txid)?;
         for event in events {
-            if event.kind == TxEventKind::Bid { match self.get_tx(txid) {
-                Some(tx) => {
-                    if !tx.chain_position.is_confirmed() {
-                        return Err(anyhow!(
-                            "Bid with a higher fee on `{}` to replace this tx",
-                            event.space.expect("space")
-                        ));
+            if event.kind == TxEventKind::Bid {
+                match self.get_tx(txid) {
+                    Some(tx) => {
+                        if !tx.chain_position.is_confirmed() {
+                            return Err(anyhow!(
+                                "Bid with a higher fee on `{}` to replace this tx",
+                                event.space.expect("space")
+                            ));
+                        }
                     }
+                    _ => continue,
                 }
-                _ => continue,
-            } }
+            }
         }
 
         self.create_builder(unspendables, Some((txid, fee_rate)), false)

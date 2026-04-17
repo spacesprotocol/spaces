@@ -202,9 +202,8 @@ impl NumLiveSnapshot {
     ) -> spacedb::Result<Option<T>> {
         match self.get_raw(&key.into())? {
             Some(value) => {
-                let decoded: T = borsh::from_slice(&value).map_err(|e| {
-                    spacedb::Error::IO(io::Error::other(e.to_string()))
-                })?;
+                let decoded: T = borsh::from_slice(&value)
+                    .map_err(|e| spacedb::Error::IO(io::Error::other(e.to_string())))?;
                 Ok(Some(decoded))
             }
             None => Ok(None),
@@ -236,9 +235,12 @@ impl NumLiveSnapshot {
     fn update_snapshot(&mut self, version: BlockHash) -> Result<()> {
         if self.snapshot.0 != version {
             self.snapshot.1 = self.db.begin_read().context("could not read snapshot")?;
-            let anchor: ChainAnchor = self.snapshot.1.metadata().try_into().map_err(|_| {
-                std::io::Error::other("could not parse metdata")
-            })?;
+            let anchor: ChainAnchor = self
+                .snapshot
+                .1
+                .metadata()
+                .try_into()
+                .map_err(|_| std::io::Error::other("could not parse metdata"))?;
 
             assert_eq!(version, anchor.hash, "inconsistent db state");
             self.snapshot.0 = version;
@@ -259,9 +261,8 @@ impl NumLiveSnapshot {
         let version = rlock.snapshot_version;
         drop(rlock);
 
-        self.update_snapshot(version).map_err(|error| {
-            spacedb::Error::IO(std::io::Error::other(error))
-        })?;
+        self.update_snapshot(version)
+            .map_err(|error| spacedb::Error::IO(std::io::Error::other(error)))?;
         self.snapshot.1.get(key)
     }
 
@@ -304,9 +305,9 @@ impl NumSource for NumLiveSnapshot {
         &mut self,
         key: &CommitmentKey,
     ) -> spaces_protocol::errors::Result<Option<Commitment>> {
-        let result = self.get(*key).map_err(|err| {
-            spaces_protocol::errors::Error::IO(format!("getcommitment: {}", err))
-        })?;
+        let result = self
+            .get(*key)
+            .map_err(|err| spaces_protocol::errors::Error::IO(format!("getcommitment: {}", err)))?;
         Ok(result)
     }
 
@@ -314,9 +315,9 @@ impl NumSource for NumLiveSnapshot {
         &mut self,
         key: &DelegatorKey,
     ) -> spaces_protocol::errors::Result<Option<SLabel>> {
-        let result = self.get(*key).map_err(|err| {
-            spaces_protocol::errors::Error::IO(format!("getdelegate: {}", err))
-        })?;
+        let result = self
+            .get(*key)
+            .map_err(|err| spaces_protocol::errors::Error::IO(format!("getdelegate: {}", err)))?;
         Ok(result)
     }
 
@@ -324,9 +325,9 @@ impl NumSource for NumLiveSnapshot {
         &mut self,
         key: &CommitmentTipKey,
     ) -> spaces_protocol::errors::Result<Option<Hash>> {
-        let result = self.get(*key).map_err(|err| {
-            spaces_protocol::errors::Error::IO(format!("getregistry: {}", err))
-        })?;
+        let result = self
+            .get(*key)
+            .map_err(|err| spaces_protocol::errors::Error::IO(format!("getregistry: {}", err)))?;
         Ok(result)
     }
 
@@ -335,9 +336,9 @@ impl NumSource for NumLiveSnapshot {
         outpoint: &OutPoint,
     ) -> spaces_protocol::errors::Result<Option<NumOut>> {
         let h = NumOutpointKey::from_outpoint::<Sha256>(*outpoint);
-        let result = self.get(h).map_err(|err| {
-            spaces_protocol::errors::Error::IO(format!("getptrout: {}", err))
-        })?;
+        let result = self
+            .get(h)
+            .map_err(|err| spaces_protocol::errors::Error::IO(format!("getptrout: {}", err)))?;
         Ok(result)
     }
 

@@ -602,26 +602,25 @@ impl BlockFetcher {
         let end_needle = format!("\",\"error\":null,\"id\":\"{}\"}}\n", id);
 
         // Check if we can quickly extract block
-        let hex_block =
-            if raw.starts_with(start_needle.as_bytes()) && raw.ends_with(end_needle.as_bytes()) {
-                raw.drain(0..start_needle.len());
-                raw.truncate(raw.len() - end_needle.len());
-                raw
-            } else {
-                // fallback to decoding json
-                let hex_block: JsonRpcResponse<Option<String>> =
-                    serde_json::from_slice(raw.as_slice()).map_err(|e| {
-                        BitcoinRpcError::Other(format!("fetch block {}: {}", hash, e))
-                    })?;
-                if let Some(e) = hex_block.error {
-                    return Err(BitcoinRpcError::Rpc(e));
-                }
-                let block = hex_block.result.ok_or(BitcoinRpcError::Other(format!(
-                    "could not find block with hash {}",
-                    hash
-                )))?;
-                block.into_bytes()
-            };
+        let hex_block = if raw.starts_with(start_needle.as_bytes())
+            && raw.ends_with(end_needle.as_bytes())
+        {
+            raw.drain(0..start_needle.len());
+            raw.truncate(raw.len() - end_needle.len());
+            raw
+        } else {
+            // fallback to decoding json
+            let hex_block: JsonRpcResponse<Option<String>> = serde_json::from_slice(raw.as_slice())
+                .map_err(|e| BitcoinRpcError::Other(format!("fetch block {}: {}", hash, e)))?;
+            if let Some(e) = hex_block.error {
+                return Err(BitcoinRpcError::Rpc(e));
+            }
+            let block = hex_block.result.ok_or(BitcoinRpcError::Other(format!(
+                "could not find block with hash {}",
+                hash
+            )))?;
+            block.into_bytes()
+        };
 
         if hex_block.len() % 2 != 0 {
             return Err(BitcoinRpcError::Other(
@@ -629,14 +628,11 @@ impl BlockFetcher {
             ));
         }
 
-        let raw_block = hex_to_bytes(hex_block).map_err(|e| {
-            BitcoinRpcError::Other(format!("Hex deserialize error: {}", e))
-        })?;
+        let raw_block = hex_to_bytes(hex_block)
+            .map_err(|e| BitcoinRpcError::Other(format!("Hex deserialize error: {}", e)))?;
 
-        let block: Block =
-            bitcoin::consensus::encode::deserialize(raw_block.as_slice()).map_err(|e| {
-                BitcoinRpcError::Other(format!("Block Deserialize error: {}", e))
-            })?;
+        let block: Block = bitcoin::consensus::encode::deserialize(raw_block.as_slice())
+            .map_err(|e| BitcoinRpcError::Other(format!("Block Deserialize error: {}", e)))?;
         Ok(block)
     }
 }

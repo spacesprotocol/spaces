@@ -263,13 +263,7 @@ fn display_fee(fee: &Option<Amount>) -> String {
 fn display_events(events: &[TxEvent]) -> String {
     events
         .iter()
-        .map(|e| {
-            format!(
-                "{} {}",
-                e.kind,
-                e.space.clone().unwrap_or("".to_string())
-            )
-        })
+        .map(|e| format!("{} {}", e.kind, e.space.clone().unwrap_or("".to_string())))
         .collect::<Vec<String>>()
         .join("\n")
 }
@@ -371,10 +365,7 @@ impl spaces_wallet::Mempool for MempoolChecker<'_> {
     }
 }
 
-fn resolve_subject_to_num_id(
-    chain: &mut Chain,
-    subject: &Subject,
-) -> anyhow::Result<NumId> {
+fn resolve_subject_to_num_id(chain: &mut Chain, subject: &Subject) -> anyhow::Result<NumId> {
     match subject {
         Subject::NumId(id) => Ok(*id),
         Subject::Label(label) if label.is_numeric() => {
@@ -620,14 +611,8 @@ impl RpcWallet {
                     _ = resp.send(Err(anyhow::anyhow!("Wallet is syncing")));
                     return Ok(());
                 }
-                let result = Self::handle_fee_bump(
-                    source,
-                    chain,
-                    wallet,
-                    txid,
-                    skip_tx_check,
-                    fee_rate,
-                );
+                let result =
+                    Self::handle_fee_bump(source, chain, wallet, txid, skip_tx_check, fee_rate);
                 _ = resp.send(result);
             }
             WalletCommand::ForceSpendOutput {
@@ -1418,7 +1403,10 @@ impl RpcWallet {
                                             && !wallet
                                                 .is_mine(full.numout.script_pubkey.clone()) =>
                                     {
-                                        return Err(anyhow!("transfer: you don't own num '{}'", id));
+                                        return Err(anyhow!(
+                                            "transfer: you don't own num '{}'",
+                                            id
+                                        ));
                                     }
                                     Some(full)
                                         if secret.is_none()
@@ -1463,7 +1451,10 @@ impl RpcWallet {
                                             && !wallet
                                                 .is_mine(full.numout.script_pubkey.clone()) =>
                                     {
-                                        return Err(anyhow!("transfer: you don't own num '{}'", id));
+                                        return Err(anyhow!(
+                                            "transfer: you don't own num '{}'",
+                                            id
+                                        ));
                                     }
                                     Some(full)
                                         if secret.is_none()

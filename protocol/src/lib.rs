@@ -310,7 +310,9 @@ impl Space {
 
     pub fn data(&self) -> Option<&[u8]> {
         match &self.covenant {
-            Covenant::Transfer { data: Some(data), .. } => Some(data.as_slice()),
+            Covenant::Transfer {
+                data: Some(data), ..
+            } => Some(data.as_slice()),
             _ => None,
         }
     }
@@ -455,7 +457,6 @@ impl FullSpaceOut {
             .to_vec(),
         );
 
-        
         Transaction {
             version: BID_PSBT_TX_VERSION,
             lock_time: BID_PSBT_TX_LOCK_TIME,

@@ -843,13 +843,13 @@ impl WalletManager {
     async fn get_wallet_start_block(&self, client: &reqwest::Client) -> anyhow::Result<BlockId> {
         let count: i32 = self
             .rpc
-            .send_json(client,&self.rpc.get_block_count())
+            .send_json(client, &self.rpc.get_block_count())
             .await?;
         let height = std::cmp::max(count - 1, 0) as u32;
 
         let hash = self
             .rpc
-            .send_json(client,&self.rpc.get_block_hash(height))
+            .send_json(client, &self.rpc.get_block_hash(height))
             .await?;
 
         Ok(BlockId { height, hash })

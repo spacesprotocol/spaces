@@ -251,7 +251,8 @@ impl Validator {
     fn clear_auctioned_spent(tx: &Transaction, meta: &mut TxContext) {
         if let Some(auctioned) = meta
             .auctioned_output
-            .as_ref().map(|out| out.bid_psbt.outpoint)
+            .as_ref()
+            .map(|out| out.bid_psbt.outpoint)
         {
             if tx
                 .input
@@ -605,11 +606,7 @@ impl Validator {
             Some(output) => {
                 // check if there's an existing space output created by this transaction
                 // representing another space somehow (should never be possible anyway?)
-                if changeset
-                    .creates
-                    .iter()
-                    .any(|x| x.n == output_index)
-                {
+                if changeset.creates.iter().any(|x| x.n == output_index) {
                     changeset.updates.push(UpdateOut {
                         output: FullSpaceOut {
                             txid: input.previous_output.txid,

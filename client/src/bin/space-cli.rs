@@ -631,9 +631,8 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
         Commands::ExportWallet { path } => {
             let result = cli.client.wallet_export(&cli.wallet).await?;
             let content = serde_json::to_string_pretty(&result).expect("result");
-            fs::write(path, content).map_err(|e| {
-                ClientError::Custom(format!("Could not save to path: {}", e))
-            })?;
+            fs::write(path, content)
+                .map_err(|e| ClientError::Custom(format!("Could not save to path: {}", e)))?;
         }
         Commands::GetWalletInfo => {
             let result = cli.client.wallet_get_info(&cli.wallet).await?;
