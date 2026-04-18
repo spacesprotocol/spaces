@@ -147,6 +147,13 @@ enum Commands {
     /// Generate a random p2tr keypair and print the secret key, script pubkey, and num id
     #[command(name = "generatekey")]
     GenerateKey,
+    /// Get all defined spaces
+    #[command(name = "getallspaces")]
+    GetAllSpaces {
+        /// Only return spaces that have reached expiration
+        #[arg(long)]
+        expired: bool,
+    },
     /// Create a new num
     #[command(name = "createnum")]
     CreateNum {
@@ -644,6 +651,18 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
             let space = normalize_space(&space);
             let response = cli.client.get_space(&space).await?;
             println!("{}", serde_json::to_string_pretty(&response)?);
+        }
+        Commands::GetAllSpaces { expired } => {
+            let mut spaces = cli.client.get_all_spaces().await?;
+            if expired {
+                let info = cli.client.get_server_info().await?;
+                let current_height = info.tip.height;
+                spaces.retain(|fso| {
+                    fso.spaceout.space.as_ref()
+                        .map_or(false, |s| s.is_expired(current_height))
+                });
+            }
+            println!("{}", serde_json::to_string_pretty(&spaces)?);
         }
         Commands::GetSpaceOut { outpoint } => {
             let response = cli.client.get_spaceout(outpoint).await?;

@@ -136,6 +136,9 @@ pub enum ChainStateCommand {
         hash: SpaceKey,
         resp: Responder<anyhow::Result<Option<FullSpaceOut>>>,
     },
+    GetAllSpaces {
+        resp: Responder<anyhow::Result<Vec<FullSpaceOut>>>,
+    },
     GetSpaceout {
         outpoint: OutPoint,
         resp: Responder<anyhow::Result<Option<SpaceOut>>>,
@@ -243,6 +246,9 @@ pub trait Rpc {
         &self,
         space_or_hash: &str,
     ) -> Result<Option<FullSpaceOut>, ErrorObjectOwned>;
+
+    #[method(name = "getallspaces")]
+    async fn get_all_spaces(&self) -> Result<Vec<FullSpaceOut>, ErrorObjectOwned>;
 
     #[method(name = "getspaceowner")]
     async fn get_space_owner(
@@ -1054,6 +1060,13 @@ impl RpcServer for RpcServerImpl {
         Ok(info)
     }
 
+    async fn get_all_spaces(&self) -> Result<Vec<FullSpaceOut>, ErrorObjectOwned> {
+        self.store
+            .get_all_spaces()
+            .await
+            .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
+    }
+
     async fn get_space_owner(
         &self,
         space_or_hash: &str,
@@ -1836,6 +1849,10 @@ impl AsyncChainState {
                 let result = state.get_space_info(&hash);
                 let _ = resp.send(result);
             }
+            ChainStateCommand::GetAllSpaces { resp } => {
+                let result = state.get_all_spaces();
+                let _ = resp.send(result);
+            }
             ChainStateCommand::GetSpaceout { outpoint, resp } => {
                 let result = state
                     .get_spaceout(&outpoint)
@@ -2299,6 +2316,14 @@ impl AsyncChainState {
         let (resp, resp_rx) = oneshot::channel();
         self.sender
             .send(ChainStateCommand::GetSpace { hash, resp })
+            .await?;
+        resp_rx.await?
+    }
+
+    pub async fn get_all_spaces(&self) -> anyhow::Result<Vec<FullSpaceOut>> {
+        let (resp, resp_rx) = oneshot::channel();
+        self.sender
+            .send(ChainStateCommand::GetAllSpaces { resp })
             .await?;
         resp_rx.await?
     }

@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use spaces_nums::TxChangeSet as NumTxChangeSet;
 use spaces_protocol::bitcoin::BlockHash;
 use spaces_protocol::{validate::TxChangeSet as SpaceTxChangeSet, Covenant};
-use sip7::Record;
+use sip7::ParsedRecord;
 
 use crate::client::{BlockMeta, NumBlockMeta};
 use crate::store::chain::Chain;
@@ -37,7 +37,7 @@ pub fn sip7_handle_matches(data: &[u8], needle: &str) -> bool {
         return false;
     };
     for r in records {
-        if let Record::Txt { key, value } = r {
+        if let ParsedRecord::Txt { key, value } = r {
             if key == "handle" && value.iter().any(|v| v == needle) {
                 return true;
             }
@@ -54,9 +54,9 @@ fn sip7_txt_values(data: &[u8], txt_key: &str) -> Vec<String> {
     };
     let mut out = Vec::new();
     for r in records {
-        if let Record::Txt { key, value } = r {
+        if let ParsedRecord::Txt { key, value } = r {
             if key == txt_key {
-                out.extend(value.into_iter());
+                out.extend(value.into_iter().map(|v| v.to_owned()));
             }
         }
     }

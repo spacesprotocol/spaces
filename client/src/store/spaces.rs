@@ -202,6 +202,75 @@ impl SpacesState for SpLiveSnapshot {
 }
 
 impl SpLiveSnapshot {
+    pub fn get_all_space_infos(&mut self) -> anyhow::Result<Vec<FullSpaceOut>> {
+        let rlock = self.staged.read().expect("acquire lock");
+
+        let mut staged_spaces: BTreeMap<SpaceKey, Option<EncodableOutpoint>> = BTreeMap::new();
+        for (key, value) in rlock.memory.iter() {
+            if SpaceKey::is_valid(key) {
+                let space_key = SpaceKey::from_slice_unchecked(key.as_slice());
+                match value {
+                    Some(bytes) => {
+                        if let Ok(outpoint) = borsh::from_slice::<EncodableOutpoint>(bytes) {
+                            staged_spaces.insert(space_key, Some(outpoint));
+                        }
+                    }
+                    None => {
+                        staged_spaces.insert(space_key, None);
+                    }
+                }
+            }
+        }
+
+        let version = rlock.snapshot_version;
+        drop(rlock);
+
+        self.update_snapshot(version)?;
+        let snapshot = &self.snapshot.1;
+
+        let mut results = Vec::new();
+
+        for item in snapshot.iter() {
+            match item {
+                Ok((key, value)) => {
+                    if !SpaceKey::is_valid(&key) {
+                        continue;
+                    }
+                    let space_key = SpaceKey::from_slice_unchecked(key.as_slice());
+                    if staged_spaces.contains_key(&space_key) {
+                        continue;
+                    }
+                    if let Ok(enc_outpoint) = borsh::from_slice::<EncodableOutpoint>(&value) {
+                        let outpoint: OutPoint = enc_outpoint.into();
+                        if let Some(spaceout) = self.get_spaceout(&outpoint)? {
+                            results.push(FullSpaceOut {
+                                txid: outpoint.txid,
+                                spaceout,
+                            });
+                        }
+                    }
+                }
+                Err(_) => continue,
+            }
+        }
+
+        for (_space_key, staged_value) in staged_spaces {
+            if let Some(enc_outpoint) = staged_value {
+                let outpoint: OutPoint = enc_outpoint.into();
+                if let Some(spaceout) = self.get_spaceout(&outpoint)? {
+                    results.push(FullSpaceOut {
+                        txid: outpoint.txid,
+                        spaceout,
+                    });
+                }
+            }
+        }
+
+        Ok(results)
+    }
+}
+
+impl SpLiveSnapshot {
     #[inline]
     pub fn is_dirty(&self) -> bool {
         self.staged.read().expect("read").memory.len() > 0

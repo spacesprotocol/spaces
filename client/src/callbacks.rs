@@ -68,6 +68,13 @@ impl CallbackRegistry {
 
         // If client already exists, remove old watched txids from reverse map
         if let Some(old_client) = clients.get(&client_id) {
+            info!(
+                "txcallback: re-registering client '{}' (url: {} -> {}), clearing {} watched txid(s)",
+                client_id,
+                old_client.callback_url,
+                callback_url,
+                old_client.watched_txids.len()
+            );
             for txid in &old_client.watched_txids {
                 if let Some(client_set) = txid_map.get_mut(txid) {
                     client_set.remove(&client_id);
@@ -76,6 +83,11 @@ impl CallbackRegistry {
                     }
                 }
             }
+        } else {
+            info!(
+                "txcallback: registering new client '{}' with callback url '{}'",
+                client_id, callback_url
+            );
         }
 
         let client = CallbackClient {
@@ -98,6 +110,12 @@ impl CallbackRegistry {
         let mut txid_map = self.txid_to_clients.write().await;
 
         if let Some(client) = clients.remove(client_id) {
+            info!(
+                "txcallback: unregistered client '{}' (url: '{}', had {} watched txid(s))",
+                client_id,
+                client.callback_url,
+                client.watched_txids.len()
+            );
             // Remove all watched txids from reverse map
             for txid in &client.watched_txids {
                 if let Some(client_set) = txid_map.get_mut(txid) {
@@ -109,6 +127,7 @@ impl CallbackRegistry {
             }
             Ok(true)
         } else {
+            info!("txcallback: unregister requested for unknown client '{}'", client_id);
             Ok(false)
         }
     }
@@ -123,6 +142,8 @@ impl CallbackRegistry {
         let mut txid_map = self.txid_to_clients.write().await;
 
         if let Some(client) = clients.get_mut(client_id) {
+            let prev_count = client.watched_txids.len();
+
             // Remove old txids from reverse map
             for txid in &client.watched_txids {
                 if let Some(client_set) = txid_map.get_mut(txid) {
@@ -135,6 +156,7 @@ impl CallbackRegistry {
 
             // Update client's watched txids
             let new_txids: HashSet<Txid> = txids.into_iter().collect();
+            let new_count = new_txids.len();
             client.watched_txids = new_txids.clone();
 
             // Add new txids to reverse map
@@ -145,8 +167,16 @@ impl CallbackRegistry {
                     .insert(client_id.to_string());
             }
 
+            info!(
+                "txcallback: updated watches for client '{}': {} -> {} txid(s)",
+                client_id, prev_count, new_count
+            );
             Ok(true)
         } else {
+            info!(
+                "txcallback: updatetxwatches for unknown client '{}'",
+                client_id
+            );
             Ok(false)
         }
     }
@@ -174,6 +204,16 @@ impl CallbackRegistry {
         let txid_map = self.txid_to_clients.read().await;
         let clients = self.clients.read().await;
 
+        if !txid_map.is_empty() {
+            info!(
+                "txcallback: scanning block {} ({} txs) against {} watched txid(s) across {} client(s)",
+                block_height,
+                block_txids.len(),
+                txid_map.len(),
+                clients.len()
+            );
+        }
+
         let mut notifications = Vec::new();
 
         // Find which clients need to be notified
@@ -181,6 +221,10 @@ impl CallbackRegistry {
             if let Some(client_ids) = txid_map.get(txid) {
                 for client_id in client_ids {
                     if let Some(client) = clients.get(client_id) {
+                        info!(
+                            "txcallback: watched txid {} found in block {} — queuing notification for client '{}'",
+                            txid, block_height, client_id
+                        );
                         let confirmations = chain_tip_height.saturating_sub(block_height) + 1;
                         notifications.push((
                             client.clone(),

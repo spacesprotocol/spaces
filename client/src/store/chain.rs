@@ -118,6 +118,10 @@ impl Chain {
         self.db.sp.state.get_space_info(space_hash)
     }
 
+    pub fn get_all_spaces(&mut self) -> anyhow::Result<Vec<FullSpaceOut>> {
+        self.db.sp.state.get_all_space_infos()
+    }
+
     pub fn get_num_info(&mut self, key: &NumId) -> anyhow::Result<Option<FullNumOut>> {
         self.db.num.state.get_num_info(key)
     }
