@@ -26,7 +26,7 @@ use spaces_client::{
         BidParams, OpenParams, RegisterParams, RpcClient, RpcWalletRequest,
         RpcWalletTxBuilder, SendCoinsParams, Subject, TransferSpacesParams,
     },
-    wallets::{AddressKind, WalletResponse},
+    wallets::{AddressKind, ListNumsResponse, WalletResponse},
 };
 use spaces_client::rpc::{CommitParams, CreateNumParams, DelegateParams, OperateParams, SetFallbackParams};
 use spaces_client::store::Sha256;
@@ -446,10 +446,14 @@ enum Commands {
     #[command(name = "listspaces")]
     ListSpaces,
     /// List nums. Defaults to owned, use --kind external for nums created but not owned.
+    /// With --spk, lists matching nums from both owned and external (kind is ignored).
     #[command(name = "listnums")]
     ListNums {
         #[arg(long, default_value = "owned")]
         kind: String,
+        /// Hex-encoded script_pubkey; only nums whose output script matches (owned and external)
+        #[arg(long, value_name = "HEX")]
+        spk: Option<String>,
     },
     /// List unspent auction outputs i.e. outputs that can be
     /// auctioned off in the bidding process
@@ -930,10 +934,32 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
             let spaces = cli.client.wallet_list_spaces(&cli.wallet).await?;
             print_list_spaces_response(tip.tip.height, spaces, cli.format);
         }
-        Commands::ListNums { kind } => {
-            let kind = if kind == "owned" { None } else { Some(kind) };
-            let nums = cli.client.wallet_list_nums(&cli.wallet, kind).await?;
-            print_list_nums_response(nums, cli.format);
+        Commands::ListNums { kind, spk } => {
+            if let Some(hex) = spk {
+                let spk_script = ScriptBuf::from(
+                    hex::decode(hex.trim()).map_err(|_| {
+                        ClientError::Custom("Invalid --spk hex (expected script_pubkey bytes)".to_string())
+                    })?,
+                );
+                let owned = cli.client.wallet_list_nums(&cli.wallet, None).await?;
+                let external = cli
+                    .client
+                    .wallet_list_nums(&cli.wallet, Some("external".to_string()))
+                    .await?;
+                let mut nums: Vec<_> = owned
+                    .nums
+                    .into_iter()
+                    .chain(external.nums)
+                    .filter(|e| e.numout.script_pubkey == spk_script)
+                    .collect();
+                nums.sort_by_key(|e| (e.txid, e.numout.n));
+                nums.dedup_by_key(|e| (e.txid, e.numout.n));
+                print_list_nums_response(ListNumsResponse { nums }, cli.format);
+            } else {
+                let kind = if kind == "owned" { None } else { Some(kind) };
+                let nums = cli.client.wallet_list_nums(&cli.wallet, kind).await?;
+                print_list_nums_response(nums, cli.format);
+            }
         }
         Commands::Balance => {
             let balance = cli.client.wallet_get_balance(&cli.wallet).await?;

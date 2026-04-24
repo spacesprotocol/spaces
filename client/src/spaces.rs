@@ -82,6 +82,7 @@ impl Spaced {
         id: ChainAnchor,
         block: Block,
         callback_registry: &CallbackRegistry,
+        tokio_runtime: &tokio::runtime::Handle,
     ) -> anyhow::Result<()> {
         let sp_idx = self.chain.has_spaces_index();
         let pt_idx = self.chain.has_nums_index();
@@ -107,12 +108,17 @@ impl Spaced {
         let block_txids: Vec<_> = block.txdata.iter().map(|tx| tx.compute_txid()).collect();
         let chain_tip = self.chain.tip();
         let block_hash_str = id.hash.to_string();
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            let registry = callback_registry.clone();
-            handle.spawn(async move {
-                registry.check_and_notify(id.height, &block_hash_str, &block_txids, chain_tip.height).await;
-            });
-        }
+        let registry = callback_registry.clone();
+        tokio_runtime.spawn(async move {
+            registry
+                .check_and_notify(
+                    id.height,
+                    &block_hash_str,
+                    &block_txids,
+                    chain_tip.height,
+                )
+                .await;
+        });
 
         Ok(())
     }
@@ -122,6 +128,7 @@ impl Spaced {
         source: BitcoinBlockSource,
         shutdown: broadcast::Sender<()>,
         callback_registry: CallbackRegistry,
+        tokio_runtime: tokio::runtime::Handle,
     ) -> anyhow::Result<()> {
         let start_block = self.chain.tip();
         let mut node = Client::new(self.block_index_full);
@@ -163,7 +170,13 @@ impl Spaced {
                         }
                     }
                     BlockEvent::Block(id, block) => {
-                        self.handle_block(&mut node, id, block, &callback_registry)?;
+                        self.handle_block(
+                            &mut node,
+                            id,
+                            block,
+                            &callback_registry,
+                            &tokio_runtime,
+                        )?;
                         info!("block={} height={}", id.hash, id.height);
                         if self.enable_pruning && id.height % PRUNING_BUFFER == 0 {
                             self.prune(&source, id.height);

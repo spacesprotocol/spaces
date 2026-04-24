@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 use anyhow::Result;
 use spaces_protocol::bitcoin::Txid;
@@ -6,6 +7,15 @@ use log::{error, info, warn};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use reqwest::Client as HttpClient;
+
+const CALLBACK_PERSISTENCE_VERSION: u32 = 1;
+
+/// On-disk format for [`CallbackRegistry`] (reverse index is rebuilt on load).
+#[derive(Debug, Serialize, Deserialize)]
+struct CallbackPersistence {
+    version: u32,
+    clients: Vec<CallbackClient>,
+}
 
 /// Represents a registered callback client
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,6 +56,8 @@ pub struct CallbackRegistry {
     txid_to_clients: Arc<RwLock<HashMap<Txid, HashSet<String>>>>,
     /// HTTP client for making callback requests
     http_client: Arc<HttpClient>,
+    /// When set, registry state is saved here after each mutation (atomic replace).
+    persist_path: Option<PathBuf>,
 }
 
 impl CallbackRegistry {
@@ -54,6 +66,110 @@ impl CallbackRegistry {
             clients: Arc::new(RwLock::new(HashMap::new())),
             txid_to_clients: Arc::new(RwLock::new(HashMap::new())),
             http_client: Arc::new(HttpClient::new()),
+            persist_path: None,
+        }
+    }
+
+    /// Load saved registrations from `path` if it exists, otherwise start empty. State is re-saved after each change.
+    pub async fn load_or_new(path: PathBuf) -> Result<Self> {
+        let registry = Self {
+            clients: Arc::new(RwLock::new(HashMap::new())),
+            txid_to_clients: Arc::new(RwLock::new(HashMap::new())),
+            http_client: Arc::new(HttpClient::new()),
+            persist_path: Some(path.clone()),
+        };
+
+        if path.exists() {
+            let bytes = tokio::fs::read(&path).await?;
+            let file: CallbackPersistence = serde_json::from_slice(&bytes)?;
+            if file.version != CALLBACK_PERSISTENCE_VERSION {
+                anyhow::bail!(
+                    "unsupported tx callback persistence version {} (expected {})",
+                    file.version,
+                    CALLBACK_PERSISTENCE_VERSION
+                );
+            }
+            let mut clients: HashMap<String, CallbackClient> = HashMap::new();
+            for client in file.clients {
+                let cid = client.client_id.clone();
+                clients.insert(cid, client);
+            }
+            let n = clients.len();
+            let txid_map = Self::rebuild_txid_index(&clients);
+            *registry.clients.write().await = clients;
+            *registry.txid_to_clients.write().await = txid_map;
+            info!(
+                "txcallback: restored {} registered client(s) from {}",
+                n,
+                path.display()
+            );
+        }
+
+        Ok(registry)
+    }
+
+    fn rebuild_txid_index(
+        clients: &HashMap<String, CallbackClient>,
+    ) -> HashMap<Txid, HashSet<String>> {
+        let mut txid_map: HashMap<Txid, HashSet<String>> = HashMap::new();
+        for (cid, client) in clients {
+            for txid in &client.watched_txids {
+                txid_map
+                    .entry(*txid)
+                    .or_insert_with(HashSet::new)
+                    .insert(cid.clone());
+            }
+        }
+        txid_map
+    }
+
+    async fn persist_to_disk(&self) {
+        let Some(path) = self.persist_path.as_ref() else {
+            return;
+        };
+
+        let clients_vec: Vec<CallbackClient> = {
+            let guard = self.clients.read().await;
+            guard.values().cloned().collect()
+        };
+
+        let payload = CallbackPersistence {
+            version: CALLBACK_PERSISTENCE_VERSION,
+            clients: clients_vec,
+        };
+
+        let data = match serde_json::to_vec_pretty(&payload) {
+            Ok(d) => d,
+            Err(e) => {
+                error!("txcallback: failed to serialize persistence: {}", e);
+                return;
+            }
+        };
+
+        if let Some(parent) = path.parent() {
+            if let Err(e) = tokio::fs::create_dir_all(parent).await {
+                error!(
+                    "txcallback: create_dir_all {}: {}",
+                    parent.display(),
+                    e
+                );
+                return;
+            }
+        }
+
+        let tmp_path = path.with_extension("tmp");
+        if let Err(e) = tokio::fs::write(&tmp_path, &data).await {
+            error!(
+                "txcallback: write {}: {}",
+                tmp_path.display(),
+                e
+            );
+            return;
+        }
+
+        if let Err(e) = tokio::fs::rename(&tmp_path, path).await {
+            error!("txcallback: rename {} -> {}: {}", tmp_path.display(), path.display(), e);
+            let _ = tokio::fs::remove_file(&tmp_path).await;
         }
     }
 
@@ -101,6 +217,9 @@ impl CallbackRegistry {
         };
 
         clients.insert(client_id, client);
+        drop(clients);
+        drop(txid_map);
+        self.persist_to_disk().await;
         Ok(())
     }
 
@@ -125,6 +244,9 @@ impl CallbackRegistry {
                     }
                 }
             }
+            drop(clients);
+            drop(txid_map);
+            self.persist_to_disk().await;
             Ok(true)
         } else {
             info!("txcallback: unregister requested for unknown client '{}'", client_id);
@@ -167,10 +289,25 @@ impl CallbackRegistry {
                     .insert(client_id.to_string());
             }
 
-            info!(
-                "txcallback: updated watches for client '{}': {} -> {} txid(s)",
-                client_id, prev_count, new_count
-            );
+            let tx_list = new_txids
+                .iter()
+                .map(|t| t.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            if tx_list.is_empty() {
+                info!(
+                    "txcallback: updated watches for client '{}': {} -> {} txid(s) (none)",
+                    client_id, prev_count, new_count
+                );
+            } else {
+                info!(
+                    "txcallback: updated watches for client '{}': {} -> {} txid(s): {}",
+                    client_id, prev_count, new_count, tx_list
+                );
+            }
+            drop(clients);
+            drop(txid_map);
+            self.persist_to_disk().await;
             Ok(true)
         } else {
             info!(

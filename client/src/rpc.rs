@@ -20,7 +20,7 @@ use jsonrpsee::{
     server::{middleware::http::ProxyGetRequestLayer, Server},
     types::ErrorObjectOwned,
 };
-use log::info;
+use log::{info, warn};
 use serde::{Deserialize, Serialize};
 use spacedb::tx::ProofType;
 use spaces_protocol::{
@@ -65,7 +65,7 @@ use crate::{
     deserialize_base64, serialize_base64,
     source::BitcoinRpc,
     wallets::{
-        AddressKind, ListNumsResponse, ListSpacesResponse, RpcWallet, TxInfo, TxResponse,
+        AddressKind, ListNumsResponse, ListSpacesResponse, NumEntry, RpcWallet, TxInfo, TxResponse,
         WalletCommand, WalletResponse,
     },
 };
@@ -172,6 +172,11 @@ pub enum ChainStateCommand {
         outpoint: OutPoint,
         resp: Responder<anyhow::Result<Option<NumOut>>>,
     },
+    /// Chain-wide live nums whose output `script_pubkey` matches (hex decoded by RPC layer).
+    ListNumsBySpk {
+        script_pubkey: ScriptBuf,
+        resp: Responder<anyhow::Result<ListNumsResponse>>,
+    },
     GetTxMeta {
         txid: Txid,
         resp: Responder<anyhow::Result<Option<TxEntry>>>,
@@ -273,6 +278,11 @@ pub trait Rpc {
 
     #[method(name = "getnumout")]
     async fn get_numout(&self, outpoint: OutPoint) -> Result<Option<NumOut>, ErrorObjectOwned>;
+
+    /// List live num outputs on the indexed chain whose `script_pubkey` equals the given hex script.
+    /// Same JSON shape as `walletlistnums`; does not load a wallet or use `kind`.
+    #[method(name = "listnumsbyspk")]
+    async fn list_nums_by_spk(&self, spk_hex: String) -> Result<ListNumsResponse, ErrorObjectOwned>;
 
     #[method(name = "getcommitment")]
     async fn get_commitment(&self, subject: Subject, root: Option<sha256::Hash>) -> Result<Option<Commitment>, ErrorObjectOwned>;
@@ -392,6 +402,15 @@ pub trait Rpc {
         &self,
         wallet: &str,
         request: RpcWalletTxBuilder,
+    ) -> Result<WalletResponse, ErrorObjectOwned>;
+
+    /// Create a num with a required binding script_pubkey (hex) and fee rate (sat/vB). Same result JSON as `walletsendrequest` for createnum.
+    #[method(name = "walletcreatenum")]
+    async fn wallet_create_num(
+        &self,
+        wallet: &str,
+        fee_rate_sat_vb: u64,
+        spk_hex: String,
     ) -> Result<WalletResponse, ErrorObjectOwned>;
 
     #[method(name = "walletgetnewaddress")]
@@ -1117,6 +1136,20 @@ impl RpcServer for RpcServerImpl {
         Ok(spaceout)
     }
 
+    async fn list_nums_by_spk(&self, spk_hex: String) -> Result<ListNumsResponse, ErrorObjectOwned> {
+        let bytes = hex::decode(spk_hex.trim()).map_err(|e| {
+            ErrorObjectOwned::owned(
+                -1,
+                format!("invalid spk hex: {}", e),
+                None::<String>,
+            )
+        })?;
+        self.store
+            .list_nums_by_spk(bytes)
+            .await
+            .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
+    }
+
     async fn get_commitment(&self, subject: Subject, root: Option<sha256::Hash>) -> Result<Option<Commitment>, ErrorObjectOwned> {
         let c = self
             .store
@@ -1391,6 +1424,48 @@ impl RpcServer for RpcServerImpl {
         Ok(result)
     }
 
+    async fn wallet_create_num(
+        &self,
+        wallet: &str,
+        fee_rate_sat_vb: u64,
+        spk_hex: String,
+    ) -> Result<WalletResponse, ErrorObjectOwned> {
+        let fee_rate = FeeRate::from_sat_per_vb(fee_rate_sat_vb).ok_or_else(|| {
+            ErrorObjectOwned::owned(
+                -1,
+                "invalid fee_rate_sat_vb (fee rate out of range)".to_string(),
+                None::<String>,
+            )
+        })?;
+        let spk_bytes = hex::decode(spk_hex.trim()).map_err(|e| {
+            ErrorObjectOwned::owned(
+                -1,
+                format!("invalid spk hex: {}", e),
+                None::<String>,
+            )
+        })?;
+        if spk_bytes.is_empty() {
+            return Err(ErrorObjectOwned::owned(
+                -1,
+                "spk hex decodes to an empty script".to_string(),
+                None::<String>,
+            ));
+        }
+        let bind_spk = ScriptBuf::from(spk_bytes);
+        let request = RpcWalletTxBuilder {
+            bidouts: None,
+            requests: vec![RpcWalletRequest::CreateNum(CreateNumParams {
+                bind_spk: Some(bind_spk),
+            })],
+            fee_rate: Some(fee_rate),
+            dust: None,
+            force: false,
+            confirmed_only: false,
+            skip_tx_check: false,
+        };
+        self.wallet_send_request(wallet, request).await
+    }
+
     async fn wallet_get_new_address(
         &self,
         wallet: &str,
@@ -1632,6 +1707,7 @@ impl RpcServer for RpcServerImpl {
         estimate_mode: Option<String>,
     ) -> Result<FeeEstimateResponse, ErrorObjectOwned> {
         let mode = estimate_mode.unwrap_or_else(|| "unset".to_string());
+        info!("estimatefee: request conf_target={} mode={}", conf_target, mode);
         let params = serde_json::json!([conf_target, mode]);
         let rpc = self.wallet_manager.rpc.clone();
 
@@ -1649,11 +1725,19 @@ impl RpcServer for RpcServerImpl {
                 if let Some(fee_rate) = res["feerate"].as_f64() {
                     let fee_rate_sat_vb = (fee_rate * 100_000.0).ceil() as u64;
                     let blocks = res["blocks"].as_u64().unwrap_or(conf_target as u64);
+                    info!(
+                        "estimatefee: ok feerate_sat_vb={} blocks={}",
+                        fee_rate_sat_vb, blocks
+                    );
                     Ok(FeeEstimateResponse {
                         feerate_sat_vb: fee_rate_sat_vb,
                         blocks,
                     })
                 } else {
+                    warn!(
+                        "estimatefee: no feerate in bitcoind response (conf_target={} mode={})",
+                        conf_target, mode
+                    );
                     Err(ErrorObjectOwned::owned(
                         -1,
                         "Fee estimation unavailable: no feerate in response".to_string(),
@@ -1661,11 +1745,17 @@ impl RpcServer for RpcServerImpl {
                     ))
                 }
             }
-            Err(e) => Err(ErrorObjectOwned::owned(
-                -1,
-                format!("RPC error: {}", e),
-                None::<String>,
-            )),
+            Err(e) => {
+                warn!(
+                    "estimatefee: estimatesmartfee failed conf_target={} mode={} error={}",
+                    conf_target, mode, e
+                );
+                Err(ErrorObjectOwned::owned(
+                    -1,
+                    format!("RPC error: {}", e),
+                    None::<String>,
+                ))
+            }
         }
     }
 
@@ -1893,6 +1983,25 @@ impl AsyncChainState {
                 let result = state
                     .get_numout(&outpoint)
                     .context("could not fetch numouts");
+                let _ = resp.send(result);
+            }
+            ChainStateCommand::ListNumsBySpk {
+                script_pubkey,
+                resp,
+            } => {
+                let result = (|| {
+                    let rows =
+                        state.list_live_nums_with_script_pubkey(script_pubkey.as_bytes())?;
+                    let nums = rows
+                        .into_iter()
+                        .map(|(txid, numout, delegating_for)| NumEntry {
+                            txid,
+                            numout,
+                            delegating_for,
+                        })
+                        .collect();
+                    Ok(ListNumsResponse { nums })
+                })();
                 let _ = resp.send(result);
             }
             ChainStateCommand::GetBlockMeta {
@@ -2383,6 +2492,17 @@ impl AsyncChainState {
         let (resp, resp_rx) = oneshot::channel();
         self.sender
             .send(ChainStateCommand::GetNumOut { outpoint, resp })
+            .await?;
+        resp_rx.await?
+    }
+
+    pub async fn list_nums_by_spk(&self, script_pubkey: Vec<u8>) -> anyhow::Result<ListNumsResponse> {
+        let (resp, resp_rx) = oneshot::channel();
+        self.sender
+            .send(ChainStateCommand::ListNumsBySpk {
+                script_pubkey: ScriptBuf::from(script_pubkey),
+                resp,
+            })
             .await?;
         resp_rx.await?
     }

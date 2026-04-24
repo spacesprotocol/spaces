@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 use std::sync::{Mutex, RwLock};
 use anyhow::{anyhow, Result};
@@ -215,6 +215,30 @@ impl SqliteIndex {
             snum.vout(),
             id,
         ));
+    }
+
+    /// All distinct num ids referenced by the snumeric index (committed + staged).
+    pub fn collect_distinct_num_ids(&self) -> Result<HashSet<NumId>> {
+        let mut ids = HashSet::new();
+        {
+            let staged = self.staged.read().unwrap();
+            for (_, _, _, id) in staged.snumeric.iter() {
+                ids.insert(*id);
+            }
+        }
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare_cached("SELECT DISTINCT num_id FROM snumeric")?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let data: Vec<u8> = row.get(0)?;
+            if data.len() != 32 {
+                return Err(anyhow!("invalid num_id length: {}", data.len()));
+            }
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&data);
+            ids.insert(NumId::from_bytes(arr));
+        }
+        Ok(ids)
     }
 
     pub fn get_snumeric(&self, snum: &SNumeric) -> Result<Option<NumId>> {

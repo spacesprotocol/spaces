@@ -88,10 +88,16 @@ impl App {
 
         let shutdown = self.shutdown.clone();
         let rpc = spaced.rpc.clone();
+        let tokio_runtime = tokio::runtime::Handle::current();
 
         std::thread::spawn(move || {
             let source = BitcoinBlockSource::new(rpc);
-            _ = spaced_sender.send(spaced.protocol_sync(source, shutdown, callback_registry));
+            _ = spaced_sender.send(spaced.protocol_sync(
+                source,
+                shutdown,
+                callback_registry,
+                tokio_runtime,
+            ));
         });
 
         self.services.spawn(async move {
@@ -103,7 +109,8 @@ impl App {
 
     pub async fn run(&mut self, args: Vec<String>) -> anyhow::Result<()> {
         let spaced = Args::configure(args).await?;
-        let callback_registry = CallbackRegistry::new();
+        let callback_registry =
+            CallbackRegistry::load_or_new(spaced.data_dir.join("txcallbacks.json")).await?;
         self.setup_rpc_services(&spaced, callback_registry.clone()).await;
         self.setup_sync_service(spaced, callback_registry).await;
 
