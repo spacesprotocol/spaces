@@ -53,6 +53,12 @@ struct Args {
     /// AWS CLI profile name
     #[arg(long, requires = "upload")]
     profile: Option<String>,
+ 
+    /// Path of a Rust source file to write the checkpoint constant to.
+    /// Skipped if not set. Typically `checkpoint/src/integrity.rs` from a
+    /// workspace checkout; irrelevant on servers.
+    #[arg(long)]
+    integrity_out: Option<PathBuf>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -78,8 +84,10 @@ fn main() -> anyhow::Result<()> {
     );
     eprintln!("SHA-256: {}", hex::encode(digest));
 
-    spaces_checkpoint::write_integrity(height, &block_hash, &digest)?;
-    eprintln!("Updated checkpoint/src/integrity.rs");
+    if let Some(path) = args.integrity_out.as_deref() {
+        spaces_checkpoint::write_integrity(path, height, &block_hash, &digest)?;
+        eprintln!("Updated {}", path.display());
+    }
 
     if let Some(bucket) = &args.upload {
         let bucket = bucket.trim_end_matches('/');
