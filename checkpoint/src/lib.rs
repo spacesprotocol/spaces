@@ -302,9 +302,21 @@ pub fn checkpoint() -> super::Checkpoint {{
     )
 }
 
+/// Write the checkpoint constant to `checkpoint/src/integrity.rs` relative to
+/// the current working directory. Must be run from the workspace root.
+#[cfg(feature = "cli")]
+pub fn write_integrity(height: u32, block_hash: &str, digest: &[u8; 32]) -> anyhow::Result<()> {
+    write_integrity_to(
+        Path::new("checkpoint/src/integrity.rs"),
+        height,
+        block_hash,
+        digest,
+    )
+}
+
 /// Write the checkpoint constant to a Rust source file at `path`.
 #[cfg(feature = "cli")]
-pub fn write_integrity(
+pub fn write_integrity_to(
     path: &Path,
     height: u32,
     block_hash: &str,

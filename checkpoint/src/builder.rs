@@ -85,7 +85,7 @@ fn main() -> anyhow::Result<()> {
     eprintln!("SHA-256: {}", hex::encode(digest));
 
     if let Some(path) = args.integrity_out.as_deref() {
-        spaces_checkpoint::write_integrity(path, height, &block_hash, &digest)?;
+        spaces_checkpoint::write_integrity_to(path, height, &block_hash, &digest)?;
         eprintln!("Updated {}", path.display());
     }
 
