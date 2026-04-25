@@ -53,7 +53,7 @@ struct Args {
     /// AWS CLI profile name
     #[arg(long, requires = "upload")]
     profile: Option<String>,
- 
+
     /// Path of a Rust source file to write the checkpoint constant to.
     /// Skipped if not set. Typically `checkpoint/src/integrity.rs` from a
     /// workspace checkout; irrelevant on servers.
