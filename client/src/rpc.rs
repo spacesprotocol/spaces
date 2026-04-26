@@ -65,8 +65,8 @@ use crate::{
     deserialize_base64, serialize_base64,
     source::BitcoinRpc,
     wallets::{
-        AddressKind, ListNumsResponse, ListSpacesResponse, NumEntry, RpcWallet, TxInfo, TxResponse,
-        WalletCommand, WalletResponse,
+        sip7_records_for_num_data, AddressKind, ListNumsResponse, ListSpacesResponse, NumEntry,
+        RpcWallet, TxInfo, TxResponse, WalletCommand, WalletResponse,
     },
 };
 use crate::store::chain::{Chain, COMMIT_BLOCK_INTERVAL, CACHED_SNAPSHOT_LOOKBACK};
@@ -1994,10 +1994,14 @@ impl AsyncChainState {
                         state.list_live_nums_with_script_pubkey(script_pubkey.as_bytes())?;
                     let nums = rows
                         .into_iter()
-                        .map(|(txid, numout, delegating_for)| NumEntry {
-                            txid,
-                            numout,
-                            delegating_for,
+                        .map(|(txid, numout, delegating_for)| {
+                            let records = sip7_records_for_num_data(&numout.num.data);
+                            NumEntry {
+                                txid,
+                                numout,
+                                delegating_for,
+                                records,
+                            }
                         })
                         .collect();
                     Ok(ListNumsResponse { nums })

@@ -9,7 +9,7 @@ use spaces_protocol::{
     constants::ChainAnchor,
     hasher::{KeyHasher, SpaceKey},
     slabel::SLabel,
-    FullSpaceOut, SpaceOut,
+    Bytes, FullSpaceOut, SpaceOut,
 };
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Formatter};
@@ -218,6 +218,25 @@ pub struct NumEntry {
     pub numout: NumOut,
     #[cfg_attr(feature = "schema", schemars(with = "Option<String>"))]
     pub delegating_for: Option<SLabel>,
+    /// Parsed SIP-7 `RecordSet` when `numout.num.data` is valid SIP-7 (same as `getfallback` `records`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(with = "Option<String>"))]
+    pub records: Option<sip7::RecordSet>,
+}
+
+/// If num payload bytes are valid SIP-7, returns a `RecordSet` for JSON (same check as `getfallback`).
+pub(crate) fn sip7_records_for_num_data(data: &Option<Bytes>) -> Option<sip7::RecordSet> {
+    let b = data.as_ref()?;
+    let raw = b.as_slice();
+    if raw.is_empty() {
+        return None;
+    }
+    let rs = sip7::RecordSet::new(raw.to_vec());
+    if rs.unpack().is_ok() {
+        Some(rs)
+    } else {
+        None
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1118,10 +1137,12 @@ impl RpcWallet {
             };
             let rsk = DelegatorKey::from_id::<Sha256>(numout.num.id);
             let delegating_for = chain.get_delegator(&rsk)?;
+            let records = sip7_records_for_num_data(&numout.num.data);
             nums.push(NumEntry {
                 txid: unspent.outpoint.txid,
                 numout,
                 delegating_for,
+                records,
             })
         }
 
@@ -1156,10 +1177,12 @@ impl RpcWallet {
 
             let rsk = DelegatorKey::from_id::<Sha256>(num_id);
             let delegating_for = chain.get_delegator(&rsk)?;
+            let records = sip7_records_for_num_data(&fpo.numout.num.data);
             nums.push(NumEntry {
                 txid: fpo.txid,
                 numout: fpo.numout,
                 delegating_for,
+                records,
             });
         }
 
