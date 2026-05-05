@@ -1,6 +1,6 @@
+use bitcoin::{Amount, OutPoint};
 #[cfg(feature = "borsh")]
 use borsh::{BorshDeserialize, BorshSerialize};
-use bitcoin::{Amount, OutPoint};
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
@@ -58,7 +58,7 @@ impl SpaceKey {
     #[inline(always)]
     pub fn from_raw(value: Hash) -> crate::errors::Result<Self> {
         if Self::is_valid(&value) {
-            return Ok(Self { 0: value });
+            return Ok(Self(value));
         }
         Err(crate::errors::Error::IO("bad space hash".to_string()))
     }
@@ -76,7 +76,7 @@ impl SpaceKey {
 
     #[inline(always)]
     pub fn as_slice(&self) -> &[u8] {
-        return &self.0;
+        &self.0
     }
 }
 

@@ -1,16 +1,21 @@
-use std::path::PathBuf;
+use anyhow::Result;
+use spacedb::{Configuration, Sha256Hasher, db::Database, fs::FileBackend};
+use spaces_protocol::{
+    SpaceOut,
+    hasher::{BidKey, OutpointKey, SpaceKey},
+};
 use std::collections::HashMap;
 use std::fs::OpenOptions;
-use anyhow::Result;
-use spaces_protocol::{SpaceOut, hasher::{SpaceKey, OutpointKey, BidKey}};
-use serde_json;
-use spacedb::{db::Database, fs::FileBackend, Configuration, Sha256Hasher};
+use std::path::{Path, PathBuf};
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
 
     if args.len() < 3 {
-        eprintln!("Usage: {} --type <spaces|ptrs> <db_path> [compare_db_path]", args[0]);
+        eprintln!(
+            "Usage: {} --type <spaces|ptrs> <db_path> [compare_db_path]",
+            args[0]
+        );
         eprintln!("\nDumps or compares spaces/ptrs databases");
         eprintln!("  <db_path>: Direct path to the database file");
         eprintln!("  [compare_db_path]: Optional second database to compare with");
@@ -41,20 +46,17 @@ fn main() -> Result<()> {
 }
 
 fn open_db(path: PathBuf) -> Result<Database<Sha256Hasher>> {
-    let file = OpenOptions::new()
-        .read(true)
-        .write(false)
-        .open(path)?;
+    let file = OpenOptions::new().read(true).write(false).open(path)?;
 
     let config = Configuration::new().with_cache_size(1000000);
     Ok(Database::new(Box::new(FileBackend::new(file)?), config)?)
 }
 
-fn dump_database(db_type: &str, db_path: &PathBuf) -> Result<()> {
+fn dump_database(db_type: &str, db_path: &Path) -> Result<()> {
     println!("=== Database Dump: {} ===", db_path.display());
     println!("Type: {}\n", db_type);
 
-    let db = open_db(db_path.clone())?;
+    let db = open_db(db_path.to_path_buf())?;
 
     match db_type {
         "spaces" => dump_spaces(&db)?,
@@ -133,15 +135,15 @@ fn dump_ptrs(db: &Database<Sha256Hasher>) -> Result<()> {
     Ok(())
 }
 
-fn compare_databases(db_type: &str, db1_path: &PathBuf, db2_path: &PathBuf) -> Result<()> {
+fn compare_databases(db_type: &str, db1_path: &Path, db2_path: &Path) -> Result<()> {
     println!("=== Comparing Databases ===");
     println!("Type: {}", db_type);
     println!("DB1: {}", db1_path.display());
     println!("DB2: {}", db2_path.display());
     println!();
 
-    let db1 = open_db(db1_path.clone())?;
-    let db2 = open_db(db2_path.clone())?;
+    let db1 = open_db(db1_path.to_path_buf())?;
+    let db2 = open_db(db2_path.to_path_buf())?;
 
     match db_type {
         "spaces" => compare_spaces(&db1, &db2)?,

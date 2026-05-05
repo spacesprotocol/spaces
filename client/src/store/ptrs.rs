@@ -1,29 +1,30 @@
 use std::{
-    collections::{BTreeMap},
-    io,
-    io::ErrorKind,
-    mem,
-    path::{PathBuf},
+    collections::BTreeMap,
+    io, mem,
+    path::PathBuf,
     sync::{Arc, RwLock},
 };
 
-use anyhow::{anyhow, Context, Result};
+use crate::store::{EncodableOutpoint, Sha256, open_db};
+use anyhow::{Context, Result, anyhow};
 use borsh::{BorshDeserialize, BorshSerialize};
 use spacedb::{
+    Hash, Sha256Hasher,
     db::{Database, SnapshotIterator},
     tx::{ReadTransaction, WriteTransaction},
-    Hash, Sha256Hasher,
 };
-use spaces_protocol::{
-    bitcoin::{BlockHash, OutPoint},
-    constants::{ChainAnchor},
-    hasher::{KeyHash},
+use spaces_nums::num_id::NumId;
+use spaces_nums::snumeric::SNumeric;
+use spaces_nums::{
+    Commitment, CommitmentKey, CommitmentTipKey, DelegatorKey, FullNumOut, NumOut, NumOutpointKey,
+    NumSource,
 };
 use spaces_protocol::slabel::SLabel;
-use spaces_nums::{Commitment, CommitmentKey, FullNumOut, NumOut, NumSource, CommitmentTipKey, DelegatorKey, NumOutpointKey};
-use spaces_nums::snumeric::SNumeric;
-use spaces_nums::num_id::NumId;
-use crate::store::{open_db, EncodableOutpoint, Sha256};
+use spaces_protocol::{
+    bitcoin::{BlockHash, OutPoint},
+    constants::ChainAnchor,
+    hasher::KeyHash,
+};
 
 type SpaceDb = Database<Sha256Hasher>;
 type ReadTx = ReadTransaction<Sha256Hasher>;
@@ -66,7 +67,7 @@ impl NumStore {
     }
 
     pub fn iter(&self) -> SnapshotIterator<'_, Sha256Hasher> {
-        return self.0.iter();
+        self.0.iter()
     }
 
     pub fn write(&self) -> Result<WriteTx<'_>> {
@@ -75,8 +76,8 @@ impl NumStore {
 
     pub fn begin(&self, genesis_block: &ChainAnchor) -> Result<NumLiveSnapshot> {
         let snapshot = self.0.begin_read()?;
-        let anchor: ChainAnchor = if snapshot.metadata().len() == 0 {
-            genesis_block.clone()
+        let anchor: ChainAnchor = if snapshot.metadata().is_empty() {
+            *genesis_block
         } else {
             snapshot.metadata().try_into()?
         };
@@ -105,10 +106,7 @@ pub trait NumChainState {
     fn insert_num_outpoint(&self, key: NumId, outpoint: EncodableOutpoint);
 
     #[allow(dead_code)]
-    fn get_num_info(
-        &mut self,
-        id: &NumId,
-    ) -> Result<Option<FullNumOut>>;
+    fn get_num_info(&mut self, id: &NumId) -> Result<Option<FullNumOut>>;
 }
 
 impl NumChainState for NumLiveSnapshot {
@@ -154,7 +152,7 @@ impl NumChainState for NumLiveSnapshot {
 impl NumLiveSnapshot {
     #[inline]
     pub fn is_dirty(&self) -> bool {
-        self.staged.read().expect("read").memory.len() > 0
+        !self.staged.read().expect("read").memory.is_empty()
     }
 
     pub fn restore(&self, checkpoint: ChainAnchor) {
@@ -171,11 +169,13 @@ impl NumLiveSnapshot {
     }
 
     pub fn read_at(&self, block_height: u32) -> anyhow::Result<ReadTx> {
-        self.db.iter()
+        self.db
+            .iter()
             .filter_map(|s| s.ok())
             .find(|s| {
-                s.metadata().try_into()
-                    .map_or(false, |a: ChainAnchor| a.height == block_height)
+                s.metadata()
+                    .try_into()
+                    .is_ok_and(|a: ChainAnchor| a.height == block_height)
             })
             .ok_or_else(|| anyhow!("Snapshot at block {} not found", block_height))
     }
@@ -203,9 +203,7 @@ impl NumLiveSnapshot {
         match self.get_raw(&key.into())? {
             Some(value) => {
                 let decoded: T = borsh::from_slice(&value)
-                    .map_err(|e| {
-                        spacedb::Error::IO(io::Error::new(ErrorKind::Other, e.to_string()))
-                    })?;
+                    .map_err(|e| spacedb::Error::IO(io::Error::other(e.to_string())))?;
                 Ok(Some(decoded))
             }
             None => Ok(None),
@@ -237,9 +235,12 @@ impl NumLiveSnapshot {
     fn update_snapshot(&mut self, version: BlockHash) -> Result<()> {
         if self.snapshot.0 != version {
             self.snapshot.1 = self.db.begin_read().context("could not read snapshot")?;
-            let anchor: ChainAnchor = self.snapshot.1.metadata().try_into().map_err(|_| {
-                std::io::Error::new(std::io::ErrorKind::Other, "could not parse metdata")
-            })?;
+            let anchor: ChainAnchor = self
+                .snapshot
+                .1
+                .metadata()
+                .try_into()
+                .map_err(|_| std::io::Error::other("could not parse metdata"))?;
 
             assert_eq!(version, anchor.hash, "inconsistent db state");
             self.snapshot.0 = version;
@@ -260,9 +261,8 @@ impl NumLiveSnapshot {
         let version = rlock.snapshot_version;
         drop(rlock);
 
-        self.update_snapshot(version).map_err(|error| {
-            spacedb::Error::IO(std::io::Error::new(std::io::ErrorKind::Other, error))
-        })?;
+        self.update_snapshot(version)
+            .map_err(|error| spacedb::Error::IO(std::io::Error::other(error)))?;
         self.snapshot.1.get(key)
     }
 
@@ -278,11 +278,7 @@ impl NumLiveSnapshot {
 
         for (key, value) in changes.memory {
             match value {
-                None => {
-                    _ = {
-                        tx = tx.delete(key)?;
-                    }
-                }
+                None => tx = tx.delete(key)?,
                 Some(value) => tx = tx.insert(key, value)?,
             }
         }
@@ -300,29 +296,38 @@ impl NumSource for NumLiveSnapshot {
         id: &NumId,
     ) -> spaces_protocol::errors::Result<Option<OutPoint>> {
         let result: Option<EncodableOutpoint> = self.get(*id).map_err(|err| {
-            spaces_protocol::errors::Error::IO(format!("getnumoutpoint: {}", err.to_string()))
+            spaces_protocol::errors::Error::IO(format!("getnumoutpoint: {}", err))
         })?;
         Ok(result.map(|out| out.into()))
     }
 
-    fn get_commitment(&mut self, key: &CommitmentKey) -> spaces_protocol::errors::Result<Option<Commitment>> {
-        let result = self.get(*key).map_err(|err| {
-            spaces_protocol::errors::Error::IO(format!("getcommitment: {}", err.to_string()))
-        })?;
+    fn get_commitment(
+        &mut self,
+        key: &CommitmentKey,
+    ) -> spaces_protocol::errors::Result<Option<Commitment>> {
+        let result = self
+            .get(*key)
+            .map_err(|err| spaces_protocol::errors::Error::IO(format!("getcommitment: {}", err)))?;
         Ok(result)
     }
 
-    fn get_delegator(&mut self, key: &DelegatorKey) -> spaces_protocol::errors::Result<Option<SLabel>> {
-        let result = self.get(*key).map_err(|err| {
-            spaces_protocol::errors::Error::IO(format!("getdelegate: {}", err.to_string()))
-        })?;
+    fn get_delegator(
+        &mut self,
+        key: &DelegatorKey,
+    ) -> spaces_protocol::errors::Result<Option<SLabel>> {
+        let result = self
+            .get(*key)
+            .map_err(|err| spaces_protocol::errors::Error::IO(format!("getdelegate: {}", err)))?;
         Ok(result)
     }
 
-    fn get_commitments_tip(&mut self, key: &CommitmentTipKey) -> spaces_protocol::errors::Result<Option<Hash>> {
-        let result = self.get(*key).map_err(|err| {
-            spaces_protocol::errors::Error::IO(format!("getregistry: {}", err.to_string()))
-        })?;
+    fn get_commitments_tip(
+        &mut self,
+        key: &CommitmentTipKey,
+    ) -> spaces_protocol::errors::Result<Option<Hash>> {
+        let result = self
+            .get(*key)
+            .map_err(|err| spaces_protocol::errors::Error::IO(format!("getregistry: {}", err)))?;
         Ok(result)
     }
 
@@ -331,9 +336,9 @@ impl NumSource for NumLiveSnapshot {
         outpoint: &OutPoint,
     ) -> spaces_protocol::errors::Result<Option<NumOut>> {
         let h = NumOutpointKey::from_outpoint::<Sha256>(*outpoint);
-        let result = self.get(h).map_err(|err| {
-            spaces_protocol::errors::Error::IO(format!("getptrout: {}", err.to_string()))
-        })?;
+        let result = self
+            .get(h)
+            .map_err(|err| spaces_protocol::errors::Error::IO(format!("getptrout: {}", err)))?;
         Ok(result)
     }
 

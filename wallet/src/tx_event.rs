@@ -3,8 +3,8 @@ use std::{fmt, fmt::Display, str::FromStr};
 use bdk_wallet::{
     chain, rusqlite,
     rusqlite::{
-        types::{FromSql, FromSqlError, FromSqlResult, ToSqlOutput, ValueRef},
         ToSql,
+        types::{FromSql, FromSqlError, FromSqlResult, ToSqlOutput, ValueRef},
     },
 };
 use bitcoin::{Amount, OutPoint, ScriptBuf, Transaction, TxOut, Txid};
@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 use spaces_protocol::{Covenant, FullSpaceOut};
 
 use crate::{
-    rusqlite_impl::{migrate_schema, Impl},
     SpaceScriptSigningInfo, SpacesWallet,
+    rusqlite_impl::{Impl, migrate_schema},
 };
 
 #[derive(Clone, Debug)]
@@ -176,7 +176,7 @@ impl TxEvent {
         ))?;
 
         let rows = stmt.query_map(
-            rusqlite::params_from_iter(txids.into_iter().map(|t| Impl(t))),
+            rusqlite::params_from_iter(txids.into_iter().map(Impl)),
             |row| {
                 let txid: Impl<Txid> = row.get(0)?;
                 let previous_spaceout: Option<Impl<OutPoint>> = row.get(1)?;
@@ -184,10 +184,8 @@ impl TxEvent {
             },
         )?;
         let mut results = Vec::new();
-        for row in rows {
-            if let Ok((txid, outpoint)) = row {
-                results.push((txid.0, outpoint));
-            }
+        for (txid, outpoint) in rows.flatten() {
+            results.push((txid.0, outpoint));
         }
         Ok(results)
     }
@@ -202,7 +200,7 @@ impl TxEvent {
             Self::TX_EVENTS_TABLE_NAME,
         ))?;
         let results: Vec<Self> = Self::from_sqlite_statement(stmt, [Impl(txid)])?;
-        Ok(results.get(0).cloned())
+        Ok(results.first().cloned())
     }
 
     pub fn get_signing_info(
@@ -233,9 +231,7 @@ impl TxEvent {
     }
 
     /// Retrieve all CreateNum events
-    pub fn get_create_num_events(
-        db_tx: &rusqlite::Transaction,
-    ) -> rusqlite::Result<Vec<TxEvent>> {
+    pub fn get_create_num_events(db_tx: &rusqlite::Transaction) -> rusqlite::Result<Vec<TxEvent>> {
         let query = format!(
             "SELECT type, space, previous_spaceout, details
              FROM {table}
@@ -449,10 +445,7 @@ impl TxRecord {
             space: Some(space),
             previous_spaceout: None,
             details: Some(
-                serde_json::to_value(OpenEventDetails {
-                    initial_bid: initial_bid,
-                })
-                .expect("json value"),
+                serde_json::to_value(OpenEventDetails { initial_bid }).expect("json value"),
             ),
         });
     }
@@ -478,8 +471,7 @@ impl TxRecord {
             space: None,
             previous_spaceout: None,
             details: Some(
-                serde_json::to_value(CreateNumEventDetails { genesis_spk })
-                    .expect("json value"),
+                serde_json::to_value(CreateNumEventDetails { genesis_spk }).expect("json value"),
             ),
         });
     }
@@ -490,8 +482,7 @@ impl TxRecord {
             space: Some(num),
             previous_spaceout: None,
             details: Some(
-                serde_json::to_value(TransferNumEventDetails { num_id, to })
-                    .expect("json value"),
+                serde_json::to_value(TransferNumEventDetails { num_id, to }).expect("json value"),
             ),
         });
     }
@@ -514,8 +505,7 @@ impl TxRecord {
             space: Some(num),
             previous_spaceout: None,
             details: Some(
-                serde_json::to_value(CommitRootEventDetails { root })
-                    .expect("json value"),
+                serde_json::to_value(CommitRootEventDetails { root }).expect("json value"),
             ),
         });
     }
@@ -553,74 +543,15 @@ impl TxRecord {
         self.events.push(TxEvent {
             kind: TxEventKind::Bid,
             space: Some(space.name.to_string()),
-            previous_spaceout: previous_spaceout,
+            previous_spaceout,
             details: Some(
                 serde_json::to_value(BidEventDetails {
                     current_bid: amount,
-                    previous_bid: previous_bid,
+                    previous_bid,
                 })
                 .expect("json value"),
             ),
         });
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use bitcoin::{hashes::Hash, Txid};
-    use serde_json::json;
-    use tempfile::tempdir;
-
-    use crate::{tx_event::TxEventKind, *};
-
-    #[test]
-    fn test_tx_event() -> anyhow::Result<()> {
-        // Create a temporary directory
-        let tmp_dir = tempdir()?;
-        let db_path = tmp_dir.path().join("test.db");
-
-        // Initialize SQLite connection
-        let mut conn = Connection::open(&db_path)?;
-        let tx = conn.transaction()?;
-
-        // Initialize the table
-        TxEvent::init_sqlite_tables(&tx)?;
-
-        // Insert a sample transaction event
-        let txid = Txid::all_zeros();
-        let kind = TxEventKind::Bid;
-        let space = Some("test_space".to_string());
-        let details = Some(json!({"amount": 1000, "currency": "USD"}));
-
-        TxEvent::insert(&tx, txid, kind, space.clone(), None, details.clone())?;
-
-        // Commit the transaction
-        tx.commit()?;
-
-        // Re-open the connection to verify the insertion
-        let mut conn = Connection::open(&db_path)?;
-        let tx = conn.transaction()?;
-
-        // Query the inserted event
-        let inserted_events = TxEvent::all(&tx, txid)?;
-
-        assert_eq!(inserted_events.len(), 1);
-        let event = &inserted_events[0];
-        assert_eq!(event.space, space);
-        assert_eq!(event.details, details);
-
-        let mut conn = Connection::open(&db_path)?;
-        let tx = conn.transaction()?;
-
-        let spaces = TxEvent::get_latest_events(&tx)?;
-        assert_eq!(spaces.len(), 1);
-        assert_eq!(spaces[0].1.space.as_ref().expect("space"), "test_space");
-
-        let bids = TxEvent::bids(&tx, "test_space".to_string())?;
-        assert_eq!(bids.len(), 1);
-        assert!(matches!(bids[0].kind, TxEventKind::Bid));
-
-        Ok(())
     }
 }
 
@@ -686,5 +617,64 @@ impl FromSql for TxEventKind {
 impl ToSql for TxEventKind {
     fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
         Ok(ToSqlOutput::from(self.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bitcoin::{Txid, hashes::Hash};
+    use serde_json::json;
+    use tempfile::tempdir;
+
+    use crate::{tx_event::TxEventKind, *};
+
+    #[test]
+    fn test_tx_event() -> anyhow::Result<()> {
+        // Create a temporary directory
+        let tmp_dir = tempdir()?;
+        let db_path = tmp_dir.path().join("test.db");
+
+        // Initialize SQLite connection
+        let mut conn = Connection::open(&db_path)?;
+        let tx = conn.transaction()?;
+
+        // Initialize the table
+        TxEvent::init_sqlite_tables(&tx)?;
+
+        // Insert a sample transaction event
+        let txid = Txid::all_zeros();
+        let kind = TxEventKind::Bid;
+        let space = Some("test_space".to_string());
+        let details = Some(json!({"amount": 1000, "currency": "USD"}));
+
+        TxEvent::insert(&tx, txid, kind, space.clone(), None, details.clone())?;
+
+        // Commit the transaction
+        tx.commit()?;
+
+        // Re-open the connection to verify the insertion
+        let mut conn = Connection::open(&db_path)?;
+        let tx = conn.transaction()?;
+
+        // Query the inserted event
+        let inserted_events = TxEvent::all(&tx, txid)?;
+
+        assert_eq!(inserted_events.len(), 1);
+        let event = &inserted_events[0];
+        assert_eq!(event.space, space);
+        assert_eq!(event.details, details);
+
+        let mut conn = Connection::open(&db_path)?;
+        let tx = conn.transaction()?;
+
+        let spaces = TxEvent::get_latest_events(&tx)?;
+        assert_eq!(spaces.len(), 1);
+        assert_eq!(spaces[0].1.space.as_ref().expect("space"), "test_space");
+
+        let bids = TxEvent::bids(&tx, "test_space".to_string())?;
+        assert_eq!(bids.len(), 1);
+        assert!(matches!(bids[0].kind, TxEventKind::Bid));
+
+        Ok(())
     }
 }

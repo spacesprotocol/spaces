@@ -1,9 +1,9 @@
-name: Build binaries and create release
+name: Build binaries and upload to release
 
 on:
   push:
     tags:
-      - 'v*.*.*'
+      - 'spaces_client-v*'
 
 jobs:
   release:
@@ -24,10 +24,12 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Get the tag name
+      - name: Extract version from tag
         id: get_tag
-        run: | 
+        run: |
+          # tag format: spaces_client-v0.1.0 → VERSION=0.1.0, TAG=<original>
           echo "TAG=${GITHUB_REF##*/}" >> $GITHUB_ENV
+          echo "VERSION=${GITHUB_REF##*-v}" >> $GITHUB_ENV
 
       - name: Set up Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -44,7 +46,7 @@ jobs:
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
         run: |
-          cargo build --release --target ${{ matrix.target }}
+          cargo build --release --target ${{ matrix.target }} -p spaces_client
 
       - name: Get OS and architecture
         run: |
@@ -53,23 +55,16 @@ jobs:
 
       - name: Create release archive
         run: |
-          mkdir -p spaces-${{ env.TAG }}-${{ env.OS }}-${{ env.ARCH }}
-          cp target/${{ matrix.target }}/release/spaced spaces-${{ env.TAG }}-${{ env.OS }}-${{ env.ARCH }}/spaced
-          cp target/${{ matrix.target }}/release/space-cli spaces-${{ env.TAG }}-${{ env.OS }}-${{ env.ARCH }}/space-cli
-          tar -czf spaces-${{ env.TAG }}-${{ env.OS }}-${{ env.ARCH }}.tar.gz spaces-${{ env.TAG }}-${{ env.OS }}-${{ env.ARCH }}
+          mkdir -p spaces-v${{ env.VERSION }}-${{ env.OS }}-${{ env.ARCH }}
+          cp target/${{ matrix.target }}/release/spaced spaces-v${{ env.VERSION }}-${{ env.OS }}-${{ env.ARCH }}/spaced
+          cp target/${{ matrix.target }}/release/space-cli spaces-v${{ env.VERSION }}-${{ env.OS }}-${{ env.ARCH }}/space-cli
+          tar -czf spaces-v${{ env.VERSION }}-${{ env.OS }}-${{ env.ARCH }}.tar.gz spaces-v${{ env.VERSION }}-${{ env.OS }}-${{ env.ARCH }}
 
-      - name: Create GitHub Release
-        id: create_release
+      - name: Upload artifacts to existing release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ env.TAG }}  # Dynamically use the pushed tag
-          name: Release ${{ env.TAG }}  # Use the tag for the release name
-          body: |
-            Spaces release of version ${{ env.TAG }}.
-          draft: false
-          prerelease: false
-          files: | 
-            spaces-${{ env.TAG }}-${{ env.OS }}-${{ env.ARCH }}.tar.gz
-          make_latest: true
+          tag_name: ${{ env.TAG }}
+          files: |
+            spaces-v${{ env.VERSION }}-${{ env.OS }}-${{ env.ARCH }}.tar.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

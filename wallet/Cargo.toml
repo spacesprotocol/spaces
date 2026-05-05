@@ -1,11 +1,17 @@
 [package]
 name = "spaces_wallet"
+description = "Wallet implementation for the Spaces Protocol."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
 
 [dependencies]
-spaces_protocol = { path = "../protocol", features = ["std"] }
-spaces_nums = { path = "../nums", features = ["std"] }
+spaces_protocol = { workspace = true, features = ["std"] }
+spaces_nums = { workspace = true, features = ["std"] }
 bitcoin = { version = "0.32.8", features = ["base64", "serde"] }
 bdk_wallet = { workspace = true }
 secp256k1 = { workspace = true }

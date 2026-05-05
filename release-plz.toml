@@ -1,0 +1,106 @@
+[workspace]
+changelog_path = "CHANGELOG.md"
+changelog_update = true
+pr_draft = false
+
+[changelog]
+header = """# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+"""
+
+body = """
+## [{{ version | trim_start_matches(pat=\"v\") }}]\
+  {%- if release_link -%}\
+    ({{ release_link }})\
+  {% endif %} - {{ timestamp | date(format=\"%Y-%m-%d\") }}
+{% for group, commits in commits | group_by(attribute=\"group\") %}
+### {{ group | upper_first }}
+{% for commit in commits %}
+- {% if commit.scope %}*({{ commit.scope }})* {% endif %}\
+    {% if commit.breaking %}[**breaking**] {% endif %}\
+    {{ commit.message | upper_first }}\
+{% endfor %}
+{% endfor %}
+"""
+
+commit_parsers = [
+  { message = "^feat", group = "Features" },
+  { message = "^fix", group = "Bug Fixes" },
+  { message = "^perf", group = "Performance" },
+  { message = "^refactor", group = "Refactor" },
+  { message = "^docs", group = "Documentation" },
+  { message = "^test", group = "Tests" },
+  { message = "^build", group = "Build" },
+  { message = "^ci", group = "CI" },
+  { message = "^chore\\(release\\)", skip = true },
+  { message = "^chore", group = "Chore" },
+  { message = "^revert", group = "Revert" },
+]
+
+# Publishable crates — published to crates.io + GitHub release on tag.
+[[package]]
+name = "borsh_utils"
+publish = true
+git_release_enable = true
+git_release_latest = false
+git_tag_name = "borsh_utils-v{{ version }}"
+
+[[package]]
+name = "spaces_protocol"
+publish = true
+git_release_enable = true
+git_release_latest = false
+git_tag_name = "spaces_protocol-v{{ version }}"
+
+[[package]]
+name = "spaces_nums"
+publish = true
+git_release_enable = true
+git_release_latest = false
+git_tag_name = "spaces_nums-v{{ version }}"
+
+[[package]]
+name = "sip7"
+publish = true
+git_release_enable = true
+git_release_latest = false
+git_tag_name = "sip7-v{{ version }}"
+
+[[package]]
+name = "spaces_wallet"
+publish = true
+git_release_enable = true
+git_release_latest = false
+git_tag_name = "spaces_wallet-v{{ version }}"
+
+[[package]]
+name = "spaces_client"
+publish = true
+git_release_enable = true
+git_release_latest = false
+git_tag_name = "spaces_client-v{{ version }}"
+git_release_body = """
+> ⚠️ **Subspaces preview — for mainnet alpha testing.**
+>
+> This release is built from the `subspaces` branch and ships new protocol changes. If you are running a production mainnet node, continue using the latest `v0.0.9a` release from the `main` branch:
+> https://github.com/spacesprotocol/spaces/releases/tag/v0.0.9a
+
+{{ changelog }}
+"""
+
+[[package]]
+name = "spaces_checkpoint"
+publish = true
+git_release_enable = true
+git_release_latest = false
+git_tag_name = "spaces_checkpoint-v{{ version }}"
+
+# Internal test-only crate; never released.
+[[package]]
+name = "spaces_testutil"
+release = false
+publish = false

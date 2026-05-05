@@ -2096,7 +2096,7 @@ impl AsyncChainState {
         // Update expire_height in the covenant
         if let Some(ref mut space_data) = spaceout.space {
             match &mut space_data.covenant {
-                Covenant::Transfer { expire_height: ref mut eh, .. } => {
+                Covenant::Transfer { expire_height: eh, .. } => {
                     *eh = expire_height;
                 }
                 _ => return Err(anyhow::anyhow!("Space is not in Transfer covenant (not owned)")),

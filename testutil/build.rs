@@ -18,7 +18,7 @@ fn main() -> io::Result<()> {
     fs::create_dir_all(&target_dir)?;
 
     // Unpack the ZIP file
-    let zip_file = fs::File::open(&zip_path)?;
+    let zip_file = fs::File::open(zip_path)?;
     let mut archive = zip::ZipArchive::new(zip_file)?;
 
     for i in 0..archive.len() {
@@ -28,10 +28,10 @@ fn main() -> io::Result<()> {
         if file.is_dir() {
             fs::create_dir_all(&outpath)?;
         } else {
-            if let Some(p) = outpath.parent() {
-                if !p.exists() {
-                    fs::create_dir_all(p)?;
-                }
+            if let Some(p) = outpath.parent()
+                && !p.exists()
+            {
+                fs::create_dir_all(p)?;
             }
             let mut outfile = fs::File::create(&outpath)?;
             io::copy(&mut file, &mut outfile)?;

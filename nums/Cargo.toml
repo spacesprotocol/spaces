@@ -1,15 +1,21 @@
 [package]
 name = "spaces_nums"
-version = "0.1.0"
-edition = "2024"
+description = "Numeric identifier extension for the Spaces protocol."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
 
 [dependencies]
 bitcoin = { version = "0.32.8", features = ["base64", "serde"], default-features = false }
-spaces_protocol = { path = "../protocol", default-features = false }
+spaces_protocol = { workspace = true }
 
 ## optional features
 borsh = { version = "1.5", default-features = false, features = ["derive"], optional = true }
-borsh_utils = { path = "../borsh_utils", optional = true }
+borsh_utils = { workspace = true, optional = true }
 serde = { version = "1.0", features = ["derive"], default-features = false, optional = true }
 bech32 = { workspace = true, optional = true }
 hex = { workspace = true, optional = true }

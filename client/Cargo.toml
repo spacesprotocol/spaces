@@ -1,7 +1,13 @@
 [package]
 name = "spaces_client"
+description = "Spaces client (spaced) and CLI (space-cli) for the Spaces Protocol."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
 
 [[bin]]
 name = "space-cli"
@@ -20,12 +26,12 @@ required-features = ["schema"]
 path = "src/lib.rs"
 
 [dependencies]
-spaces_wallet = { path = "../wallet" }
-spaces_protocol = { path = "../protocol", features = ["std"] }
-spaces_nums= { path = "../nums", features = ["std"] }
-sip7 = { path = "../sip7", features = ["serde"] }
+spaces_wallet = { workspace = true }
+spaces_protocol = { workspace = true, features = ["std"] }
+spaces_nums = { workspace = true, features = ["std"] }
+sip7 = { workspace = true, features = ["serde"] }
 spacedb = { workspace = true }
-borsh_utils = { path = "../borsh_utils" }
+borsh_utils = { workspace = true }
 
 tokio = { workspace = true, features = ["signal"] }
 anyhow = { workspace = true }
@@ -56,4 +62,4 @@ schema = ["schemars"]
 [dev-dependencies]
 assert_cmd = { workspace = true }
 predicates = { workspace = true }
-spaces_testutil = { path = "../testutil" }
+spaces_testutil = { workspace = true }

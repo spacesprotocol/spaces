@@ -1,7 +1,13 @@
 [package]
 name = "spaces_checkpoint"
-version = "0.1.0"
-edition = "2024"
+description = "Checkpoint loader and builder for the Spaces protocol."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
 
 [[bin]]
 name = "checkpoint-builder"
@@ -20,7 +26,7 @@ serde_json = "1"
 anyhow = { version = "1", optional = true }
 clap = { version = "4", features = ["derive"], optional = true }
 spacedb = { workspace = true, optional = true }
-spaces_protocol = { path = "../protocol", features = ["std"], optional = true }
+spaces_protocol = { workspace = true, features = ["std"], optional = true }
 
 [dev-dependencies]
 tempfile = "3"

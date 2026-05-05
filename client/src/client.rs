@@ -3,27 +3,25 @@ pub extern crate spaces_protocol;
 
 use std::{error::Error, fmt};
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use borsh::{BorshDeserialize, BorshSerialize};
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde::de::Error as SerdeError;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use spaces_nums::{CommitmentKey, CommitmentTipKey, DelegatorKey, NumOutpointKey};
 use spaces_protocol::{
+    Bytes, Covenant, FullSpaceOut, RevokeReason, SpaceOut,
     bitcoin::{Amount, Block, BlockHash, OutPoint, Txid},
     constants::{ChainAnchor, ROLLOUT_BATCH_SIZE, ROLLOUT_BLOCK_INTERVAL},
     hasher::{BidKey, KeyHasher, OutpointKey, SpaceKey},
     prepare::TxContext,
     validate::{TxChangeSet, UpdateKind, Validator},
-    Bytes, Covenant, FullSpaceOut, RevokeReason, SpaceOut,
 };
-use spaces_nums::{CommitmentKey, CommitmentTipKey, DelegatorKey, NumOutpointKey};
 use spaces_wallet::bitcoin::{Network, Transaction};
 
-use crate::{
-    source::{BitcoinRpcError, BestChain},
-};
 use crate::source::BlockQueueResult;
-use crate::store::chain::{Chain};
+use crate::source::{BestChain, BitcoinRpcError};
 use crate::store::Sha256;
+use crate::store::chain::Chain;
 
 pub trait BlockSource {
     fn get_block_hash(&self, height: u32) -> Result<BlockHash, BitcoinRpcError>;
@@ -31,9 +29,16 @@ pub trait BlockSource {
     fn get_median_time(&self) -> Result<u64, BitcoinRpcError>;
     fn in_mempool(&self, txid: &Txid, height: u32) -> Result<bool, BitcoinRpcError>;
     fn get_block_count(&self) -> Result<u64, BitcoinRpcError>;
-    fn get_best_chain(&self, tip: Option<u32>, expected_chain: Network) -> Result<BestChain, BitcoinRpcError>;
+    fn get_best_chain(
+        &self,
+        tip: Option<u32>,
+        expected_chain: Network,
+    ) -> Result<BestChain, BitcoinRpcError>;
     fn get_blockchain_info(&self) -> Result<BlockchainInfo, BitcoinRpcError>;
-    fn get_block_filter_by_height(&self, height: u32) -> Result<Option<BlockFilterRpc>, BitcoinRpcError>;
+    fn get_block_filter_by_height(
+        &self,
+        height: u32,
+    ) -> Result<Option<BlockFilterRpc>, BitcoinRpcError>;
     fn queue_blocks(&self, heights: Vec<u32>) -> Result<(), BitcoinRpcError>;
     fn queue_filters(&self) -> Result<(), BitcoinRpcError>;
 }
@@ -42,10 +47,7 @@ pub trait BlockSource {
 pub struct BlockFilterRpc {
     pub hash: BlockHash,
     pub height: u32,
-    #[serde(
-        serialize_with = "serialize_hex",
-        deserialize_with = "deserialize_hex"
-    )]
+    #[serde(serialize_with = "serialize_hex", deserialize_with = "deserialize_hex")]
     pub content: Vec<u8>,
 }
 
@@ -73,7 +75,6 @@ pub struct BlockchainInfo {
     #[serde(rename = "headerssynced", skip_serializing_if = "Option::is_none")]
     pub headers_synced: Option<bool>,
 }
-
 
 #[derive(Debug, Clone)]
 pub struct Client {
@@ -104,7 +105,6 @@ pub struct PtrTxEntry {
     #[serde(skip_serializing_if = "Option::is_none", flatten)]
     pub tx: Option<TxData>,
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct TxEntry {
@@ -147,16 +147,21 @@ impl Client {
         }
     }
 
-    fn verify_block_connected(chain: &mut Chain, height: u32, block_hash: BlockHash, block: &Block) -> anyhow::Result<()> {
+    fn verify_block_connected(
+        chain: &mut Chain,
+        height: u32,
+        block_hash: BlockHash,
+        block: &Block,
+    ) -> anyhow::Result<()> {
         // Spaces tip must connect to block
         {
             let tip = chain.tip();
             if tip.hash != block.header.prev_blockhash || tip.height + 1 != height {
                 return Err(SyncError {
-                    checkpoint: tip.clone(),
+                    checkpoint: tip,
                     connect_to: (height, block_hash),
                 }
-                    .into());
+                .into());
             }
         }
         // Nums tip must connect to block
@@ -164,10 +169,10 @@ impl Client {
             let tip = chain.nums_tip();
             if tip.hash != block.header.prev_blockhash || tip.height + 1 != height {
                 return Err(SyncError {
-                    checkpoint: tip.clone(),
+                    checkpoint: tip,
                     connect_to: (height, block_hash),
                 }
-                    .into());
+                .into());
             }
         }
 
@@ -202,7 +207,7 @@ impl Client {
         }
 
         // Rollouts:
-        if (height - 1) % ROLLOUT_BLOCK_INTERVAL == 0 {
+        if (height - 1).is_multiple_of(ROLLOUT_BLOCK_INTERVAL) {
             let batch = Self::get_rollout_batch(ROLLOUT_BATCH_SIZE, chain)?;
             let coinbase = block
                 .coinbase()
@@ -232,7 +237,7 @@ impl Client {
             let mut spaceouts_input_ctx = None;
             if let Some(prepared) = TxContext::from_tx::<Chain, Sha256>(chain, tx)? {
                 spaceouts_input_ctx = Some(prepared.inputs.clone());
-                let validated_tx = self.validator.process(height, &tx, prepared);
+                let validated_tx = self.validator.process(height, tx, prepared);
                 spaceouts = Some(validated_tx.creates.clone());
 
                 if let Some(idx) = spaces_meta.as_mut() {
@@ -250,7 +255,7 @@ impl Client {
                         },
                     });
                 }
-                self.apply_space_tx(chain, &tx, validated_tx);
+                self.apply_space_tx(chain, tx, validated_tx);
             }
 
             let ptrs_ctx = if chain.can_scan_nums(height) {
@@ -258,17 +263,28 @@ impl Client {
                     chain,
                     tx,
                     spaceouts_input_ctx.is_some(),
-                    spaceouts.clone().unwrap_or(vec![]) , height)?
+                    spaceouts.clone().unwrap_or(vec![]),
+                    height,
+                )?
             } else {
                 None
             };
 
             if let Some(ptrs_ctx) = ptrs_ctx {
-                let spent_spaceouts = spaceouts_input_ctx.unwrap_or_default().into_iter()
-                    .map(|input| input.sstxo.previous_output).collect::<Vec<_>>();
+                let spent_spaceouts = spaceouts_input_ctx
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|input| input.sstxo.previous_output)
+                    .collect::<Vec<_>>();
                 let created_spaceouts = spaceouts.unwrap_or_default();
-                let ptrs_validated = self.ptr_validator
-                    .process::<Sha256>(height, &tx, position as _, ptrs_ctx, spent_spaceouts, created_spaceouts);
+                let ptrs_validated = self.ptr_validator.process::<Sha256>(
+                    height,
+                    tx,
+                    position as _,
+                    ptrs_ctx,
+                    spent_spaceouts,
+                    created_spaceouts,
+                );
 
                 if let Some(idx) = num_meta.as_mut() {
                     {
@@ -299,7 +315,12 @@ impl Client {
         Ok((spaces_meta, num_meta))
     }
 
-    fn apply_ptrs_tx(&self, state: &mut Chain, tx: &Transaction, changeset: spaces_nums::TxChangeSet) {
+    fn apply_ptrs_tx(
+        &self,
+        state: &mut Chain,
+        tx: &Transaction,
+        changeset: spaces_nums::TxChangeSet,
+    ) {
         // Remove spends
         for n in changeset.spends.into_iter() {
             let previous = tx.input[n].previous_output;
@@ -313,7 +334,8 @@ impl Client {
         }
         // Remove revoked commitments
         for revoked in changeset.revoked_commitments {
-            let commitment_key = CommitmentKey::new::<Sha256>(&revoked.space, revoked.commitment.state_root);
+            let commitment_key =
+                CommitmentKey::new::<Sha256>(&revoked.space, revoked.commitment.state_root);
             state.remove_commitment(commitment_key);
 
             let registry_key = CommitmentTipKey::from_slabel::<Sha256>(&revoked.space);
@@ -333,14 +355,16 @@ impl Client {
 
         // Insert new commitments
         for commitment_info in changeset.commitments {
-            let commitment_key = CommitmentKey::new::<Sha256>(&commitment_info.space, commitment_info.commitment.state_root);
+            let commitment_key = CommitmentKey::new::<Sha256>(
+                &commitment_info.space,
+                commitment_info.commitment.state_root,
+            );
             let registry_key = CommitmentTipKey::from_slabel::<Sha256>(&commitment_info.space);
 
             // Points space -> commitments tip
             state.insert_commitment_tip(registry_key, commitment_info.commitment.state_root);
             // commitment key = HASH(HASH(space) || state root) -> commitment
             state.insert_commitment(commitment_key, commitment_info.commitment);
-
         }
 
         // Create ptrs
@@ -385,18 +409,15 @@ impl Client {
                             state.remove_space(space_key);
 
                             // Remove any bids from pre-auction pool
-                            match space.covenant {
-                                Covenant::Bid {
-                                    total_burned,
-                                    claim_height,
-                                    ..
-                                } => {
-                                    if claim_height.is_none() {
-                                        let bid_key = BidKey::from_bid(total_burned, base_hash);
-                                        state.remove_bid(bid_key)
-                                    }
-                                }
-                                _ => {}
+                            if let Covenant::Bid {
+                                total_burned,
+                                claim_height,
+                                ..
+                            } = space.covenant
+                                && claim_height.is_none()
+                            {
+                                let bid_key = BidKey::from_bid(total_burned, base_hash);
+                                state.remove_bid(bid_key)
                             }
                         }
                         RevokeReason::Expired => {

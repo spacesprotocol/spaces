@@ -1,12 +1,10 @@
 use std::{net::SocketAddr, path::PathBuf, time::Duration};
 
 use log::{info, warn};
-use spaces_protocol::{
-    bitcoin::{Block},
-    constants::ChainAnchor,
-};
+use spaces_protocol::{bitcoin::Block, constants::ChainAnchor};
 use tokio::sync::broadcast;
 
+use crate::store::chain::Chain;
 use crate::{
     callbacks::CallbackRegistry,
     client::{BlockSource, Client},
@@ -16,7 +14,6 @@ use crate::{
     },
     std_wait,
 };
-use crate::store::chain::{Chain};
 
 /// Number of blocks to keep from tip when pruning
 const PRUNING_BUFFER: u32 = 120;
@@ -40,7 +37,7 @@ pub struct Spaced {
 impl Spaced {
     pub fn restore(&self, source: &BitcoinBlockSource) -> anyhow::Result<()> {
         self.chain.restore(|h| {
-           let h = source.get_block_hash(h)?;
+            let h = source.get_block_hash(h)?;
             Ok(h)
         })?;
         Ok(())
@@ -71,7 +68,10 @@ impl Spaced {
                 info!("Pruned blocks up to height {}", pruned_up_to);
             }
             Err(e) => {
-                warn!("Failed to prune: {} (is Bitcoin Core started with -prune=1?)", e);
+                warn!(
+                    "Failed to prune: {} (is Bitcoin Core started with -prune=1?)",
+                    e
+                );
             }
         }
     }
@@ -87,8 +87,8 @@ impl Spaced {
         let sp_idx = self.chain.has_spaces_index();
         let pt_idx = self.chain.has_nums_index();
 
-        let (block_result,ptr_block_result) = node
-            .scan_block(&mut self.chain, id.height, id.hash, &block, sp_idx, pt_idx)?;
+        let (block_result, ptr_block_result) =
+            node.scan_block(&mut self.chain, id.height, id.hash, &block, sp_idx, pt_idx)?;
 
         if let Some(result) = block_result {
             self.chain.apply_block_to_spaces_index(id.hash, result)?;
@@ -164,7 +164,9 @@ impl Spaced {
                         }
                     }
                     BlockEvent::Waiting(bitcoind_height) => {
-                        if self.enable_pruning && last_idle_prune.elapsed() >= Duration::from_secs(60) {
+                        if self.enable_pruning
+                            && last_idle_prune.elapsed() >= Duration::from_secs(60)
+                        {
                             self.prune(&source, bitcoind_height);
                             last_idle_prune = std::time::Instant::now();
                         }
@@ -182,7 +184,7 @@ impl Spaced {
                             self.prune(&source, id.height);
                         }
                     }
-                    BlockEvent::Error(e) if matches!(e, BlockFetchError::BlockMismatch) => {
+                    BlockEvent::Error(BlockFetchError::BlockMismatch) => {
                         if let Err(e) = self.restore(&source) {
                             if e.downcast_ref::<BitcoinRpcError>().is_none() {
                                 return Err(e);
@@ -204,7 +206,7 @@ impl Spaced {
                         fetcher.restart(new_tip, &receiver);
                     }
                 },
-                Err(e) if matches!(e, std::sync::mpsc::TryRecvError::Empty) => {
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
                     std::thread::sleep(Duration::from_millis(10));
                 }
                 Err(_) => {

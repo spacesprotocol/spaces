@@ -1,17 +1,17 @@
 use alloc::{vec, vec::Vec};
 
+use bitcoin::{Amount, OutPoint, Transaction, Txid};
 #[cfg(feature = "borsh")]
 use borsh::{BorshDeserialize, BorshSerialize};
-use bitcoin::{Amount, OutPoint, Transaction, Txid};
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    BidPsbtReason, Bytes, Covenant, FullSpaceOut, RejectReason, RevokeReason, Space, SpaceOut,
     constants::{AUCTION_DURATION, AUCTION_EXTENSION_ON_BID, RENEWAL_INTERVAL, ROLLOUT_BATCH_SIZE},
-    prepare::{AuctionedOutput, TrackableOutput, TxContext, SSTXO},
+    prepare::{AuctionedOutput, SSTXO, TrackableOutput, TxContext},
     script::{OpenContext, OpenError},
     slabel::SLabel,
-    BidPsbtReason, Bytes, Covenant, FullSpaceOut, RejectReason, RevokeReason, Space, SpaceOut,
 };
 
 #[derive(Debug, Clone)]
@@ -113,6 +113,12 @@ pub struct EventOutput {
     pub spaceout: SpaceOut,
 }
 
+impl Default for Validator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Validator {
     pub fn new() -> Validator {
         Self {}
@@ -162,13 +168,14 @@ impl Validator {
                     );
                 }
                 Err(e) => {
-                    let input =
-                        changeset.spends.iter_mut().find(|s| s.n == open_idx)
-                            .expect("input for open should exist");
+                    let input = changeset
+                        .spends
+                        .iter_mut()
+                        .find(|s| s.n == open_idx)
+                        .expect("input for open should exist");
                     input.script_error = Some(e);
                 }
             }
-
         }
 
         // Check if any outputs should be tracked
@@ -245,15 +252,13 @@ impl Validator {
         if let Some(auctioned) = meta
             .auctioned_output
             .as_ref()
-            .and_then(|out| Some(out.bid_psbt.outpoint))
-        {
-            if tx
+            .map(|out| out.bid_psbt.outpoint)
+            && tx
                 .input
                 .iter()
                 .any(|input| input.previous_output == auctioned)
-            {
-                meta.auctioned_output.as_mut().unwrap().output = None;
-            }
+        {
+            meta.auctioned_output.as_mut().unwrap().output = None;
         }
     }
 
@@ -284,9 +289,10 @@ impl Validator {
                 }
 
                 // Revoke the previously expired space
-                if !changeset.updates.iter()
-                    .any(|update| update.output.outpoint() == prev.outpoint() &&
-                        matches!(update.kind, UpdateKind::Revoke(_))) {
+                if !changeset.updates.iter().any(|update| {
+                    update.output.outpoint() == prev.outpoint()
+                        && matches!(update.kind, UpdateKind::Revoke(_))
+                }) {
                     changeset.updates.push(UpdateOut {
                         kind: UpdateKind::Revoke(RevokeReason::Expired),
                         output: FullSpaceOut {
@@ -388,6 +394,7 @@ impl Validator {
 
     /// All spends with a spent spaces transaction output must be
     /// marked as spent as this function only does additional processing for spends of spaces
+    #[allow(clippy::too_many_arguments)]
     fn process_spend(
         &self,
         height: u32,
@@ -396,7 +403,7 @@ impl Validator {
         input_index: usize,
         stxo: SSTXO,
         changeset: &mut TxChangeSet,
-        data: &Option<Bytes>
+        data: &Option<Bytes>,
     ) {
         let spaceout = &stxo.previous_output;
         let space = match &spaceout.space {
@@ -455,6 +462,7 @@ impl Validator {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn process_bid_spend(
         &self,
         height: u32,
@@ -466,7 +474,7 @@ impl Validator {
         claim_height: Option<u32>,
         changeset: &mut TxChangeSet,
     ) {
-        let input = tx.input.get(input_index as usize).expect("input");
+        let input = tx.input.get(input_index).expect("input");
         let spaceout = stxo.previous_output;
         let space_ref = spaceout.space.as_ref().unwrap();
         // Handle bid spends
@@ -596,12 +604,7 @@ impl Validator {
             Some(output) => {
                 // check if there's an existing space output created by this transaction
                 // representing another space somehow (should never be possible anyway?)
-                if changeset
-                    .creates
-                    .iter()
-                    .position(|x| x.n == output_index)
-                    .is_some()
-                {
+                if changeset.creates.iter().any(|x| x.n == output_index) {
                     changeset.updates.push(UpdateOut {
                         output: FullSpaceOut {
                             txid: input.previous_output.txid,

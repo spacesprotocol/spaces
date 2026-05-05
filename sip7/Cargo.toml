@@ -1,13 +1,19 @@
 [package]
 name = "sip7"
-version = "0.1.0"
-edition = "2021"
+description = "Signed Inscribed Packets (SIP-7): signed resource-record payloads for the Spaces protocol."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
 
 [dependencies]
 serde = { version = "1.0", features = ["derive", "alloc"], default-features = false, optional = true }
 base64 = { workspace = true, optional = true }
 hex = { workspace = true, optional = true }
-spaces_protocol = { path = "../protocol", default-features = false }
+spaces_protocol = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

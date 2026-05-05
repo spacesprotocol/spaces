@@ -1,13 +1,24 @@
 use alloc::vec::Vec;
 
+use bitcoin::opcodes::all::{OP_PUSHNUM_1, OP_RETURN};
+use bitcoin::{
+    Script, ScriptBuf, TxOut,
+    opcodes::all::OP_DROP,
+    script,
+    script::{Instruction, PushBytesBuf},
+};
 #[cfg(feature = "borsh")]
 use borsh::{BorshDeserialize, BorshSerialize};
-use bitcoin::{opcodes::all::OP_DROP, script, script::{Instruction, PushBytesBuf}, Script, ScriptBuf, TxOut};
-use bitcoin::opcodes::all::{OP_PUSHNUM_1, OP_RETURN};
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
-use crate::{hasher::{KeyHasher, SpaceKey}, prepare::SpacesSource, slabel::{SLabel, SLabelRef}, validate::RejectParams, Bytes, FullSpaceOut};
+use crate::{
+    Bytes, FullSpaceOut,
+    hasher::{KeyHasher, SpaceKey},
+    prepare::SpacesSource,
+    slabel::{SLabel, SLabelRef},
+    validate::RejectParams,
+};
 
 /// Ways that a script might fail. Not everything is split up as
 /// much as it could be; patches welcome if more detailed errors
@@ -41,20 +52,21 @@ pub enum OpenContext {
 }
 
 /// To set data associated with a space, we use:
-/// OP_RETURN OP_PUSHNUM_1 <op push bytes> <data>
+/// `OP_RETURN OP_PUSHNUM_1 <op push bytes> <data>`
 pub fn find_op_set_data(tx_outputs: &[TxOut]) -> Option<Bytes> {
     tx_outputs.iter().find_map(|s| {
         let mut instructions = s.script_pubkey.instructions().skip(1);
         match (instructions.next()?.ok()?, instructions.next()?.ok()?) {
-            (Instruction::Op(OP_PUSHNUM_1), Instruction::PushBytes(bytes)) =>
-                Some(Bytes::new(bytes.as_bytes().to_vec())),
+            (Instruction::Op(OP_PUSHNUM_1), Instruction::PushBytes(bytes)) => {
+                Some(Bytes::new(bytes.as_bytes().to_vec()))
+            }
             _ => None,
         }
     })
 }
 
 /// Create data OP_RETURN script for spaces/PTRs
-/// Format: OP_RETURN OP_PUSHNUM_1 <data>
+/// Format: `OP_RETURN OP_PUSHNUM_1 <data>`
 pub fn create_data_script(data: &[u8]) -> ScriptBuf {
     let mut buf = PushBytesBuf::new();
     buf.extend_from_slice(data).expect("valid");
@@ -86,7 +98,7 @@ pub fn nop_script(space_script: Vec<u8>) -> script::Builder {
 
 pub fn load_open_context<T: SpacesSource, H: KeyHasher>(
     src: &mut T,
-    script: &Script
+    script: &Script,
 ) -> crate::errors::Result<Option<OpenResult<OpenContext>>> {
     let name = match find_open(script) {
         Some(Ok(name)) => name,
@@ -138,8 +150,7 @@ fn find_open(script: &Script) -> Option<OpenResult<SLabelRef<'_>>> {
                     continue;
                 }
                 bytes = &bytes[OPEN_MAGIC.len()..];
-                let name = SLabelRef::try_from(bytes)
-                    .map_err(|_| OpenError::MalformedName);
+                let name = SLabelRef::try_from(bytes).map_err(|_| OpenError::MalformedName);
                 open_bytes = Some(name);
                 break;
             }
@@ -148,7 +159,6 @@ fn find_open(script: &Script) -> Option<OpenResult<SLabelRef<'_>>> {
 
     open_bytes
 }
-
 
 impl core::fmt::Display for OpenError {
     fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
@@ -168,15 +178,15 @@ mod tests {
     use core::str::FromStr;
 
     use bitcoin::{
-        hashes::Hash as OtherHash, opcodes, script::PushBytesBuf, OutPoint, ScriptBuf, Txid,
+        OutPoint, ScriptBuf, Txid, hashes::Hash as OtherHash, opcodes, script::PushBytesBuf,
     };
 
     use crate::{
+        Covenant, FullSpaceOut, Space, SpaceOut,
         hasher::{Hash, KeyHasher, SpaceKey},
         prepare::SpacesSource,
-        script::{create_open_data, load_open_context, OpenContext, OpenError, OPEN_MAGIC},
+        script::{OPEN_MAGIC, OpenContext, OpenError, create_open_data, load_open_context},
         slabel::SLabel,
-        Covenant, FullSpaceOut, Space, SpaceOut,
     };
 
     pub struct DummySource {
@@ -255,7 +265,7 @@ mod tests {
         let mut builder = ScriptBuf::new();
 
         // Doesn't matter just throwing some dummy script
-        builder.push_slice(&[0u8; 32]);
+        builder.push_slice([0u8; 32]);
         builder.push_opcode(opcodes::all::OP_CHECKSIG);
 
         // Should ignore magic without an opcode
