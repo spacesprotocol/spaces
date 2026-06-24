@@ -15,10 +15,7 @@ use spacedb::{
 };
 use spaces_nums::num_id::NumId;
 use spaces_nums::snumeric::SNumeric;
-use spaces_nums::{
-    Commitment, CommitmentKey, CommitmentTipKey, DelegatorKey, FullNumOut, NumOut, NumOutpointKey,
-    NumSource,
-};
+use spaces_nums::{Commitment, CommitmentKey, CommitmentTipKey, DelegatorKey, FullNumOut, NumOut, NumOutpointKey, NumSource, RebindData, RebindKey};
 use spaces_protocol::slabel::SLabel;
 use spaces_protocol::{
     bitcoin::{BlockHash, OutPoint},
@@ -104,6 +101,8 @@ pub trait NumChainState {
     fn remove_commitment_tip(&self, key: CommitmentTipKey);
     fn insert_delegator(&self, key: DelegatorKey, space: SLabel);
     fn insert_num_outpoint(&self, key: NumId, outpoint: EncodableOutpoint);
+    fn insert_rebind(&self, key: RebindKey, rebind: RebindData);
+    fn remove_rebind(&self, key: RebindKey);
 
     #[allow(dead_code)]
     fn get_num_info(&mut self, id: &NumId) -> Result<Option<FullNumOut>>;
@@ -132,6 +131,14 @@ impl NumChainState for NumLiveSnapshot {
 
     fn insert_num_outpoint(&self, key: NumId, outpoint: EncodableOutpoint) {
         self.insert(key, outpoint)
+    }
+
+    fn insert_rebind(&self, key: RebindKey, rebind: RebindData) {
+        self.insert(key, rebind)
+    }
+
+    fn remove_rebind(&self, key: RebindKey) {
+        self.remove(key)
     }
 
     fn get_num_info(&mut self, hash: &NumId) -> Result<Option<FullNumOut>> {
@@ -295,10 +302,10 @@ impl NumSource for NumLiveSnapshot {
         &mut self,
         id: &NumId,
     ) -> spaces_protocol::errors::Result<Option<OutPoint>> {
-        let result: Option<EncodableOutpoint> = self.get(*id).map_err(|err| {
-            spaces_protocol::errors::Error::IO(format!("getnumoutpoint: {}", err))
-        })?;
-        Ok(result.map(|out| out.into()))
+        let result: Option<EncodableOutpoint> = self
+            .get(*id)
+            .map_err(|err| spaces_protocol::errors::Error::IO(format!("getnumoutpoint: {}", err)))?;
+        Ok(result.map(|o| o.into()))
     }
 
     fn get_commitment(
@@ -344,5 +351,15 @@ impl NumSource for NumLiveSnapshot {
 
     fn get_num_id(&mut self, _snum: &SNumeric) -> spaces_protocol::errors::Result<Option<NumId>> {
         panic!("not supported call chain.get_num_id")
+    }
+
+    fn get_num_rebind(
+        &mut self,
+        key: &RebindKey,
+    ) -> spaces_protocol::errors::Result<Option<RebindData>> {
+        let result = self
+            .get(*key)
+            .map_err(|err| spaces_protocol::errors::Error::IO(format!("getrebind: {}", err)))?;
+        Ok(result)
     }
 }

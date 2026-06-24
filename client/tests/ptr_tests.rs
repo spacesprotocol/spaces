@@ -1,6 +1,7 @@
 use anyhow::anyhow;
 use spaces_client::rpc::{
-    CommitParams, CreateNumParams, OperateParams, SetFallbackParams, Subject, TransferSpacesParams,
+    CommitParams, CreateNumParams, OperateParams, SetFallbackParams, Subject,
+    TransferSpacesParams, UnbindParams,
 };
 use spaces_client::store::Sha256;
 use spaces_client::{
@@ -1515,6 +1516,21 @@ async fn run_ptr_tests() -> anyhow::Result<()> {
     println!("\n=== Running Foreign Num Transfer Tests ===");
     it_should_transfer_foreign_num_with_secret(&rig).await?;
 
+    println!("\n=== Running Unbind / Revive Round-Trip Tests ===");
+    it_should_unbind_and_revive_num(&rig).await?;
+
+    println!("\n=== Running Rotated-Away Genesis Guard Tests ===");
+    it_should_guard_rotated_away_genesis(&rig).await?;
+
+    println!("\n=== Running Rotated-Death Identity Isolation Tests ===");
+    it_should_not_clobber_identity_on_rotated_death(&rig).await?;
+
+    println!("\n=== Running Move-Preserves-Rebind Tests ===");
+    it_should_not_clobber_rebind_on_subsequent_move(&rig).await?;
+
+    println!("\n=== Running Foreign Unbind (secret) Tests ===");
+    it_should_unbind_foreign_num_with_secret(&rig).await?;
+
     println!("\n=== All tests passed! ===");
     Ok(())
 }
@@ -2497,6 +2513,868 @@ async fn it_should_create_multiple_nums_same_tx(rig: &TestRig) -> anyhow::Result
     assert!(del_a.is_some(), "delegation A should exist");
     assert!(del_b.is_some(), "delegation B should exist");
     println!("✓ Both nums delegated independently");
+
+    Ok(())
+}
+
+// ============== Test: Unbind / Revive Round-Trip ==============
+//
+// CreateNum (genesis) → Unbind (dormancy) → CreateNum (revival at same spk).
+// Asserts identity is stable across the cycle while the outpoint moves, and
+// that a second Unbind on an already-dormant num is rejected.
+async fn it_should_unbind_and_revive_num(rig: &TestRig) -> anyhow::Result<()> {
+    sync_all(rig).await?;
+
+    // (1) Genesis at a fresh ALICE address.
+    println!("Test 1: Create a fresh num at a new ALICE address");
+    let addr = rig
+        .spaced
+        .client
+        .wallet_get_new_address(ALICE, AddressKind::Coin)
+        .await?;
+    let spk = bitcoin::address::Address::from_str(&addr)
+        .expect("valid")
+        .assume_checked()
+        .script_pubkey();
+    let id = NumId::from_spk::<Sha256>(spk.clone());
+
+    let create = wallet_do(
+        rig,
+        ALICE,
+        vec![RpcWalletRequest::CreateNum(CreateNumParams {
+            bind_spk: Some(spk.clone()),
+        })],
+        false,
+    )
+    .await?;
+    wallet_res_err(&create)?;
+    mine_and_sync(rig, 1).await?;
+
+    let live = rig
+        .spaced
+        .client
+        .get_num(Subject::NumId(id))
+        .await?
+        .expect("num must exist after CreateNum");
+    assert!(!live.numout.spent, "fresh num must not be marked spent");
+    assert_eq!(live.numout.num.id, id, "num id matches H(spk)");
+    let live_outpoint = bitcoin::OutPoint::new(live.txid, live.numout.n as u32);
+    println!("✓ live num at {} (id={})", live_outpoint, id);
+
+    // (2) Unbind → tombstone (spent=true), identity preserved at the same slot.
+    println!("\nTest 2: Unbind the num (non-rotated death)");
+    let unbind = wallet_do(
+        rig,
+        ALICE,
+        vec![RpcWalletRequest::Unbind(UnbindParams {
+            subjects: vec![Subject::NumId(id)],
+            secret: None,
+        })],
+        false,
+    )
+    .await?;
+    wallet_res_err(&unbind)?;
+    mine_and_sync(rig, 1).await?;
+
+    let dormant = rig
+        .spaced
+        .client
+        .get_num(Subject::NumId(id))
+        .await?
+        .expect("tombstone must remain at the identity slot for a non-rotated death");
+    assert!(dormant.numout.spent, "unbind must set spent=true");
+    assert_eq!(dormant.numout.num.id, id, "identity retained on tombstone");
+    let dormant_outpoint = bitcoin::OutPoint::new(dormant.txid, dormant.numout.n as u32);
+    assert_eq!(
+        dormant_outpoint, live_outpoint,
+        "tombstone keeps pointing at the now-spent outpoint until revival"
+    );
+    println!("✓ tombstone at {} retains id={}", dormant_outpoint, id);
+
+    // (3) Revive: CreateNum at the death spk → same id, new outpoint.
+    println!("\nTest 3: Revive by CreateNum at the death spk");
+    let revive = wallet_do(
+        rig,
+        ALICE,
+        vec![RpcWalletRequest::CreateNum(CreateNumParams {
+            bind_spk: Some(spk.clone()),
+        })],
+        false,
+    )
+    .await?;
+    wallet_res_err(&revive)?;
+    mine_and_sync(rig, 1).await?;
+
+    let revived = rig
+        .spaced
+        .client
+        .get_num(Subject::NumId(id))
+        .await?
+        .expect("revival must produce a live num at the genesis id");
+    assert!(!revived.numout.spent, "revived num must be live");
+    assert_eq!(
+        revived.numout.num.id, id,
+        "identity stable across unbind→revive"
+    );
+    let revived_outpoint = bitcoin::OutPoint::new(revived.txid, revived.numout.n as u32);
+    assert_ne!(
+        revived_outpoint, live_outpoint,
+        "outpoint must change on revival"
+    );
+    assert_eq!(
+        revived.numout.script_pubkey, spk,
+        "revival binds back to the death spk"
+    );
+    println!(
+        "✓ revived: id stable, outpoint moved {} → {}",
+        live_outpoint, revived_outpoint
+    );
+
+    // (4) Reject path: a second Unbind RPC against a dormant num must error.
+    println!("\nTest 4: Unbind once more, then assert a redundant unbind is rejected");
+    let unbind2 = wallet_do(
+        rig,
+        ALICE,
+        vec![RpcWalletRequest::Unbind(UnbindParams {
+            subjects: vec![Subject::NumId(id)],
+            secret: None,
+        })],
+        false,
+    )
+    .await?;
+    wallet_res_err(&unbind2)?;
+    mine_and_sync(rig, 1).await?;
+
+    let dormant_again = rig
+        .spaced
+        .client
+        .get_num(Subject::NumId(id))
+        .await?
+        .expect("tombstone remains after the second unbind");
+    assert!(
+        dormant_again.numout.spent,
+        "second unbind also yields a tombstone"
+    );
+
+    let again = wallet_do(
+        rig,
+        ALICE,
+        vec![RpcWalletRequest::Unbind(UnbindParams {
+            subjects: vec![Subject::NumId(id)],
+            secret: None,
+        })],
+        false,
+    )
+    .await;
+    let err_msg = match again {
+        Err(e) => format!("{e}"),
+        Ok(res) => match wallet_res_err(&res) {
+            Ok(()) => panic!("unbinding an already-dormant num must be rejected"),
+            Err(e) => format!("{e}"),
+        },
+    };
+    assert!(
+        err_msg.contains("dormant") || err_msg.contains("already"),
+        "expected dormant-rejection error, got: {err_msg}"
+    );
+    println!("✓ second unbind on a dormant num rejected: {}", err_msg);
+
+    Ok(())
+}
+
+// ============== Test: Rotated-Away Genesis Guard ==============
+//
+// Mint X at genesis spk_G, rotate to spk_R, kill at spk_R. The rebind slot
+// lives at rebind(spk_R) — NOT at spk_G. A later CreateNum at spk_G must NOT
+// revive X: spk_G's identity slot is occupied (append-forever), so the
+// wallet rejects the mint up-front, and no rebind is parked there anyway.
+// Real revival key is spk_R.
+async fn it_should_guard_rotated_away_genesis(rig: &TestRig) -> anyhow::Result<()> {
+    sync_all(rig).await?;
+
+    // (1) Mint X at the GENESIS spk under Alice.
+    println!("Test 1: Mint X at Alice's genesis spk_G");
+    let g_addr = rig
+        .spaced
+        .client
+        .wallet_get_new_address(ALICE, AddressKind::Coin)
+        .await?;
+    let spk_g = bitcoin::address::Address::from_str(&g_addr)
+        .expect("valid")
+        .assume_checked()
+        .script_pubkey();
+    let id_x = NumId::from_spk::<Sha256>(spk_g.clone());
+
+    wallet_res_err(
+        &wallet_do(
+            rig,
+            ALICE,
+            vec![RpcWalletRequest::CreateNum(CreateNumParams {
+                bind_spk: Some(spk_g.clone()),
+            })],
+            false,
+        )
+        .await?,
+    )?;
+    mine_and_sync(rig, 1).await?;
+
+    // (2) Transfer X → spk_R (Bob), so X "rotates away" from its genesis spk.
+    println!("\nTest 2: Transfer X to Bob's spk_R (rotation away from genesis)");
+    let r_addr = rig
+        .spaced
+        .client
+        .wallet_get_new_address(BOB, AddressKind::Space)
+        .await?;
+    let spk_r = SpaceAddress::from_str(&r_addr)
+        .expect("valid")
+        .script_pubkey();
+
+    wallet_res_err(
+        &wallet_do(
+            rig,
+            ALICE,
+            vec![RpcWalletRequest::Transfer(TransferSpacesParams {
+                secret: None,
+                spaces: vec![Subject::NumId(id_x)],
+                to: Some(r_addr.clone()),
+                data: None,
+            })],
+            false,
+        )
+        .await?,
+    )?;
+    mine_and_sync(rig, 1).await?;
+
+    let after_xfer = rig
+        .spaced
+        .client
+        .get_num(Subject::NumId(id_x))
+        .await?
+        .expect("X still resolves after rotation");
+    assert_eq!(
+        after_xfer.numout.script_pubkey, spk_r,
+        "X now lives at spk_R"
+    );
+    assert!(!after_xfer.numout.spent, "X is still live before unbind");
+
+    // (3) Bob unbinds X at spk_R. Rotated death: rebind slot at H(spk_R),
+    // genesis identity at H(spk_G) is left as Minted{tombstone}.
+    println!("\nTest 3: Bob unbinds X at spk_R (rotated death)");
+    wallet_res_err(
+        &wallet_do(
+            rig,
+            BOB,
+            vec![RpcWalletRequest::Unbind(UnbindParams {
+                subjects: vec![Subject::NumId(id_x)],
+                secret: None,
+            })],
+            false,
+        )
+        .await?,
+    )?;
+    mine_and_sync(rig, 1).await?;
+
+    let after_unbind = rig
+        .spaced
+        .client
+        .get_num(Subject::NumId(id_x))
+        .await?
+        .expect("X's identity slot still resolves to a spent tombstone");
+    assert!(
+        after_unbind.numout.spent,
+        "X is dormant after Bob's unbind"
+    );
+
+    // (4) Guard fires: CreateNum at the GENESIS spk_G must NOT revive X.
+    // No rebind is parked at spk_G (X died at spk_R), so this is a mint
+    // attempt — and spk_G's identity slot is occupied forever, so the wallet
+    // rejects it up-front instead of building a consensus no-op tx.
+    println!("\nTest 4: CreateNum at spk_G rejected (identity occupied; rebind lives at spk_R)");
+    let genesis_try = wallet_do(
+        rig,
+        ALICE,
+        vec![RpcWalletRequest::CreateNum(CreateNumParams {
+            bind_spk: Some(spk_g.clone()),
+        })],
+        false,
+    )
+    .await;
+    let err_msg = match genesis_try {
+        Err(e) => format!("{e}"),
+        Ok(res) => match wallet_res_err(&res) {
+            Ok(()) => panic!("mint at an occupied genesis spk must be rejected"),
+            Err(e) => format!("{e}"),
+        },
+    };
+    assert!(
+        err_msg.contains("exists"),
+        "expected already-exists rejection, got: {err_msg}"
+    );
+    assert!(
+        rig.spaced
+            .client
+            .get_rebind(spk_g.clone())
+            .await?
+            .is_none(),
+        "no rebind parked at the genesis spk"
+    );
+    let after_genesis_try = rig
+        .spaced
+        .client
+        .get_num(Subject::NumId(id_x))
+        .await?
+        .expect("X's tombstone is still there");
+    assert!(
+        after_genesis_try.numout.spent,
+        "X untouched — still dormant"
+    );
+    println!("✓ revival at the wrong (genesis) spk rejected; X still dormant");
+
+    // (5) Sanity: revival AT the death spk (spk_R) does revive X.
+    println!("\nTest 5: CreateNum at spk_R (the actual rebind key) revives X");
+    wallet_res_err(
+        &wallet_do(
+            rig,
+            BOB,
+            vec![RpcWalletRequest::CreateNum(CreateNumParams {
+                bind_spk: Some(spk_r.clone()),
+            })],
+            false,
+        )
+        .await?,
+    )?;
+    mine_and_sync(rig, 1).await?;
+
+    let revived = rig
+        .spaced
+        .client
+        .get_num(Subject::NumId(id_x))
+        .await?
+        .expect("X resolves after revival");
+    assert!(!revived.numout.spent, "X is live again");
+    assert_eq!(revived.numout.num.id, id_x, "same identity restored");
+    assert_eq!(
+        revived.numout.script_pubkey, spk_r,
+        "X bound at spk_R (the rebind key), not spk_G"
+    );
+    println!("✓ revival at the correct spk brought X back");
+
+    Ok(())
+}
+
+// ============== Test: Rotated Death Does NOT Clobber Co-Parked Identity ==============
+//
+// Identity and rebind records live in separate key domains, so a rotated
+// death at spk_A writes only rebind(spk_A) and can never damage N's
+// identity minted there.
+//
+//   Step 1 — mint N at spk_A:       identity(spk_A) = N.outpoint
+//   Step 2 — mint Y at spk_B:       identity(spk_B) = Y.outpoint
+//   Step 3 — transfer Y → spk_A:    identity(spk_B) = Y.outpoint' (Y at spk_A)
+//   Step 4 — unbind Y at spk_A:     rebind(spk_A) = Y.rebind;
+//                                    identity(spk_A) untouched — N unaffected
+//   Step 5 — revive Y at spk_A:     rebind consumed; N and Y co-live at spk_A
+async fn it_should_not_clobber_identity_on_rotated_death(rig: &TestRig) -> anyhow::Result<()> {
+    sync_all(rig).await?;
+
+    // (1) Mint N at spk_A.
+    println!("Test 1: Mint N at spk_A (Alice)");
+    let a_addr = rig
+        .spaced
+        .client
+        .wallet_get_new_address(ALICE, AddressKind::Space)
+        .await?;
+    let spk_a = SpaceAddress::from_str(&a_addr)
+        .expect("valid")
+        .script_pubkey();
+    let id_n = NumId::from_spk::<Sha256>(spk_a.clone());
+
+    wallet_res_err(
+        &wallet_do(
+            rig,
+            ALICE,
+            vec![RpcWalletRequest::CreateNum(CreateNumParams {
+                bind_spk: Some(spk_a.clone()),
+            })],
+            false,
+        )
+        .await?,
+    )?;
+    mine_and_sync(rig, 1).await?;
+
+    let n_live = rig
+        .spaced
+        .client
+        .get_num(Subject::NumId(id_n))
+        .await?
+        .expect("N exists post mint");
+    assert!(!n_live.numout.spent, "N is live");
+
+    // (2) Mint Y at a different spk_B.
+    println!("\nTest 2: Mint Y at spk_B (also Alice)");
+    let b_addr = rig
+        .spaced
+        .client
+        .wallet_get_new_address(ALICE, AddressKind::Space)
+        .await?;
+    let spk_b = SpaceAddress::from_str(&b_addr)
+        .expect("valid")
+        .script_pubkey();
+    let id_y = NumId::from_spk::<Sha256>(spk_b.clone());
+
+    wallet_res_err(
+        &wallet_do(
+            rig,
+            ALICE,
+            vec![RpcWalletRequest::CreateNum(CreateNumParams {
+                bind_spk: Some(spk_b.clone()),
+            })],
+            false,
+        )
+        .await?,
+    )?;
+    mine_and_sync(rig, 1).await?;
+
+    // (3) Transfer Y → spk_A. The rotation writes Minted{Y.new} at Y.num.id =
+    // H(spk_B); H(spk_A) is NOT touched.
+    println!("\nTest 3: Transfer Y → spk_A");
+    wallet_res_err(
+        &wallet_do(
+            rig,
+            ALICE,
+            vec![RpcWalletRequest::Transfer(TransferSpacesParams {
+                secret: None,
+                spaces: vec![Subject::NumId(id_y)],
+                to: Some(a_addr.clone()),
+                data: None,
+            })],
+            false,
+        )
+        .await?,
+    )?;
+    mine_and_sync(rig, 1).await?;
+
+    let y_post = rig
+        .spaced
+        .client
+        .get_num(Subject::NumId(id_y))
+        .await?
+        .expect("Y still resolves after transfer");
+    assert_eq!(y_post.numout.script_pubkey, spk_a, "Y now lives at spk_A");
+    let n_post = rig
+        .spaced
+        .client
+        .get_num(Subject::NumId(id_n))
+        .await?
+        .expect("N still resolves after Y's transfer (slot at H(spk_A) untouched)");
+    assert!(!n_post.numout.spent, "N still live before Y's unbind");
+    assert_eq!(
+        n_post.numout.script_pubkey, spk_a,
+        "N's identity still tracked via H(spk_A), pointing at original outpoint"
+    );
+
+    // (4) Unbind Y at spk_A. The rotated death parks rebind(spk_A) = Y and
+    // leaves N's identity completely untouched.
+    println!("\nTest 4: Unbind Y at spk_A — N's identity must be untouched");
+    wallet_res_err(
+        &wallet_do(
+            rig,
+            ALICE,
+            vec![RpcWalletRequest::Unbind(UnbindParams {
+                subjects: vec![Subject::NumId(id_y)],
+                secret: None,
+            })],
+            false,
+        )
+        .await?,
+    )?;
+    mine_and_sync(rig, 1).await?;
+
+    let n_after = rig
+        .spaced
+        .client
+        .get_num(Subject::NumId(id_n))
+        .await?
+        .expect("N's identity survives Y's rotated death at the same spk");
+    assert!(!n_after.numout.spent, "N is still live");
+    assert_eq!(n_after.numout.script_pubkey, spk_a, "N unchanged at spk_A");
+    println!("✓ N unaffected by Y's death at the same spk");
+
+    // Y's own identity still resolves to a tombstone, and its rebind is
+    // parked at spk_A's rebind slot.
+    let y_after = rig
+        .spaced
+        .client
+        .get_num(Subject::NumId(id_y))
+        .await?
+        .expect("Y still resolves via its own identity");
+    assert!(
+        y_after.numout.spent,
+        "Y resolves to a spent tombstone after unbind"
+    );
+    let parked = rig
+        .spaced
+        .client
+        .get_rebind(spk_a.clone())
+        .await?
+        .expect("Y's rebind parked at rebind(spk_A)");
+    assert_eq!(parked.prev.id, id_y, "the parked rebind is Y's");
+    println!("✓ Y dormant, rebind parked at spk_A");
+
+    // (5) Revive Y at spk_A. N and Y co-live at spk_A afterwards.
+    println!("\nTest 5: Revive Y at spk_A — co-lives with N");
+    wallet_res_err(
+        &wallet_do(
+            rig,
+            ALICE,
+            vec![RpcWalletRequest::CreateNum(CreateNumParams {
+                bind_spk: Some(spk_a.clone()),
+            })],
+            false,
+        )
+        .await?,
+    )?;
+    mine_and_sync(rig, 1).await?;
+
+    let y_revived = rig
+        .spaced
+        .client
+        .get_num(Subject::NumId(id_y))
+        .await?
+        .expect("Y resolves after revival");
+    assert!(!y_revived.numout.spent, "Y is live again");
+    assert_eq!(y_revived.numout.script_pubkey, spk_a, "Y revived at spk_A");
+    assert!(
+        rig.spaced
+            .client
+            .get_rebind(spk_a.clone())
+            .await?
+            .is_none(),
+        "rebind consumed"
+    );
+    let n_final = rig
+        .spaced
+        .client
+        .get_num(Subject::NumId(id_n))
+        .await?
+        .expect("N still resolves");
+    assert!(!n_final.numout.spent, "N still live — both co-exist at spk_A");
+    println!("✓ Y revived; N and Y co-live at spk_A");
+
+    Ok(())
+}
+
+// ============== Test: Move Does NOT Clobber a Co-Parked Rebind ==============
+//
+// After Y's rotated death parks rebind(spk_A) = Y, moving N (whose genesis
+// id is H(spk_A)) writes its rotation to identity(spk_A) — a different key
+// domain — so Y's parked rebind survives and Y stays revivable.
+async fn it_should_not_clobber_rebind_on_subsequent_move(rig: &TestRig) -> anyhow::Result<()> {
+    sync_all(rig).await?;
+
+    // ---- Same setup as the rotated-death test so this stands alone. ----
+    println!("Setup: mint N at spk_A, mint Y at spk_B, transfer Y → spk_A, unbind Y");
+
+    let a_addr = rig
+        .spaced
+        .client
+        .wallet_get_new_address(ALICE, AddressKind::Space)
+        .await?;
+    let spk_a = SpaceAddress::from_str(&a_addr)
+        .expect("valid")
+        .script_pubkey();
+    let id_n = NumId::from_spk::<Sha256>(spk_a.clone());
+
+    wallet_res_err(
+        &wallet_do(
+            rig,
+            ALICE,
+            vec![RpcWalletRequest::CreateNum(CreateNumParams {
+                bind_spk: Some(spk_a.clone()),
+            })],
+            false,
+        )
+        .await?,
+    )?;
+    mine_and_sync(rig, 1).await?;
+
+    let n_live = rig
+        .spaced
+        .client
+        .get_num(Subject::NumId(id_n))
+        .await?
+        .expect("N exists post mint");
+    let n_outpoint = bitcoin::OutPoint::new(n_live.txid, n_live.numout.n as u32);
+
+    let b_addr = rig
+        .spaced
+        .client
+        .wallet_get_new_address(ALICE, AddressKind::Space)
+        .await?;
+    let spk_b = SpaceAddress::from_str(&b_addr)
+        .expect("valid")
+        .script_pubkey();
+    let id_y = NumId::from_spk::<Sha256>(spk_b.clone());
+
+    wallet_res_err(
+        &wallet_do(
+            rig,
+            ALICE,
+            vec![RpcWalletRequest::CreateNum(CreateNumParams {
+                bind_spk: Some(spk_b.clone()),
+            })],
+            false,
+        )
+        .await?,
+    )?;
+    mine_and_sync(rig, 1).await?;
+
+    wallet_res_err(
+        &wallet_do(
+            rig,
+            ALICE,
+            vec![RpcWalletRequest::Transfer(TransferSpacesParams {
+                secret: None,
+                spaces: vec![Subject::NumId(id_y)],
+                to: Some(a_addr.clone()),
+                data: None,
+            })],
+            false,
+        )
+        .await?,
+    )?;
+    mine_and_sync(rig, 1).await?;
+
+    wallet_res_err(
+        &wallet_do(
+            rig,
+            ALICE,
+            vec![RpcWalletRequest::Unbind(UnbindParams {
+                subjects: vec![Subject::NumId(id_y)],
+                secret: None,
+            })],
+            false,
+        )
+        .await?,
+    )?;
+    mine_and_sync(rig, 1).await?;
+
+    // Pre-condition: Y's rebind is parked at spk_A and N is unaffected.
+    assert!(
+        rig.spaced
+            .client
+            .get_num(Subject::NumId(id_n))
+            .await?
+            .is_some_and(|n| !n.numout.spent),
+        "precondition: N stays live through Y's rotated death"
+    );
+    assert!(
+        rig.spaced
+            .client
+            .get_rebind(spk_a.clone())
+            .await?
+            .is_some(),
+        "precondition: Y's rebind parked at rebind(spk_A)"
+    );
+    println!("✓ pre-condition: rebind(spk_A) = Y, N live");
+
+    // ---- The actual test: move N to spk_C; the rebind must survive. ----
+    println!("\nTest: transfer N → spk_C, then revive Y at spk_A");
+
+    let c_addr = rig
+        .spaced
+        .client
+        .wallet_get_new_address(ALICE, AddressKind::Space)
+        .await?;
+    let spk_c = SpaceAddress::from_str(&c_addr)
+        .expect("valid")
+        .script_pubkey();
+
+    wallet_res_err(
+        &wallet_do(
+            rig,
+            ALICE,
+            vec![RpcWalletRequest::Transfer(TransferSpacesParams {
+                secret: None,
+                spaces: vec![Subject::NumId(id_n)],
+                to: Some(c_addr.clone()),
+                data: None,
+            })],
+            false,
+        )
+        .await?,
+    )?;
+    mine_and_sync(rig, 1).await?;
+
+    let n_moved = rig
+        .spaced
+        .client
+        .get_num(Subject::NumId(id_n))
+        .await?
+        .expect("N resolves after the move");
+    assert!(!n_moved.numout.spent, "N is live at the new outpoint");
+    assert_eq!(n_moved.numout.script_pubkey, spk_c, "N now lives at spk_C");
+    assert_ne!(
+        bitcoin::OutPoint::new(n_moved.txid, n_moved.numout.n as u32),
+        n_outpoint,
+        "outpoint moved"
+    );
+
+    // The rotation wrote identity(spk_A) — a different domain than
+    // rebind(spk_A). Y's parked rebind survives, and Y can be revived.
+    let parked = rig
+        .spaced
+        .client
+        .get_rebind(spk_a.clone())
+        .await?
+        .expect("Y's rebind survives N's move");
+    assert_eq!(parked.prev.id, id_y, "still Y's rebind");
+    println!("✓ N moved to spk_C; Y's rebind untouched at spk_A");
+
+    wallet_res_err(
+        &wallet_do(
+            rig,
+            ALICE,
+            vec![RpcWalletRequest::CreateNum(CreateNumParams {
+                bind_spk: Some(spk_a.clone()),
+            })],
+            false,
+        )
+        .await?,
+    )?;
+    mine_and_sync(rig, 1).await?;
+
+    let y_revived = rig
+        .spaced
+        .client
+        .get_num(Subject::NumId(id_y))
+        .await?
+        .expect("Y resolves after revival");
+    assert!(!y_revived.numout.spent, "Y is revivable and live again");
+    assert_eq!(y_revived.numout.script_pubkey, spk_a, "Y revived at spk_A");
+    println!("✓ Y revived at spk_A after N's move — nothing was clobbered");
+
+    Ok(())
+}
+
+
+// ============== Test: Unbind a Foreign Num With a Secret ==============
+//
+// A num bound to a key outside any wallet can be unbound by whoever holds
+// the raw secret: the wallet spends it as a foreign utxo signed with
+// `sign_with_custom_secret` — the same machinery foreign transfers use.
+// Without the secret the unbind is rejected up-front. Revival afterwards
+// needs no secret at all, since binds are unsigned outputs.
+async fn it_should_unbind_foreign_num_with_secret(rig: &TestRig) -> anyhow::Result<()> {
+    sync_all(rig).await?;
+
+    let (spk, secret) = gen_p2tr_keypair();
+    let num_id = NumId::from_spk::<Sha256>(spk.clone());
+    println!("Test 1: Mint num at external spk (id={})", num_id);
+
+    wallet_res_err(
+        &wallet_do(
+            rig,
+            ALICE,
+            vec![RpcWalletRequest::CreateNum(CreateNumParams {
+                bind_spk: Some(spk.clone()),
+            })],
+            false,
+        )
+        .await?,
+    )?;
+    mine_and_sync(rig, 1).await?;
+
+    assert!(
+        rig.spaced
+            .client
+            .get_num(Subject::NumId(num_id))
+            .await?
+            .is_some_and(|n| !n.numout.spent),
+        "num live at the external spk"
+    );
+
+    // (2) Unbind without the secret must be rejected.
+    println!("\nTest 2: Unbind without secret is rejected");
+    let no_secret = wallet_do(
+        rig,
+        ALICE,
+        vec![RpcWalletRequest::Unbind(UnbindParams {
+            subjects: vec![Subject::NumId(num_id)],
+            secret: None,
+        })],
+        false,
+    )
+    .await;
+    let err_msg = match no_secret {
+        Err(e) => format!("{e}"),
+        Ok(res) => match wallet_res_err(&res) {
+            Ok(()) => panic!("unbinding a foreign num without a secret must be rejected"),
+            Err(e) => format!("{e}"),
+        },
+    };
+    assert!(
+        err_msg.contains("own"),
+        "expected ownership rejection, got: {err_msg}"
+    );
+    println!("✓ rejected: {err_msg}");
+
+    // (3) Unbind with the secret: foreign utxo signed with the raw key.
+    println!("\nTest 3: Unbind with secret succeeds");
+    wallet_res_err(
+        &wallet_do(
+            rig,
+            ALICE,
+            vec![RpcWalletRequest::Unbind(UnbindParams {
+                subjects: vec![Subject::NumId(num_id)],
+                secret: Some(hex::encode(secret)),
+            })],
+            false,
+        )
+        .await?,
+    )?;
+    mine_and_sync(rig, 1).await?;
+
+    let dormant = rig
+        .spaced
+        .client
+        .get_num(Subject::NumId(num_id))
+        .await?
+        .expect("identity still resolves");
+    assert!(dormant.numout.spent, "num dormant after secret unbind");
+    let parked = rig
+        .spaced
+        .client
+        .get_rebind(spk.clone())
+        .await?
+        .expect("rebind parked at the external spk");
+    assert_eq!(parked.prev.id, num_id, "the parked rebind is this num's");
+    println!("✓ dormant; rebind parked at the external spk");
+
+    // (4) Revival needs no secret — binds are unsigned outputs.
+    println!("\nTest 4: Revive at the external spk (no secret needed)");
+    wallet_res_err(
+        &wallet_do(
+            rig,
+            ALICE,
+            vec![RpcWalletRequest::CreateNum(CreateNumParams {
+                bind_spk: Some(spk.clone()),
+            })],
+            false,
+        )
+        .await?,
+    )?;
+    mine_and_sync(rig, 1).await?;
+
+    let revived = rig
+        .spaced
+        .client
+        .get_num(Subject::NumId(num_id))
+        .await?
+        .expect("num resolves after revival");
+    assert!(!revived.numout.spent, "num live again");
+    assert_eq!(revived.numout.script_pubkey, spk, "revived at the same spk");
+    println!("✓ revived with the same identity");
 
     Ok(())
 }

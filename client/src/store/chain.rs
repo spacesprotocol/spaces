@@ -11,10 +11,7 @@ use log::info;
 use spacedb::Hash;
 use spaces_nums::num_id::NumId;
 use spaces_nums::snumeric::SNumeric;
-use spaces_nums::{
-    Commitment, CommitmentKey, CommitmentTipKey, DelegatorKey, FullNumOut, NumOut, NumOutpointKey,
-    NumSource, RootAnchor,
-};
+use spaces_nums::{Commitment, CommitmentKey, CommitmentTipKey, DelegatorKey, FullNumOut, NumOut, NumOutpointKey, NumSource, RebindData, RebindKey, RootAnchor};
 use spaces_protocol::bitcoin::hashes::Hash as HashUtil;
 use spaces_protocol::bitcoin::{BlockHash, OutPoint};
 use spaces_protocol::constants::ChainAnchor;
@@ -136,6 +133,13 @@ impl NumSource for Chain {
             .db
             .get_snumeric(snum)
             .map_err(|e| spaces_protocol::errors::Error::IO(format!("get_num_id: {}", e)))
+    }
+
+    fn get_num_rebind(
+        &mut self,
+        key: &RebindKey,
+    ) -> spaces_protocol::errors::Result<Option<RebindData>> {
+        self.db.num.state.get_num_rebind(key)
     }
 }
 
@@ -353,8 +357,16 @@ impl Chain {
         self.db.num.state.insert(key, ptrout)
     }
 
-    pub(crate) fn insert_num_outpoint(&self, key: NumId, outpoint: EncodableOutpoint) {
-        self.db.num.state.insert_num_outpoint(key, outpoint)
+    pub(crate) fn insert_num_outpoint(&self, key: NumId, outpoint: OutPoint) {
+        self.db.num.state.insert_num_outpoint(key, outpoint.into())
+    }
+
+    pub(crate) fn insert_rebind(&self, key: RebindKey, rebind: RebindData) {
+        self.db.num.state.insert_rebind(key, rebind)
+    }
+
+    pub(crate) fn remove_rebind(&self, key: RebindKey) {
+        self.db.num.state.remove_rebind(key)
     }
 
     pub(crate) fn insert_num(&self, snum: &SNumeric, id: NumId) {
@@ -382,7 +394,7 @@ impl Chain {
     }
 
     pub fn remove_num_utxo(&mut self, outpoint: OutPoint) {
-        let key = OutpointKey::from_outpoint::<Sha256>(outpoint);
+        let key = NumOutpointKey::from_outpoint::<Sha256>(outpoint);
         self.db.num.state.remove(key)
     }
 

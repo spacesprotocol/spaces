@@ -7,7 +7,7 @@ use anyhow::{Result, anyhow};
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::de::Error as SerdeError;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use spaces_nums::{CommitmentKey, CommitmentTipKey, DelegatorKey, NumOutpointKey};
+use spaces_nums::{CommitmentKey, CommitmentTipKey, DelegatorKey, NumOutpointKey, RebindData, RebindKey};
 use spaces_protocol::{
     Bytes, Covenant, FullSpaceOut, RevokeReason, SpaceOut,
     bitcoin::{Amount, Block, BlockHash, OutPoint, Txid},
@@ -303,7 +303,7 @@ impl Client {
                         });
                     }
                 }
-                self.apply_ptrs_tx(chain, tx, ptrs_validated);
+                self.apply_nums_tx(chain, tx, ptrs_validated);
             }
         }
 
@@ -315,7 +315,7 @@ impl Client {
         Ok((spaces_meta, num_meta))
     }
 
-    fn apply_ptrs_tx(
+    fn apply_nums_tx(
         &self,
         state: &mut Chain,
         tx: &Transaction,
@@ -367,20 +367,47 @@ impl Client {
             state.insert_commitment(commitment_key, commitment_info.commitment);
         }
 
-        // Create ptrs
+
+
+        // Rebinds (revivals): consume the parked rebind and delete the
+        // tombstone. The revived num itself is in `creates`, whose identity
+        // write repoints the genesis slot.
+        for rebind in changeset.rebinds.into_iter() {
+            state.remove_num_utxo(rebind.prev_outpoint);
+            state.remove_rebind(rebind.key);
+        }
+
+        // Create nums
         for create in changeset.creates.into_iter() {
             let outpoint = OutPoint {
                 txid: changeset.txid,
                 vout: create.n as u32,
             };
 
-            // Num => Outpoint + Numeric => NumId
-            state.insert_num_outpoint(create.num.id, outpoint.into());
+            // Num => Outpoint
+            state.insert_num_outpoint(create.num.id, outpoint);
+            // Numeric => NumId
             state.insert_num(&create.num.name, create.num.id);
 
             // Outpoint => PtrOut
             let outpoint_key = NumOutpointKey::from_outpoint::<Sha256>(outpoint);
             state.insert_numout(outpoint_key, create);
+        }
+
+        // Unbind nums: overwrite the numout with the spent tombstone and park
+        // a rebind (derived from it) at the death spk's rebind slot. The
+        // identity slot is untouched.
+        for fno in changeset.unbinds.into_iter() {
+            let rebind_key = RebindKey::from_spk::<Sha256>(fno.numout.script_pubkey.clone());
+            state.insert_rebind(
+                rebind_key,
+                RebindData {
+                    prev_outpoint: fno.outpoint(),
+                    prev: fno.numout.num.clone(),
+                },
+            );
+            let outpoint_key = NumOutpointKey::from_outpoint::<Sha256>(fno.outpoint());
+            state.insert_numout(outpoint_key, fno.numout);
         }
     }
 
