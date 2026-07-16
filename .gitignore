@@ -10,3 +10,5 @@ setup-spaced-prod-env.sh
 setup-spaced-prod-vpn.sh
 setup-spaced-test-env.sh
 NOTES.md
+
+sign*

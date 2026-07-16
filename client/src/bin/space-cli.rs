@@ -7,7 +7,7 @@ use std::{
 };
 use std::str::FromStr;
 use anyhow::anyhow;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use colored::{Color, Colorize};
 use jsonrpsee::{
     core::{client::Error, ClientError},
@@ -445,12 +445,17 @@ enum Commands {
     /// still in auction with a winning bid
     #[command(name = "listspaces")]
     ListSpaces,
-    /// List nums. Defaults to owned, use --kind external for nums created but not owned.
-    /// With --spk, lists matching nums from both owned and external (kind is ignored).
-    #[command(name = "listnums")]
+    /// List nums in the wallet.
+    ///
+    /// With `--spk`, lists matching nums from both owned and external (`--kind` is ignored).
+    #[command(
+        name = "listnums",
+        override_usage = "space-cli listnums [--kind owned|external] [--spk <HEX>]"
+    )]
     ListNums {
-        #[arg(long, default_value = "owned")]
-        kind: String,
+        /// Nums to list: `owned` (wallet-held outputs) or `external` (created but not owned)
+        #[arg(long, value_enum, default_value_t = ListNumsKind::Owned)]
+        kind: ListNumsKind,
         /// Hex-encoded script_pubkey; only nums whose output script matches (owned and external)
         #[arg(long, value_name = "HEX")]
         spk: Option<String>,
@@ -478,6 +483,14 @@ enum Commands {
         #[arg(value_enum, default_value = "coin")]
         kind: AddressKind,
     },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ListNumsKind {
+    /// Nums the wallet currently owns
+    Owned,
+    /// Nums created by the wallet but not currently owned
+    External,
 }
 
 struct SpaceCli {
@@ -956,7 +969,10 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
                 nums.dedup_by_key(|e| (e.txid, e.numout.n));
                 print_list_nums_response(ListNumsResponse { nums }, cli.format);
             } else {
-                let kind = if kind == "owned" { None } else { Some(kind) };
+                let kind = match kind {
+                    ListNumsKind::Owned => None,
+                    ListNumsKind::External => Some("external".to_string()),
+                };
                 let nums = cli.client.wallet_list_nums(&cli.wallet, kind).await?;
                 print_list_nums_response(nums, cli.format);
             }
