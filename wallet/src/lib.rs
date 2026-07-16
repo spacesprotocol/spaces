@@ -1,24 +1,25 @@
-use anyhow::{Context, anyhow};
-use bdk_wallet::chain::keychain_txout::KeychainTxOutIndex;
+use std::{collections::BTreeMap, fmt, fmt::Debug, fs, ops::Mul, path::PathBuf, str::FromStr};
+use anyhow::{anyhow, Context};
 use bdk_wallet::{
-    AddressInfo, KeychainKind, LocalOutput, PersistedWallet, SignOptions, TxBuilder, Update,
-    Wallet, WalletTx, WeightedUtxo, chain,
+    chain,
     chain::{
-        BlockId, ChainPosition, Indexer,
         local_chain::{CannotConnectError, LocalChain},
         tx_graph::CalculateFeeError,
+        BlockId, ChainPosition, Indexer,
     },
     coin_selection::{CoinSelectionAlgorithm, CoinSelectionResult, Excess, InsufficientFunds},
     keys::DescriptorSecretKey,
     rusqlite::Connection,
     tx_builder::TxOrdering,
+    AddressInfo, KeychainKind, LocalOutput, PersistedWallet, SignOptions, TxBuilder, Update,
+    Wallet, WalletTx, WeightedUtxo,
 };
+use bdk_wallet::chain::keychain_txout::KeychainTxOutIndex;
+use borsh::{BorshDeserialize, BorshSerialize, io};
 use bitcoin::{
-    Amount, Block, BlockHash, FeeRate, Network, OutPoint, Psbt, Sequence, TapLeafHash,
-    TapSighashType, Transaction, TxIn, TxOut, Txid, Weight, Witness,
     absolute::{Height, LockTime},
     bip32::ChildNumber,
-    key::{TapTweak, TweakedKeypair, rand::RngCore},
+    key::{rand::RngCore, TapTweak, TweakedKeypair},
     psbt,
     psbt::raw::ProprietaryKey,
     script,
@@ -26,36 +27,34 @@ use bitcoin::{
     taproot,
     taproot::LeafVersion,
     transaction::Version,
+    Amount, Block, BlockHash, FeeRate, Network, OutPoint, Psbt, Sequence, TapLeafHash,
+    TapSighashType, Transaction, TxIn, TxOut, Txid, Weight, Witness,
 };
-use borsh::{BorshDeserialize, BorshSerialize, io};
-use secp256k1::{Message, schnorr, schnorr::Signature};
-use serde::{Deserialize, Deserializer, Serialize, Serializer, ser::SerializeSeq};
-use spaces_nums::snumeric::SNumeric;
-use spaces_nums::{
-    NumSource,
-    num_id::{NUM_HRP, NumId},
-};
+use secp256k1::{schnorr, schnorr::Signature, Message};
+use serde::{ser::SerializeSeq, Deserialize, Deserializer, Serialize, Serializer};
 use spaces_protocol::{
-    Covenant, FullSpaceOut, Space,
     bitcoin::{
-        Address, ScriptBuf, XOnlyPublicKey,
         constants::genesis_block,
-        key::{UntweakedKeypair, rand},
+        key::{rand, UntweakedKeypair},
         opcodes,
         taproot::{ControlBlock, TaprootBuilder},
+        Address, ScriptBuf, XOnlyPublicKey,
     },
     constants::{BID_PSBT_INPUT_SEQUENCE, BID_PSBT_TX_LOCK_TIME},
     hasher::{KeyHasher, SpaceKey},
-    prepare::{SpacesSource, TrackableOutput, is_magic_lock_time},
+    prepare::{is_magic_lock_time, SpacesSource, TrackableOutput},
+    sname::{NameLike, SName},
     slabel::SLabel,
+    Covenant, FullSpaceOut, Space,
 };
-use std::{collections::BTreeMap, fmt, fmt::Debug, fs, ops::Mul, path::PathBuf, str::FromStr};
+use spaces_nums::{NumSource, num_id::{NumId, NUM_HRP}};
+use spaces_nums::snumeric::SNumeric;
 
 use crate::{
     address::SpaceAddress,
     builder::{
-        SpacesAwareCoinSelection, is_connector_dust, is_space_dust, space_dust,
-        tap_key_spend_weight,
+        is_connector_dust, is_space_dust, space_dust, tap_key_spend_weight,
+        SpacesAwareCoinSelection,
     },
     nostr::NostrEvent,
     tx_event::{TxEvent, TxEventKind, TxRecord},
@@ -86,11 +85,15 @@ pub struct Balance {
     pub details: BalanceDetails,
 }
 
-/// A space name (@bitcoin), numeric (#800000-3), or num id (num1...)
+/// A space name (@bitcoin), numeric (#800000-3), num id (num1...), multi-label handle (sub@space),
+/// or a wildcard pattern containing `*`/`?` for fallback search.
 #[derive(Debug, Clone)]
 pub enum Subject {
     Label(SLabel),
     NumId(NumId),
+    Handle(SName),
+    /// Wildcard pattern for `getfallback` searches (e.g. `*@mad`, `@*`, `*@*`).
+    HandlePattern(String),
 }
 
 impl From<SLabel> for Subject {
@@ -105,11 +108,19 @@ impl From<NumId> for Subject {
     }
 }
 
+impl From<SName> for Subject {
+    fn from(name: SName) -> Self {
+        Subject::Handle(name)
+    }
+}
+
 impl fmt::Display for Subject {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Subject::Label(label) => write!(f, "{}", label),
             Subject::NumId(id) => write!(f, "{}", id),
+            Subject::Handle(name) => write!(f, "{}", name),
+            Subject::HandlePattern(pat) => write!(f, "{}", pat),
         }
     }
 }
@@ -118,20 +129,38 @@ impl FromStr for Subject {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s.starts_with(&format!("{}1", NUM_HRP)) {
-            NumId::from_str(s)
-                .map(Subject::NumId)
-                .map_err(|e| format!("invalid num id: {}", e))
-        } else {
-            let normalized = if s.starts_with('#') || s.starts_with('@') {
-                s.to_ascii_lowercase()
-            } else {
-                format!("@{}", s.to_ascii_lowercase())
-            };
-            SLabel::from_str(&normalized)
-                .map(Subject::Label)
-                .map_err(|e| format!("invalid space or numeric: {}", e))
+        if s.contains('*') || s.contains('?') {
+            let lower = s.to_ascii_lowercase();
+            return Ok(Subject::HandlePattern(lower));
         }
+
+        if s.starts_with(&format!("{}1", NUM_HRP)) {
+            return NumId::from_str(s)
+                .map(Subject::NumId)
+                .map_err(|e| format!("invalid num id: {}", e));
+        }
+
+        let lower = s.to_ascii_lowercase();
+        if let Ok(name) = SName::from_str(&lower) {
+            if name.label_count() >= 2 {
+                return Ok(Subject::Handle(name));
+            }
+            if name.label_count() == 1 {
+                let label = name
+                    .space()
+                    .ok_or_else(|| "invalid space name".to_string())?;
+                return Ok(Subject::Label(label));
+            }
+        }
+
+        let normalized = if s.starts_with('#') || s.starts_with('@') {
+            lower
+        } else {
+            format!("@{}", lower)
+        };
+        SLabel::from_str(&normalized)
+            .map(Subject::Label)
+            .map_err(|e| format!("invalid space or numeric: {}", e))
     }
 }
 
@@ -140,6 +169,8 @@ impl Serialize for Subject {
         match self {
             Subject::Label(label) => serializer.serialize_str(&label.to_string()),
             Subject::NumId(id) => serializer.serialize_str(&id.to_string()),
+            Subject::Handle(name) => serializer.serialize_str(&name.to_string()),
+            Subject::HandlePattern(pat) => serializer.serialize_str(pat),
         }
     }
 }
@@ -282,11 +313,11 @@ impl SpacesWallet {
                 config.space_descriptors.external.clone(),
                 config.space_descriptors.internal.clone(),
             )
-            .lookahead(50)
-            .network(config.network)
-            .genesis_hash(genesis_hash)
-            .create_wallet(&mut conn)
-            .context("could not create wallet")?
+                .lookahead(50)
+                .network(config.network)
+                .genesis_hash(genesis_hash)
+                .create_wallet(&mut conn)
+                .context("could not create wallet")?
         };
 
         let tx = conn
@@ -357,7 +388,7 @@ impl SpacesWallet {
         })
     }
 
-    pub fn transactions(&self) -> impl Iterator<Item = WalletTx<'_>> + '_ {
+    pub fn transactions(&self) -> impl Iterator<Item=WalletTx<'_>> + '_ {
         self.internal
             .transactions()
             .filter(|tx| !is_revert_tx(tx) && self.internal.spk_index().is_tx_relevant(&tx.tx_node))
@@ -404,8 +435,8 @@ impl SpacesWallet {
     ) -> anyhow::Result<TxBuilder<'_, SpacesAwareCoinSelection>> {
         let events = self.get_tx_events(txid)?;
         for event in events {
-            if event.kind == TxEventKind::Bid {
-                match self.get_tx(txid) {
+            match event.kind {
+                TxEventKind::Bid => match self.get_tx(txid) {
                     Some(tx) => {
                         if !tx.chain_position.is_confirmed() {
                             return Err(anyhow!(
@@ -415,7 +446,8 @@ impl SpacesWallet {
                         }
                     }
                     _ => continue,
-                }
+                },
+                _ => {}
             }
         }
 
@@ -454,11 +486,11 @@ impl SpacesWallet {
         self.internal.is_mine(script)
     }
 
-    pub fn list_unspent(&self) -> impl Iterator<Item = LocalOutput> + '_ {
+    pub fn list_unspent(&self) -> impl Iterator<Item=LocalOutput> + '_ {
         self.internal.list_unspent()
     }
 
-    pub fn list_output(&self) -> impl Iterator<Item = LocalOutput> + '_ {
+    pub fn list_output(&self) -> impl Iterator<Item=LocalOutput> + '_ {
         self.internal.list_output()
     }
 
@@ -481,8 +513,7 @@ impl SpacesWallet {
         let outpoint = match &subject {
             Subject::Label(label) if label.is_numeric() => {
                 let numeric: SNumeric = label.clone().try_into().unwrap();
-                let id = src
-                    .get_num_id(&numeric)?
+                let id = src.get_num_id(&numeric)?
                     .ok_or_else(|| anyhow::anyhow!("Numeric '{}' not found", numeric))?;
                 src.get_num_outpoint_by_id(&id)?
                     .ok_or_else(|| anyhow::anyhow!("Num id not found"))?
@@ -495,19 +526,21 @@ impl SpacesWallet {
                 src.get_space_outpoint(&space_key)?
                     .ok_or_else(|| anyhow::anyhow!("Space not found"))?
             }
-            Subject::NumId(id) => src
-                .get_num_outpoint_by_id(id)?
-                .ok_or_else(|| anyhow::anyhow!("Num id not found"))?,
+            Subject::NumId(id) => {
+                src.get_num_outpoint_by_id(id)?
+                    .ok_or_else(|| anyhow::anyhow!("Num id not found"))?
+            }
+            Subject::Handle(_) | Subject::HandlePattern(_) => {
+                return Err(anyhow::anyhow!(
+                    "handle subjects are not supported for this operation"
+                ));
+            }
         };
 
         // We use list_output instead of get_utxo because the output might
         // be spent in a pending tx, so signatures are still valid until confirmed.
-        let utxo = self
-            .internal
-            .list_output()
-            .find(|o| o.outpoint == outpoint)
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("Not owned by wallet"))?;
+        let utxo = self.internal.list_output().find(|o| o.outpoint == outpoint)
+            .clone().ok_or_else(|| anyhow::anyhow!("Not owned by wallet"))?;
 
         let keypair = self
             .get_taproot_keypair(utxo.keychain, utxo.derivation_index)
@@ -525,14 +558,11 @@ impl SpacesWallet {
         let script_pubkey = match &subject {
             Subject::Label(label) if label.is_numeric() => {
                 let numeric: SNumeric = label.clone().try_into().unwrap();
-                let id = src
-                    .get_num_id(&numeric)?
+                let id = src.get_num_id(&numeric)?
                     .ok_or_else(|| anyhow::anyhow!("Numeric '{}' not found", numeric))?;
-                let outpoint = src
-                    .get_num_outpoint_by_id(&id)?
+                let outpoint = src.get_num_outpoint_by_id(&id)?
                     .ok_or_else(|| anyhow::anyhow!("Num id not found"))?;
-                let numout = src
-                    .get_numout(&outpoint)?
+                let numout = src.get_numout(&outpoint)?
                     .ok_or_else(|| anyhow::anyhow!("Num output not found"))?;
                 numout.script_pubkey
             }
@@ -541,22 +571,23 @@ impl SpacesWallet {
                     return Err(anyhow::anyhow!("Space tag does not match specified space"));
                 }
                 let space_key = SpaceKey::from(H::hash(label.as_ref()));
-                let outpoint = src
-                    .get_space_outpoint(&space_key)?
+                let outpoint = src.get_space_outpoint(&space_key)?
                     .ok_or_else(|| anyhow::anyhow!("Space not found"))?;
-                let spaceout = src
-                    .get_spaceout(&outpoint)?
+                let spaceout = src.get_spaceout(&outpoint)?
                     .ok_or_else(|| anyhow::anyhow!("Space not found"))?;
                 spaceout.script_pubkey
             }
             Subject::NumId(id) => {
-                let outpoint = src
-                    .get_num_outpoint_by_id(id)?
+                let outpoint = src.get_num_outpoint_by_id(id)?
                     .ok_or_else(|| anyhow::anyhow!("Num id not found"))?;
-                let numout = src
-                    .get_numout(&outpoint)?
+                let numout = src.get_numout(&outpoint)?
                     .ok_or_else(|| anyhow::anyhow!("Num output not found"))?;
                 numout.script_pubkey
+            }
+            Subject::Handle(_) | Subject::HandlePattern(_) => {
+                return Err(anyhow::anyhow!(
+                    "handle subjects are not supported for this operation"
+                ));
             }
         };
 
@@ -594,13 +625,12 @@ impl SpacesWallet {
         subject: Subject,
         message: &[u8],
     ) -> anyhow::Result<schnorr::Signature> {
-        use bitcoin::hashes::{Hash, HashEngine, sha256};
+        use bitcoin::hashes::{sha256, Hash, HashEngine};
 
         let outpoint = match &subject {
             Subject::Label(label) if label.is_numeric() => {
                 let numeric: SNumeric = label.clone().try_into().unwrap();
-                let id = src
-                    .get_num_id(&numeric)?
+                let id = src.get_num_id(&numeric)?
                     .ok_or_else(|| anyhow::anyhow!("Numeric '{}' not found", numeric))?;
                 src.get_num_outpoint_by_id(&id)?
                     .ok_or_else(|| anyhow::anyhow!("Num id not found"))?
@@ -610,19 +640,21 @@ impl SpacesWallet {
                 src.get_space_outpoint(&space_key)?
                     .ok_or_else(|| anyhow::anyhow!("Space not found"))?
             }
-            Subject::NumId(id) => src
-                .get_num_outpoint_by_id(id)?
-                .ok_or_else(|| anyhow::anyhow!("Num id not found"))?,
+            Subject::NumId(id) => {
+                src.get_num_outpoint_by_id(id)?
+                    .ok_or_else(|| anyhow::anyhow!("Num id not found"))?
+            }
+            Subject::Handle(_) | Subject::HandlePattern(_) => {
+                return Err(anyhow::anyhow!(
+                    "handle subjects are not supported for this operation"
+                ));
+            }
         };
 
         // We use list_output instead of get_utxo because the output might
         // be spent in a pending tx, so signatures are still valid until confirmed.
-        let utxo = self
-            .internal
-            .list_output()
-            .find(|o| o.outpoint == outpoint)
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("Not owned by wallet"))?;
+        let utxo = self.internal.list_output().find(|o| o.outpoint == outpoint)
+            .clone().ok_or_else(|| anyhow::anyhow!("Not owned by wallet"))?;
 
         let keypair = self
             .get_taproot_keypair(utxo.keychain, utxo.derivation_index)
@@ -646,40 +678,38 @@ impl SpacesWallet {
         message: &[u8],
         signature: &schnorr::Signature,
     ) -> anyhow::Result<()> {
-        use bitcoin::hashes::{Hash, HashEngine, sha256};
+        use bitcoin::hashes::{sha256, Hash, HashEngine};
 
         let script_pubkey = match &subject {
             Subject::Label(label) if label.is_numeric() => {
                 let numeric: SNumeric = label.clone().try_into().unwrap();
-                let id = src
-                    .get_num_id(&numeric)?
+                let id = src.get_num_id(&numeric)?
                     .ok_or_else(|| anyhow::anyhow!("Numeric '{}' not found", numeric))?;
-                let outpoint = src
-                    .get_num_outpoint_by_id(&id)?
+                let outpoint = src.get_num_outpoint_by_id(&id)?
                     .ok_or_else(|| anyhow::anyhow!("Num id not found"))?;
-                let numout = src
-                    .get_numout(&outpoint)?
+                let numout = src.get_numout(&outpoint)?
                     .ok_or_else(|| anyhow::anyhow!("Num output not found"))?;
                 numout.script_pubkey
             }
             Subject::Label(label) => {
                 let space_key = SpaceKey::from(H::hash(label.as_ref()));
-                let outpoint = src
-                    .get_space_outpoint(&space_key)?
+                let outpoint = src.get_space_outpoint(&space_key)?
                     .ok_or_else(|| anyhow::anyhow!("Space not found"))?;
-                let spaceout = src
-                    .get_spaceout(&outpoint)?
+                let spaceout = src.get_spaceout(&outpoint)?
                     .ok_or_else(|| anyhow::anyhow!("Space not found"))?;
                 spaceout.script_pubkey
             }
             Subject::NumId(id) => {
-                let outpoint = src
-                    .get_num_outpoint_by_id(id)?
+                let outpoint = src.get_num_outpoint_by_id(id)?
                     .ok_or_else(|| anyhow::anyhow!("Num id not found"))?;
-                let numout = src
-                    .get_numout(&outpoint)?
+                let numout = src.get_numout(&outpoint)?
                     .ok_or_else(|| anyhow::anyhow!("Num output not found"))?;
                 numout.script_pubkey
+            }
+            Subject::Handle(_) | Subject::HandlePattern(_) => {
+                return Err(anyhow::anyhow!(
+                    "handle subjects are not supported for this operation"
+                ));
             }
         };
 
@@ -805,28 +835,28 @@ impl SpacesWallet {
     pub fn rebuild(self) -> anyhow::Result<Self> {
         let config = self.config;
         fs::remove_file(config.data_dir.join("wallet.db"))?;
-        SpacesWallet::new(config)
+        Ok(SpacesWallet::new(config)?)
     }
 
     pub fn get_info(&self) -> WalletInfo {
-        let descriptors = vec![
-            DescriptorInfo {
-                descriptor: self
-                    .internal
-                    .public_descriptor(KeychainKind::External)
-                    .to_string(),
-                internal: false,
-                spaces: true,
-            },
-            DescriptorInfo {
-                descriptor: self
-                    .internal
-                    .public_descriptor(KeychainKind::Internal)
-                    .to_string(),
-                internal: true,
-                spaces: true,
-            },
-        ];
+        let mut descriptors = Vec::with_capacity(2);
+
+        descriptors.push(DescriptorInfo {
+            descriptor: self
+                .internal
+                .public_descriptor(KeychainKind::External)
+                .to_string(),
+            internal: false,
+            spaces: true,
+        });
+        descriptors.push(DescriptorInfo {
+            descriptor: self
+                .internal
+                .public_descriptor(KeychainKind::Internal)
+                .to_string(),
+            internal: true,
+            spaces: true,
+        });
 
         WalletInfo {
             label: self.config.name.clone(),
@@ -854,12 +884,16 @@ impl SpacesWallet {
         block_id: BlockId,
     ) -> anyhow::Result<()> {
         self.internal
-            .apply_block_connected_to(block, height, block_id)?;
+            .apply_block_connected_to(&block, height, block_id)?;
         Ok(())
     }
 
-    pub fn apply_update(&mut self, update: impl Into<Update>) -> Result<(), CannotConnectError> {
-        self.internal.apply_update(update)
+    pub fn apply_update(
+        &mut self,
+        update: impl Into<Update>,
+    ) -> Result<(), CannotConnectError> {
+        self.internal
+            .apply_update(update)
     }
 
     pub fn apply_unconfirmed_tx(&mut self, tx: Transaction, seen: u64) {
@@ -892,7 +926,7 @@ impl SpacesWallet {
                 event.previous_spaceout,
                 event.details,
             )
-            .context("could not insert tx event into wallet db")?;
+                .context("could not insert tx event into wallet db")?;
         }
         db_tx
             .commit()
@@ -986,7 +1020,7 @@ impl SpacesWallet {
         listing: &Listing,
         fee_rate: FeeRate,
     ) -> anyhow::Result<Transaction> {
-        let (seller, spaceout) = Self::verify_listing::<H>(src, listing)?;
+        let (seller, spaceout) = Self::verify_listing::<H>(src, &listing)?;
 
         let mut witness = Witness::new();
         witness.push(
@@ -994,7 +1028,7 @@ impl SpacesWallet {
                 signature: listing.signature,
                 sighash_type: TapSighashType::SinglePlusAnyoneCanPay,
             }
-            .to_vec(),
+                .to_vec(),
         );
 
         let funded_psbt = {
@@ -1045,7 +1079,7 @@ impl SpacesWallet {
                 return Err(anyhow::anyhow!(
                     "Unknown space {} - no outpoint found",
                     listing.space
-                ));
+                ))
             }
             Some(outpoint) => outpoint,
         };
@@ -1066,7 +1100,7 @@ impl SpacesWallet {
         }
 
         let recipient = Self::verify_listing_signature(
-            listing,
+            &listing,
             outpoint,
             TxOut {
                 value: spaceout.value,
@@ -1130,7 +1164,7 @@ impl SpacesWallet {
         space: &str,
         asking_price: Amount,
     ) -> anyhow::Result<Listing> {
-        let label = SLabel::from_str(space)?;
+        let label = SLabel::from_str(&space)?;
         let spacehash = SpaceKey::from(H::hash(label.as_ref()));
         let space_outpoint = match src.get_space_outpoint(&spacehash)? {
             None => return Err(anyhow::anyhow!("Space not found")),
@@ -1152,7 +1186,7 @@ impl SpacesWallet {
                 return Err(anyhow::anyhow!(
                     "Wallet does not own a space with outpoint {}",
                     space_outpoint
-                ));
+                ))
             }
             Some(utxo) => utxo,
         };
@@ -1345,10 +1379,11 @@ impl SpacesWallet {
                 );
             }
 
-            if input.final_script_witness.is_none()
-                && let Some(witness_utxo) = input.witness_utxo.as_ref()
-            {
-                if self.internal.is_mine(witness_utxo.script_pubkey.clone()) {
+            if input.final_script_witness.is_none() && input.witness_utxo.is_some() {
+                if self
+                    .internal
+                    .is_mine(input.witness_utxo.as_ref().unwrap().script_pubkey.clone())
+                {
                     input
                         .proprietary
                         .insert(Self::spaces_signer("tbs"), Vec::new());
@@ -1358,7 +1393,10 @@ impl SpacesWallet {
 
                 let previous_output = psbt.unsigned_tx.input[input_index].previous_output;
                 let signing_info = self
-                    .get_signing_info(previous_output, &witness_utxo.script_pubkey)
+                    .get_signing_info(
+                        previous_output,
+                        &input.witness_utxo.as_ref().unwrap().script_pubkey,
+                    )
                     .context("could not retrieve signing info for script")?;
                 if let Some(info) = signing_info {
                     input
@@ -1405,7 +1443,7 @@ impl SpacesWallet {
         }
 
         let mut prevouts = Vec::new();
-        let extras = extra_prevouts.unwrap_or_default();
+        let extras = extra_prevouts.unwrap_or_else(|| BTreeMap::new());
 
         for input in tx.input.iter() {
             if let Some(prevout) = extras.get(&input.previous_output) {
@@ -1447,10 +1485,10 @@ impl SpacesWallet {
                     signature,
                     sighash_type,
                 }
-                .to_vec(),
+                    .to_vec(),
             );
             witness.push(&signing_info.script);
-            witness.push(signing_info.control_block.serialize());
+            witness.push(&signing_info.control_block.serialize());
         }
 
         // Sign inputs with externally-provided secret keys (taproot key-spend)
@@ -1570,7 +1608,7 @@ impl SpaceScriptSigningInfo {
         let key_pair = UntweakedKeypair::new(&secp256k1, &mut rand::thread_rng());
         let (public_key, _) = XOnlyPublicKey::from_keypair(&key_pair);
         let script = nop_script
-            .push_slice(public_key.serialize())
+            .push_slice(&public_key.serialize())
             .push_opcode(opcodes::all::OP_CHECKSIG)
             .into_script();
 
@@ -1747,5 +1785,66 @@ impl<'de> Deserialize<'de> for SpaceScriptSigningInfo {
         }
 
         deserializer.deserialize_seq(OpenSigningInfoVisitor)
+    }
+}
+
+#[cfg(test)]
+mod subject_tests {
+    use super::Subject;
+    use spaces_protocol::sname::NameLike;
+    use std::str::FromStr;
+
+    #[test]
+    fn subject_from_str_parses_multi_label_as_handle() {
+        let s = Subject::from_str("dictionary@mad").expect("parse");
+        match s {
+            Subject::Handle(n) => assert!(n.label_count() >= 2),
+            _ => panic!("expected Handle"),
+        }
+    }
+
+    #[test]
+    fn subject_from_str_plain_space_still_label() {
+        let s = Subject::from_str("mad").expect("parse");
+        match s {
+            Subject::Label(l) => assert_eq!(l.to_string(), "@mad"),
+            _ => panic!("expected Label"),
+        }
+    }
+
+    #[test]
+    fn subject_from_str_wildcard_star_at_star() {
+        let s = Subject::from_str("*@*").expect("parse");
+        match s {
+            Subject::HandlePattern(p) => assert_eq!(p, "*@*"),
+            _ => panic!("expected HandlePattern, got {:?}", s),
+        }
+    }
+
+    #[test]
+    fn subject_from_str_wildcard_star_at_name() {
+        let s = Subject::from_str("*@mad").expect("parse");
+        match s {
+            Subject::HandlePattern(p) => assert_eq!(p, "*@mad"),
+            _ => panic!("expected HandlePattern, got {:?}", s),
+        }
+    }
+
+    #[test]
+    fn subject_from_str_wildcard_at_star() {
+        let s = Subject::from_str("@*").expect("parse");
+        match s {
+            Subject::HandlePattern(p) => assert_eq!(p, "@*"),
+            _ => panic!("expected HandlePattern, got {:?}", s),
+        }
+    }
+
+    #[test]
+    fn subject_from_str_wildcard_question() {
+        let s = Subject::from_str("d?ct@mad").expect("parse");
+        match s {
+            Subject::HandlePattern(p) => assert_eq!(p, "d?ct@mad"),
+            _ => panic!("expected HandlePattern, got {:?}", s),
+        }
     }
 }

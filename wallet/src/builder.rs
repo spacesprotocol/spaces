@@ -455,7 +455,6 @@ impl Builder {
             if !coin_transfers.is_empty() {
                 for coin in coin_transfers {
                     builder.add_send(coin)?;
-                    vout += 1;
                 }
             }
 

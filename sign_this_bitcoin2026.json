@@ -1,0 +1,21 @@
+{
+    "created_at": 1776378436,
+    "kind": 10002,
+    "tags": [
+        [
+            "d",
+            "bitcoin2026"
+        ],
+        [
+            "r",
+            "wss://relay.primal.net"
+        ],
+        [
+            "r",
+            "wss://relay.damus.io"
+        ]
+    ],
+    "content": "Bitcoin Conference 2026 in Vegas Workshop",
+    "space_name": "@bitcoin2026",
+    "sig": null
+}

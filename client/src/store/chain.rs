@@ -1,30 +1,25 @@
-use crate::client::{BlockMeta, NumBlockMeta};
-use crate::rpc::{BlockMetaWithHash, NumBlockMetaWithHash};
-use crate::store::index::SqliteIndex;
-use crate::store::ptrs::{NumChainState, NumLiveStore, NumStore};
-use crate::store::spaces::{
-    RolloutEntry, RolloutIterator, SpLiveStore, SpStore, SpStoreUtils, SpacesState,
-};
-use crate::store::{EncodableOutpoint, ReadTx, Sha256};
-use anyhow::{Context, anyhow};
+use std::path::Path;
+use std::sync::Arc;
+use anyhow::{anyhow, Context};
 use log::info;
 use spacedb::Hash;
-use spaces_nums::num_id::NumId;
-use spaces_nums::snumeric::SNumeric;
-use spaces_nums::{
-    Commitment, CommitmentKey, CommitmentTipKey, DelegatorKey, FullNumOut, NumOut, NumOutpointKey,
-    NumSource, RootAnchor,
-};
+use spaces_protocol::bitcoin::{BlockHash, OutPoint, Txid};
 use spaces_protocol::bitcoin::hashes::Hash as HashUtil;
-use spaces_protocol::bitcoin::{BlockHash, OutPoint};
 use spaces_protocol::constants::ChainAnchor;
 use spaces_protocol::hasher::{BidKey, OutpointKey, SpaceKey};
 use spaces_protocol::prepare::SpacesSource;
-use spaces_protocol::slabel::SLabel;
 use spaces_protocol::{FullSpaceOut, SpaceOut};
+use spaces_protocol::slabel::SLabel;
+use spaces_nums::{Commitment, CommitmentKey, FullNumOut, NumOut, NumSource, CommitmentTipKey, DelegatorKey, NumOutpointKey, RootAnchor};
+use spaces_nums::num_id::NumId;
+use spaces_nums::snumeric::SNumeric;
 use spaces_wallet::bitcoin::Network;
-use std::path::Path;
-use std::sync::Arc;
+use crate::client::{BlockMeta, NumBlockMeta};
+use crate::rpc::{BlockMetaWithHash, NumBlockMetaWithHash};
+use crate::store::{EncodableOutpoint, ReadTx, Sha256};
+use crate::store::index::SqliteIndex;
+use crate::store::ptrs::{NumChainState, NumLiveStore, NumStore};
+use crate::store::spaces::{RolloutEntry, RolloutIterator, SpLiveStore, SpStore, SpStoreUtils, SpacesState};
 
 pub const ROOT_ANCHORS_COUNT: u32 = 120;
 pub const COMMIT_BLOCK_INTERVAL: u32 = 36;
@@ -39,9 +34,10 @@ macro_rules! const_assert {
 }
 
 const_assert!(
-    spaces_protocol::constants::ROLLOUT_BLOCK_INTERVAL.is_multiple_of(COMMIT_BLOCK_INTERVAL),
+    spaces_protocol::constants::ROLLOUT_BLOCK_INTERVAL % COMMIT_BLOCK_INTERVAL == 0,
     "commit and rollout intervals must be aligned"
 );
+
 
 pub struct CachedSnapshot {
     pub height: u32,
@@ -80,98 +76,92 @@ pub struct LiveIndex {
 }
 
 impl SpacesSource for Chain {
-    fn get_space_outpoint(
-        &mut self,
-        space_hash: &SpaceKey,
-    ) -> spaces_protocol::errors::Result<Option<OutPoint>> {
+    fn get_space_outpoint(&mut self, space_hash: &SpaceKey) -> spaces_protocol::errors::Result<Option<OutPoint>> {
         self.db.sp.state.get_space_outpoint(space_hash)
     }
 
-    fn get_spaceout(
-        &mut self,
-        outpoint: &OutPoint,
-    ) -> spaces_protocol::errors::Result<Option<SpaceOut>> {
+    fn get_spaceout(&mut self, outpoint: &OutPoint) -> spaces_protocol::errors::Result<Option<SpaceOut>> {
         self.db.sp.state.get_spaceout(outpoint)
     }
 }
 
 impl NumSource for Chain {
-    fn get_num_outpoint_by_id(
-        &mut self,
-        space_hash: &NumId,
-    ) -> spaces_protocol::errors::Result<Option<OutPoint>> {
+    fn get_num_outpoint_by_id(&mut self, space_hash: &NumId) -> spaces_protocol::errors::Result<Option<OutPoint>> {
         self.db.num.state.get_num_outpoint_by_id(space_hash)
     }
 
-    fn get_commitment(
-        &mut self,
-        key: &CommitmentKey,
-    ) -> spaces_protocol::errors::Result<Option<Commitment>> {
+    fn get_commitment(&mut self, key: &CommitmentKey) -> spaces_protocol::errors::Result<Option<Commitment>> {
         self.db.num.state.get_commitment(key)
     }
 
-    fn get_delegator(
-        &mut self,
-        key: &DelegatorKey,
-    ) -> spaces_protocol::errors::Result<Option<SLabel>> {
+    fn get_delegator(&mut self, key: &DelegatorKey) -> spaces_protocol::errors::Result<Option<SLabel>> {
         self.db.num.state.get_delegator(key)
     }
 
-    fn get_commitments_tip(
-        &mut self,
-        key: &CommitmentTipKey,
-    ) -> spaces_protocol::errors::Result<Option<Hash>> {
+    fn get_commitments_tip(&mut self, key: &CommitmentTipKey) -> spaces_protocol::errors::Result<Option<Hash>> {
         self.db.num.state.get_commitments_tip(key)
     }
 
-    fn get_numout(
-        &mut self,
-        outpoint: &OutPoint,
-    ) -> spaces_protocol::errors::Result<Option<NumOut>> {
+    fn get_numout(&mut self, outpoint: &OutPoint) -> spaces_protocol::errors::Result<Option<NumOut>> {
         self.db.num.state.get_numout(outpoint)
     }
 
     fn get_num_id(&mut self, snum: &SNumeric) -> spaces_protocol::errors::Result<Option<NumId>> {
-        self.idx
-            .db
-            .get_snumeric(snum)
-            .map_err(|e| spaces_protocol::errors::Error::IO(format!("get_num_id: {}", e)))
+        self.idx.db.get_snumeric(snum).map_err(|e| {
+            spaces_protocol::errors::Error::IO(format!("get_num_id: {}", e))
+        })
     }
 }
 
 impl Chain {
-    pub fn get_space_info(
-        &mut self,
-        space_hash: &SpaceKey,
-    ) -> anyhow::Result<Option<FullSpaceOut>> {
+    pub fn get_space_info(&mut self, space_hash: &SpaceKey) -> anyhow::Result<Option<FullSpaceOut>> {
         self.db.sp.state.get_space_info(space_hash)
+    }
+
+    pub fn get_all_spaces(&mut self) -> anyhow::Result<Vec<FullSpaceOut>> {
+        self.db.sp.state.get_all_space_infos()
     }
 
     pub fn get_num_info(&mut self, key: &NumId) -> anyhow::Result<Option<FullNumOut>> {
         self.db.num.state.get_num_info(key)
     }
 
+    /// Live num outputs whose locking script matches `script_pubkey` bytes (chain-wide, no wallet).
+    pub fn list_live_nums_with_script_pubkey(
+        &mut self,
+        script_pubkey: &[u8],
+    ) -> anyhow::Result<Vec<(Txid, NumOut, Option<SLabel>)>> {
+        use std::collections::HashSet;
+        let ids: HashSet<NumId> = self.idx.db.collect_distinct_num_ids()?;
+        let mut nums = Vec::new();
+        for id in ids {
+            let Some(fpo) = self.get_num_info(&id)? else {
+                continue;
+            };
+            if fpo.numout.script_pubkey.as_bytes() != script_pubkey {
+                continue;
+            }
+            let rsk = DelegatorKey::from_id::<Sha256>(fpo.numout.num.id);
+            let delegating_for =
+                NumSource::get_delegator(self, &rsk).map_err(|e| anyhow!("get_delegator: {}", e))?;
+            nums.push((fpo.txid, fpo.numout, delegating_for));
+        }
+        nums.sort_by_key(|(txid, n, _)| (*txid, n.n));
+        nums.dedup_by_key(|(txid, n, _)| (*txid, n.n));
+        Ok(nums)
+    }
+
     pub fn snapshot_at(&mut self, target_height: u32) -> anyhow::Result<&mut CachedSnapshot> {
-        if self
-            .cached_snapshot
-            .as_ref()
+        if self.cached_snapshot.as_ref()
             .is_some_and(|c| c.height > self.tip().height)
         {
             self.cached_snapshot = None;
         }
 
-        if self
-            .cached_snapshot
-            .as_ref()
-            .is_none_or(|c| c.height != target_height)
-        {
+        if !self.cached_snapshot.as_ref().is_some_and(|c| c.height == target_height) {
             let spaces = self.db.sp.state.read_at(target_height)?;
             let ptrs = self.db.num.state.read_at(target_height)?;
-            self.cached_snapshot = Some(CachedSnapshot {
-                height: target_height,
-                spaces,
-                nums: ptrs,
-            });
+            self.cached_snapshot = Some(CachedSnapshot { height: target_height, spaces, nums: ptrs });
         }
 
         Ok(self.cached_snapshot.as_mut().unwrap())
@@ -216,16 +206,14 @@ impl Chain {
 
         // If spaces synced past the ptrs point, reset the tip
         if initial_num_sync {
-            let sp_tip = *chain.db.sp.state.tip.read().expect("tip");
+            let sp_tip = chain.db.sp.state.tip.read().expect("tip").clone();
             if sp_tip.height > nums_genesis.height {
-                info!(
-                    "spaces tip = {} > nums genesis = {} - rescanning to index nums",
+                info!("spaces tip = {} > nums genesis = {} - rescanning to index nums",
                     sp_tip.height, nums_genesis.height
                 );
-                chain.restore_spaces(
-                    |_| Ok(BlockHash::from_slice(&[0u8; 32]).expect("hash")),
-                    Some(nums_genesis.height),
-                )?;
+                chain.restore_spaces(|_| {
+                    return Ok(BlockHash::from_slice(&[0u8; 32]).expect("hash"));
+                }, Some(nums_genesis.height))?;
             }
         }
 
@@ -233,7 +221,7 @@ impl Chain {
     }
 
     pub fn tip(&self) -> ChainAnchor {
-        *self.db.sp.state.tip.read().expect("read")
+        self.db.sp.state.tip.read().expect("read").clone()
     }
 
     pub fn apply_block_to_spaces_index(
@@ -242,9 +230,7 @@ impl Chain {
         block: BlockMeta,
     ) -> anyhow::Result<()> {
         if self.idx.block_index {
-            self.idx
-                .db
-                .insert_spaces_block(block_hash, block.height, block);
+            self.idx.db.insert_spaces_block(block_hash, block.height, block);
         }
         Ok(())
     }
@@ -255,23 +241,21 @@ impl Chain {
         block: NumBlockMeta,
     ) -> anyhow::Result<()> {
         if self.idx.block_index {
-            self.idx
-                .db
-                .insert_nums_block(block_hash, block.height, block);
+            self.idx.db.insert_nums_block(block_hash, block.height, block);
         }
         Ok(())
     }
 
     pub fn maybe_commit(&self, checkpoint: ChainAnchor) -> anyhow::Result<bool> {
-        if !checkpoint.height.is_multiple_of(COMMIT_BLOCK_INTERVAL) {
+        if checkpoint.height % COMMIT_BLOCK_INTERVAL != 0 {
             return Ok(false);
         }
 
         let spaces_batch = self.db.sp.store.write().expect("write handle");
         let ptrs_batch = self.db.num.store.write().expect("write handle");
 
-        self.db.sp.state.commit(checkpoint, spaces_batch)?;
-        self.db.num.state.commit(checkpoint, ptrs_batch)?;
+        self.db.sp.state.commit(checkpoint.clone(), spaces_batch)?;
+        self.db.num.state.commit(checkpoint.clone(), ptrs_batch)?;
 
         self.idx.db.commit()?;
 
@@ -292,6 +276,34 @@ impl Chain {
 
     pub fn has_nums_index(&self) -> bool {
         self.idx.block_index
+    }
+
+    pub fn list_spaces_blocks_merged(&self) -> anyhow::Result<Vec<(u32, BlockHash, BlockMeta)>> {
+        self.idx
+            .db
+            .list_spaces_blocks_merged()
+            .context("list indexed spaces blocks")
+    }
+
+    pub fn list_nums_blocks_merged(&self) -> anyhow::Result<Vec<(u32, BlockHash, NumBlockMeta)>> {
+        self.idx
+            .db
+            .list_nums_blocks_merged()
+            .context("list indexed nums blocks")
+    }
+
+    pub fn find_fallback_payload_by_handle(
+        &self,
+        needle: &str,
+    ) -> anyhow::Result<Option<Vec<u8>>> {
+        crate::fallback_handle::find_fallback_payload_by_handle(self, needle)
+    }
+
+    pub fn search_fallback_by_pattern(
+        &self,
+        pattern: &str,
+    ) -> anyhow::Result<std::collections::BTreeMap<String, Vec<u8>>> {
+        crate::fallback_handle::search_fallback_by_pattern(self, pattern)
     }
 
     pub fn rollout_iter(&self) -> anyhow::Result<(RolloutIterator, ReadTx)> {
@@ -344,7 +356,8 @@ impl Chain {
     }
 
     pub fn update_spaces_tip(&self, height: u32, block_hash: BlockHash) {
-        let mut tip = self.db.sp.state.tip.write().expect("write tip");
+        let mut tip = self.db.sp.state.tip.write().
+            expect("write tip");
         tip.height = height;
         tip.hash = block_hash;
     }
@@ -411,30 +424,18 @@ impl Chain {
         if !self.idx.block_index {
             return Err(anyhow!("spaces index must be enabled"));
         }
-        let block = self
-            .idx
-            .db
-            .get_spaces_block(&hash)
+        let block = self.idx.db.get_spaces_block(&hash)
             .context("could not retrieve block meta")?;
-        Ok(block.map(|b| BlockMetaWithHash {
-            hash,
-            block_meta: b,
-        }))
+        Ok(block.map(|b| BlockMetaWithHash { hash, block_meta: b }))
     }
 
     pub fn get_nums_block(&self, hash: BlockHash) -> anyhow::Result<Option<NumBlockMetaWithHash>> {
         if !self.idx.block_index {
             return Err(anyhow!("ptrs index must be enabled"));
         }
-        let block = self
-            .idx
-            .db
-            .get_nums_block(&hash)
+        let block = self.idx.db.get_nums_block(&hash)
             .context("could not retrieve num block meta")?;
-        Ok(block.map(|b| NumBlockMetaWithHash {
-            hash,
-            block_meta: b,
-        }))
+        Ok(block.map(|b| NumBlockMetaWithHash { hash, block_meta: b }))
     }
 
     pub fn restore<F>(&self, get_block_hash: F) -> anyhow::Result<()>
@@ -449,7 +450,7 @@ impl Chain {
         let iter = self.db.num.store.iter();
 
         let mut restore_point = None;
-        for snapshot in iter {
+        for (_idx, snapshot) in iter.enumerate() {
             let snapshot = snapshot?;
             let anchor: ChainAnchor = snapshot.metadata().try_into()?;
             if anchor == required_checkpoint {
@@ -459,19 +460,11 @@ impl Chain {
         }
 
         let snapshot = match restore_point {
-            None => {
-                return Err(anyhow!(
-                    "Could not restore nums to height = {}",
-                    required_checkpoint.height
-                ));
-            }
+            None => return Err(anyhow!("Could not restore nums to height = {}", required_checkpoint.height)),
             Some(s) => s,
         };
 
-        info!(
-            "Restoring nums block={} height={}",
-            required_checkpoint.hash, required_checkpoint.height
-        );
+        info!("Restoring nums block={} height={}", required_checkpoint.hash, required_checkpoint.height);
 
         snapshot
             .rollback()
@@ -482,16 +475,12 @@ impl Chain {
         Ok(())
     }
 
-    pub fn restore_spaces<F>(
-        &self,
-        get_block_hash: F,
-        nums_genesis_height: Option<u32>,
-    ) -> anyhow::Result<ChainAnchor>
+    pub fn restore_spaces<F>(&self, get_block_hash: F, nums_genesis_height: Option<u32>) -> anyhow::Result<ChainAnchor>
     where
         F: Fn(u32) -> anyhow::Result<BlockHash>,
     {
         let chain_iter = self.db.sp.store.iter();
-        for snapshot in chain_iter {
+        for (_snapshot_index, snapshot) in chain_iter.enumerate() {
             let chain_snapshot = snapshot?;
             let chain_checkpoint: ChainAnchor = chain_snapshot.metadata().try_into()?;
             if let Some(max_height) = nums_genesis_height {
@@ -518,7 +507,7 @@ impl Chain {
                 .rollback()
                 .context("could not rollback chain snapshot")?;
 
-            self.db.sp.state.restore(chain_checkpoint);
+            self.db.sp.state.restore(chain_checkpoint.clone());
             self.idx.db.restore(chain_checkpoint.height)?;
             return Ok(chain_checkpoint);
         }
@@ -555,11 +544,13 @@ impl Chain {
 
             // Check if we can get PTR snapshot at the same height
             let mut ptrs_root = None;
-            if let Some(Ok(mut pt_snap)) = pt_iter.next() {
-                let pt_anchor: ChainAnchor = pt_snap.metadata().try_into()?;
-                // Only include PTR root if it matches the same block
-                if pt_anchor.height == anchor.height && pt_anchor.hash == anchor.hash {
-                    ptrs_root = Some(pt_snap.compute_root()?);
+            if let Some(pt_snap) = pt_iter.next() {
+                if let Ok(mut pt_snap) = pt_snap {
+                    let pt_anchor: ChainAnchor = pt_snap.metadata().try_into()?;
+                    // Only include PTR root if it matches the same block
+                    if pt_anchor.height == anchor.height && pt_anchor.hash == anchor.hash {
+                        ptrs_root = Some(pt_snap.compute_root()?);
+                    }
                 }
             }
 
@@ -568,7 +559,7 @@ impl Chain {
                 let updated_anchor = RootAnchor {
                     spaces_root: existing.spaces_root,
                     nums_root: ptrs_root.or(existing.nums_root),
-                    block: existing.block,
+                    block: existing.block.clone(),
                 };
                 anchors.push(updated_anchor);
             } else {
@@ -588,11 +579,7 @@ impl Chain {
             info!(
                 "Latest root anchor spaces={} ptrs={} (height: {})",
                 hex::encode(result.spaces_root),
-                result
-                    .nums_root
-                    .as_ref()
-                    .map(hex::encode)
-                    .unwrap_or_else(|| "none".to_string()),
+                result.nums_root.as_ref().map(hex::encode).unwrap_or_else(|| "none".to_string()),
                 result.block.height
             );
         }
@@ -600,3 +587,5 @@ impl Chain {
         Ok(())
     }
 }
+
+

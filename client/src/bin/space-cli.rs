@@ -1,39 +1,41 @@
 extern crate core;
 
+use std::{
+    fs, io,
+    io::{BufRead, IsTerminal, Write},
+    path::PathBuf,
+};
+use std::str::FromStr;
 use anyhow::anyhow;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use colored::{Color, Colorize};
 use jsonrpsee::{
-    core::{ClientError, client::Error},
+    core::{client::Error, ClientError},
     http_client::HttpClient,
 };
-use spaces_client::rpc::{
-    CommitParams, CreateNumParams, DelegateParams, OperateParams, SetFallbackParams,
-};
-use spaces_client::store::Sha256;
 use spaces_client::{
     auth::{auth_token_from_cookie, auth_token_from_creds, http_client_with_auth},
-    config::{ExtendedNetwork, default_cookie_path, default_spaces_rpc_port},
+    config::{default_cookie_path, default_spaces_rpc_port, ExtendedNetwork},
     format::{
-        Format, print_error_rpc_response, print_list_bidouts, print_list_nums_response,
+        print_error_rpc_response, print_list_bidouts, print_list_nums_response,
         print_list_spaces_response, print_list_transactions, print_list_unspent,
-        print_list_wallets, print_server_info, print_wallet_balance_response, print_wallet_info,
-        print_wallet_response,
+        print_list_wallets, print_server_info, print_wallet_balance_response,
+        print_wallet_info, print_wallet_response, Format,
     },
     rpc::{
-        BidParams, OpenParams, RegisterParams, RpcClient, RpcWalletRequest, RpcWalletTxBuilder,
-        SendCoinsParams, Subject, TransferSpacesParams,
+        BidParams, OpenParams, RegisterParams, RpcClient, RpcWalletRequest,
+        RpcWalletTxBuilder, SendCoinsParams, Subject, TransferSpacesParams,
     },
-    wallets::{AddressKind, WalletResponse},
+    wallets::{AddressKind, ListNumsResponse, WalletResponse},
 };
-use spaces_nums::num_id::NumId;
+use spaces_client::rpc::{CommitParams, CreateNumParams, DelegateParams, OperateParams, SetFallbackParams};
+use spaces_client::store::Sha256;
 use spaces_protocol::bitcoin::{Amount, FeeRate, OutPoint, Txid};
 use spaces_protocol::slabel::SLabel;
-use spaces_wallet::bitcoin::ScriptBuf;
+use spaces_nums::num_id::NumId;
+use spaces_wallet::{bitcoin::secp256k1::schnorr::Signature, export::WalletExport, nostr::NostrEvent, Listing};
 use spaces_wallet::bitcoin::hashes::sha256;
-use spaces_wallet::{Listing, bitcoin::secp256k1::schnorr::Signature, export::WalletExport};
-use std::str::FromStr;
-use std::{fs, io, io::Write, path::PathBuf};
+use spaces_wallet::bitcoin::ScriptBuf;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -145,6 +147,13 @@ enum Commands {
     /// Generate a random p2tr keypair and print the secret key, script pubkey, and num id
     #[command(name = "generatekey")]
     GenerateKey,
+    /// Get all defined spaces
+    #[command(name = "getallspaces")]
+    GetAllSpaces {
+        /// Only return spaces that have reached expiration
+        #[arg(long)]
+        expired: bool,
+    },
     /// Create a new num
     #[command(name = "createnum")]
     CreateNum {
@@ -260,6 +269,16 @@ enum Commands {
         #[arg(default_value = "0")]
         target: usize,
     },
+    /// Estimate fee rate for a given confirmation target
+    #[command(name = "estimatefee")]
+    EstimateFee {
+        /// Target number of blocks for confirmation (1-1008)
+        #[arg(default_value = "6")]
+        conf_target: u32,
+        /// Fee estimation mode: unset, conservative, or economical
+        #[arg(long, short)]
+        mode: Option<String>,
+    },
     /// Send the specified amount of BTC to the given name or address
     #[command(
         name = "send",
@@ -365,6 +384,7 @@ enum Commands {
     ///   space-cli setfallback @alice --txt btc=bc1q... --txt nostr=npub1...
     ///   space-cli setfallback @alice --raw SGVsbG8=
     ///   echo '[{"type":"txt","key":"btc","value":["bc1q..."]}]' | space-cli setfallback @alice --stdin
+    ///   space-cli setfallback @alice --txt btc=bc1q... --dry-run
     #[command(name = "setfallback")]
     SetFallback {
         /// Space name, numeric, or num id
@@ -384,12 +404,34 @@ enum Commands {
         /// Fee rate to use in sat/vB
         #[arg(long, short)]
         fee_rate: Option<u64>,
+        /// Print hex of the OP_RETURN data payload (SIP-7 bytes) and exit (no RPC / no transaction).
+        /// SUBJECT is still required by the parser but ignored.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Get on-chain fallback record data for a space or num.
     #[command(name = "getfallback")]
     GetFallback {
         /// Space name, numeric, or num id
         subject: Subject,
+    },
+    /// Sign a Nostr event using the space's private key
+    #[command(name = "signevent")]
+    SignEvent {
+        /// Space name (e.g., @example)
+        space: String,
+        /// Path to a Nostr event JSON file (omit for stdin)
+        #[arg(short, long)]
+        input: Option<PathBuf>,
+    },
+    /// Verify a signed Nostr event against the space's or numeric's public key
+    #[command(name = "verifyevent")]
+    VerifyEvent {
+        /// Space or numeric subject (e.g., @example)
+        space: String,
+        /// Path to a signed Nostr event JSON file (omit for stdin)
+        #[arg(short, long)]
+        input: Option<PathBuf>,
     },
     /// List last transactions
     #[command(name = "listtransactions")]
@@ -403,11 +445,20 @@ enum Commands {
     /// still in auction with a winning bid
     #[command(name = "listspaces")]
     ListSpaces,
-    /// List nums. Defaults to owned, use --kind external for nums created but not owned.
-    #[command(name = "listnums")]
+    /// List nums in the wallet.
+    ///
+    /// With `--spk`, lists matching nums from both owned and external (`--kind` is ignored).
+    #[command(
+        name = "listnums",
+        override_usage = "space-cli listnums [--kind owned|external] [--spk <HEX>]"
+    )]
     ListNums {
-        #[arg(long, default_value = "owned")]
-        kind: String,
+        /// Nums to list: `owned` (wallet-held outputs) or `external` (created but not owned)
+        #[arg(long, value_enum, default_value_t = ListNumsKind::Owned)]
+        kind: ListNumsKind,
+        /// Hex-encoded script_pubkey; only nums whose output script matches (owned and external)
+        #[arg(long, value_name = "HEX")]
+        spk: Option<String>,
     },
     /// List unspent auction outputs i.e. outputs that can be
     /// auctioned off in the bidding process
@@ -434,6 +485,14 @@ enum Commands {
     },
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ListNumsKind {
+    /// Nums the wallet currently owns
+    Owned,
+    /// Nums created by the wallet but not currently owned
+    External,
+}
+
 struct SpaceCli {
     wallet: String,
     format: Format,
@@ -452,8 +511,11 @@ impl SpaceCli {
             args.rpc_url = Some(default_rpc_url(&args.chain));
         }
 
-        let auth_token = if let Some(user) = args.rpc_user.as_ref() {
-            auth_token_from_creds(user, args.rpc_password.as_ref().unwrap())
+        let auth_token = if args.rpc_user.is_some() {
+            auth_token_from_creds(
+                args.rpc_user.as_ref().unwrap(),
+                args.rpc_password.as_ref().unwrap(),
+            )
         } else {
             let cookie_path = match &args.rpc_cookie {
                 Some(path) => path,
@@ -474,7 +536,7 @@ impl SpaceCli {
             Self {
                 wallet: args.wallet.clone(),
                 format: args.output_format,
-                dust: args.dust.map(Amount::from_sat),
+                dust: args.dust.map(|d| Amount::from_sat(d)),
                 force: args.force,
                 skip_tx_check: args.skip_tx_check,
                 network: args.chain,
@@ -533,7 +595,7 @@ async fn main() -> anyhow::Result<()> {
 
     match result {
         Ok(_) => {}
-        Err(error) => match error {
+        Err(error) => match ClientError::from(error) {
             Error::Call(rpc) => {
                 print_error_rpc_response(rpc.code(), rpc.message().to_string(), cli.format);
             }
@@ -590,10 +652,34 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
             let response = cli.client.estimate_bid(target).await?;
             println!("{} sat", Amount::from_sat(response).to_sat());
         }
+        Commands::EstimateFee { conf_target, mode } => {
+            let response = cli.client.estimate_fee(conf_target, mode).await?;
+            match cli.format {
+                Format::Text => {
+                    println!("Fee rate: {} sat/vB", response.feerate_sat_vb);
+                    println!("Blocks: {}", response.blocks);
+                }
+                Format::Json => {
+                    println!("{}", serde_json::to_string_pretty(&response)?);
+                }
+            }
+        }
         Commands::GetSpace { space } => {
             let space = normalize_space(&space);
             let response = cli.client.get_space(&space).await?;
             println!("{}", serde_json::to_string_pretty(&response)?);
+        }
+        Commands::GetAllSpaces { expired } => {
+            let mut spaces = cli.client.get_all_spaces().await?;
+            if expired {
+                let info = cli.client.get_server_info().await?;
+                let current_height = info.tip.height;
+                spaces.retain(|fso| {
+                    fso.spaceout.space.as_ref()
+                        .map_or(false, |s| s.is_expired(current_height))
+                });
+            }
+            println!("{}", serde_json::to_string_pretty(&spaces)?);
         }
         Commands::GetSpaceOut { outpoint } => {
             let response = cli.client.get_spaceout(outpoint).await?;
@@ -628,8 +714,9 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
         Commands::ExportWallet { path } => {
             let result = cli.client.wallet_export(&cli.wallet).await?;
             let content = serde_json::to_string_pretty(&result).expect("result");
-            fs::write(path, content)
-                .map_err(|e| ClientError::Custom(format!("Could not save to path: {}", e)))?;
+            fs::write(path, content).map_err(|e| {
+                ClientError::Custom(format!("Could not save to path: {}", e.to_string()))
+            })?;
         }
         Commands::GetWalletInfo => {
             let result = cli.client.wallet_get_info(&cli.wallet).await?;
@@ -692,16 +779,12 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
             .await?
         }
         Commands::Renew { spaces, fee_rate } => {
-            let spaces: Vec<_> = spaces
-                .into_iter()
-                .map(|s| {
-                    let normalized = normalize_space(&s);
-                    Subject::Label(SLabel::from_str(&normalized).expect("valid space"))
-                })
-                .collect();
+            let spaces: Vec<_> = spaces.into_iter().map(|s| {
+                let normalized = normalize_space(&s);
+                Subject::Label(SLabel::from_str(&normalized).expect("valid space"))
+            }).collect();
             cli.send_request(
-                Some(RpcWalletRequest::Transfer(TransferSpacesParams {
-                    secret: None,
+                Some(RpcWalletRequest::Transfer(TransferSpacesParams { secret: None,
                     spaces,
                     to: None,
                     data: None,
@@ -720,9 +803,8 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
         } => {
             let secret = if secret_stdin {
                 let mut input = String::new();
-                io::stdin().read_line(&mut input).map_err(|e| {
-                    ClientError::Custom(format!("failed to read secret from stdin: {}", e))
-                })?;
+                io::stdin().read_line(&mut input)
+                    .map_err(|e| ClientError::Custom(format!("failed to read secret from stdin: {}", e)))?;
                 Some(input.trim().to_string())
             } else {
                 None
@@ -763,21 +845,18 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
             raw,
             stdin,
             fee_rate,
+            dry_run,
         } => {
             use base64::Engine;
             let data = if let Some(raw_b64) = raw {
                 // Raw base64-encoded wire-format bytes
-                base64::engine::general_purpose::STANDARD
-                    .decode(&raw_b64)
-                    .map_err(|e| {
-                        ClientError::Custom(format!("Could not base64 decode data: {}", e))
-                    })?
+                base64::engine::general_purpose::STANDARD.decode(&raw_b64)
+                    .map_err(|e| ClientError::Custom(format!("Could not base64 decode data: {}", e)))?
             } else if stdin {
                 // Read JSON records from stdin
                 let mut input = String::new();
-                io::stdin()
-                    .read_line(&mut input)
-                    .map_err(|e| ClientError::Custom(format!("Failed to read stdin: {}", e)))?;
+                io::stdin().read_line(&mut input).map_err(|e|
+                    ClientError::Custom(format!("Failed to read stdin: {}", e)))?;
                 let record_set: sip7::RecordSet = serde_json::from_str(input.trim())
                     .map_err(|e| ClientError::Custom(format!("Invalid SIP-7 JSON: {}", e)))?;
                 record_set.to_bytes()
@@ -785,29 +864,15 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
                 // Build from --txt and --blob flags
                 let mut records = Vec::new();
                 for txt in &txt_records {
-                    let (key, value) = txt.split_once('=').ok_or_else(|| {
-                        ClientError::Custom(format!(
-                            "Invalid --txt format '{}': expected key=value",
-                            txt
-                        ))
-                    })?;
+                    let (key, value) = txt.split_once('=').ok_or_else(||
+                        ClientError::Custom(format!("Invalid --txt format '{}': expected key=value", txt)))?;
                     records.push(sip7::Record::txt(key, &[value]));
                 }
                 for blob in &blob_records {
-                    let (key, b64_value) = blob.split_once('=').ok_or_else(|| {
-                        ClientError::Custom(format!(
-                            "Invalid --blob format '{}': expected key=base64",
-                            blob
-                        ))
-                    })?;
-                    let value = base64::engine::general_purpose::STANDARD
-                        .decode(b64_value)
-                        .map_err(|e| {
-                            ClientError::Custom(format!(
-                                "Invalid base64 in --blob '{}': {}",
-                                key, e
-                            ))
-                        })?;
+                    let (key, b64_value) = blob.split_once('=').ok_or_else(||
+                        ClientError::Custom(format!("Invalid --blob format '{}': expected key=base64", blob)))?;
+                    let value = base64::engine::general_purpose::STANDARD.decode(b64_value)
+                        .map_err(|e| ClientError::Custom(format!("Invalid base64 in --blob '{}': {}", key, e)))?;
                     records.push(sip7::Record::blob(key, value));
                 }
                 sip7::RecordSet::pack(records)
@@ -815,24 +880,52 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
                     .to_bytes()
             } else {
                 return Err(ClientError::Custom(
-                    "No data specified. Use --txt, --blob, --raw, or --stdin".to_string(),
+                    "No data specified. Use --txt, --blob, --raw, or --stdin".to_string()
                 ));
             };
 
-            cli.send_request(
-                Some(RpcWalletRequest::SetFallback(SetFallbackParams {
-                    subject,
-                    data,
-                })),
-                None,
-                fee_rate,
-                false,
-            )
-            .await?;
+            if dry_run {
+                println!("{}", hex::encode(&data));
+            } else {
+                cli.send_request(
+                    Some(RpcWalletRequest::SetFallback(SetFallbackParams { subject, data })),
+                    None,
+                    fee_rate,
+                    false,
+                )
+                .await?;
+            }
         }
-        Commands::GetFallback { subject } => {
+        Commands::GetFallback {
+            subject,
+        } => {
             let response = cli.client.get_fallback(subject).await?;
             println!("{}", serde_json::to_string_pretty(&response)?);
+        }
+        Commands::SignEvent { mut space, input } => {
+            let event = read_event(input)
+                .map_err(|e| ClientError::Custom(format!("input error: {}", e)))?;
+            space = normalize_space(&space);
+            let subject = Subject::from_str(&space)
+                .map_err(|e| ClientError::Custom(e.to_string()))?;
+            let result = cli
+                .client
+                .wallet_sign_event(&cli.wallet, subject, event)
+                .await?;
+            println!("{}", serde_json::to_string(&result).expect("result"));
+        }
+        Commands::VerifyEvent { mut space, input } => {
+            let event = read_event(input)
+                .map_err(|e| ClientError::Custom(format!("input error: {}", e)))?;
+            space = normalize_space(&space);
+            let subject = Subject::from_str(&space)
+                .map_err(|e| ClientError::Custom(e.to_string()))?;
+            let event = cli
+                .client
+                .verify_event(subject, event)
+                .await
+                .map_err(|e| ClientError::Custom(e.to_string()))?;
+            println!("{}", serde_json::to_string(&event).expect("result"));
         }
         Commands::ListUnspent => {
             let utxos = cli.client.wallet_list_unspent(&cli.wallet).await?;
@@ -854,10 +947,35 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
             let spaces = cli.client.wallet_list_spaces(&cli.wallet).await?;
             print_list_spaces_response(tip.tip.height, spaces, cli.format);
         }
-        Commands::ListNums { kind } => {
-            let kind = if kind == "owned" { None } else { Some(kind) };
-            let nums = cli.client.wallet_list_nums(&cli.wallet, kind).await?;
-            print_list_nums_response(nums, cli.format);
+        Commands::ListNums { kind, spk } => {
+            if let Some(hex) = spk {
+                let spk_script = ScriptBuf::from(
+                    hex::decode(hex.trim()).map_err(|_| {
+                        ClientError::Custom("Invalid --spk hex (expected script_pubkey bytes)".to_string())
+                    })?,
+                );
+                let owned = cli.client.wallet_list_nums(&cli.wallet, None).await?;
+                let external = cli
+                    .client
+                    .wallet_list_nums(&cli.wallet, Some("external".to_string()))
+                    .await?;
+                let mut nums: Vec<_> = owned
+                    .nums
+                    .into_iter()
+                    .chain(external.nums)
+                    .filter(|e| e.numout.script_pubkey == spk_script)
+                    .collect();
+                nums.sort_by_key(|e| (e.txid, e.numout.n));
+                nums.dedup_by_key(|e| (e.txid, e.numout.n));
+                print_list_nums_response(ListNumsResponse { nums }, cli.format);
+            } else {
+                let kind = match kind {
+                    ListNumsKind::Owned => None,
+                    ListNumsKind::External => Some("external".to_string()),
+                };
+                let nums = cli.client.wallet_list_nums(&cli.wallet, kind).await?;
+                print_list_nums_response(nums, cli.format);
+            }
         }
         Commands::Balance => {
             let balance = cli.client.wallet_get_balance(&cli.wallet).await?;
@@ -962,10 +1080,10 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
             println!("{} Listing verified", "✓".color(Color::Green));
         }
         Commands::GenerateKey => {
+            use spaces_wallet::bitcoin::secp256k1::{Secp256k1, Keypair};
             use spaces_wallet::bitcoin::key::TapTweak;
-            use spaces_wallet::bitcoin::opcodes::all::OP_PUSHNUM_1;
             use spaces_wallet::bitcoin::script::Builder;
-            use spaces_wallet::bitcoin::secp256k1::{Keypair, Secp256k1};
+            use spaces_wallet::bitcoin::opcodes::all::OP_PUSHNUM_1;
 
             let secp = Secp256k1::new();
             let (secret_key, _) = secp.generate_keypair(&mut rand::thread_rng());
@@ -988,10 +1106,8 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
         Commands::CreateNum { bind_spk, fee_rate } => {
             let spk = match bind_spk {
                 Some(hex) => {
-                    let spk = ScriptBuf::from(
-                        hex::decode(hex)
-                            .map_err(|_| ClientError::Custom("Invalid spk hex".to_string()))?,
-                    );
+                    let spk = ScriptBuf::from(hex::decode(hex)
+                        .map_err(|_| ClientError::Custom("Invalid spk hex".to_string()))?);
                     let num_id = NumId::from_spk::<Sha256>(spk.clone());
                     println!("Creating num id: {}", num_id);
                     Some(spk)
@@ -1009,7 +1125,7 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
                 fee_rate,
                 false,
             )
-            .await?
+                .await?
         }
         Commands::GetNum { subject } => {
             let num = cli
@@ -1030,19 +1146,17 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
         }
         Commands::Operate { subject, fee_rate } => {
             cli.send_request(
-                Some(RpcWalletRequest::Operate(OperateParams { subject })),
+                Some(RpcWalletRequest::Operate(OperateParams {
+                    subject,
+                })),
                 None,
                 fee_rate,
                 false,
             )
-            .await?;
+                .await?;
             println!("Operate setup should be complete once tx is confirmed");
         }
-        Commands::Commit {
-            subject,
-            root,
-            fee_rate,
-        } => {
+        Commands::Commit { subject, root, fee_rate } => {
             cli.send_request(
                 Some(RpcWalletRequest::Commit(CommitParams {
                     subject,
@@ -1052,7 +1166,7 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
                 fee_rate,
                 false,
             )
-            .await?;
+                .await?;
         }
         Commands::Rollback { subject, fee_rate } => {
             cli.send_request(
@@ -1064,21 +1178,20 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
                 fee_rate,
                 false,
             )
-            .await?;
+                .await?;
             println!("Rollback transaction sent");
         }
-        Commands::Delegate {
-            subject,
-            to,
-            fee_rate,
-        } => {
+        Commands::Delegate { subject, to, fee_rate } => {
             cli.send_request(
-                Some(RpcWalletRequest::Delegate(DelegateParams { subject, to })),
+                Some(RpcWalletRequest::Delegate(DelegateParams {
+                    subject,
+                    to,
+                })),
                 None,
                 fee_rate,
                 false,
             )
-            .await?;
+                .await?;
         }
         Commands::GetDelegator { subject } => {
             let delegator = cli
@@ -1111,4 +1224,23 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
 
 fn default_rpc_url(chain: &ExtendedNetwork) -> String {
     format!("http://127.0.0.1:{}", default_spaces_rpc_port(chain))
+}
+
+fn read_event(file: Option<PathBuf>) -> anyhow::Result<NostrEvent> {
+    let content = get_input(file)?;
+    let event: NostrEvent = serde_json::from_str(&content)?;
+    Ok(event)
+}
+
+fn get_input(input: Option<PathBuf>) -> anyhow::Result<String> {
+    Ok(match input {
+        Some(file) => fs::read_to_string(file)?,
+        None => {
+            let stdin = io::stdin();
+            if stdin.is_terminal() {
+                return Err(anyhow!("no input provided: specify a file path or pipe via stdin"));
+            }
+            stdin.lock().lines().collect::<Result<String, _>>()?
+        }
+    })
 }

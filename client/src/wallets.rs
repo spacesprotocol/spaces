@@ -1,38 +1,39 @@
 use anyhow::anyhow;
 use clap::ValueEnum;
-use futures::{StreamExt, stream::FuturesUnordered};
+use futures::{stream::FuturesUnordered, StreamExt};
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use spaces_protocol::{
-    FullSpaceOut, SpaceOut,
     bitcoin::Txid,
     constants::ChainAnchor,
     hasher::{KeyHasher, SpaceKey},
     slabel::SLabel,
+    Bytes, FullSpaceOut, SpaceOut,
 };
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Formatter};
 use std::{collections::BTreeMap, fmt, str::FromStr, time::Duration};
 
 use spaces_wallet::{
-    Balance, DoubleUtxo, Listing, SpacesWallet, Subject, WalletInfo, WalletOutput,
     address::SpaceAddress,
     bdk_wallet::{
+        chain::{local_chain::CheckPoint, BlockId, ChainPosition},
         KeychainKind,
-        chain::{BlockId, ChainPosition, local_chain::CheckPoint},
     },
     bitcoin,
-    bitcoin::{Address, Amount, FeeRate, OutPoint, secp256k1::schnorr},
+    bitcoin::{secp256k1::schnorr, Address, Amount, FeeRate, OutPoint},
     builder::{CoinTransfer, SpaceTransfer, SpacesAwareCoinSelection},
     tx_event::{TxEvent, TxEventKind, TxRecord},
+    nostr::NostrEvent,
+    Balance, DoubleUtxo, Listing, SpacesWallet, Subject, WalletInfo, WalletOutput,
 };
 
 use crate::cbf::CompactFilterSync;
-use crate::rpc::CommitParams;
+use crate::rpc::{CommitParams};
 use crate::spaces::Spaced;
-use crate::store::Sha256;
 use crate::store::chain::Chain;
+use crate::store::Sha256;
 use crate::{
     calc_progress,
     checker::TxChecker,
@@ -40,14 +41,13 @@ use crate::{
     config::ExtendedNetwork,
     rpc::{RpcWalletRequest, RpcWalletTxBuilder, WalletLoadRequest},
     source::{
-        BestChain, BitcoinBlockSource, BitcoinRpc, BitcoinRpcError, BlockEvent, BlockFetchError,
-        BlockFetcher,
+        BestChain, BitcoinBlockSource, BitcoinRpc, BitcoinRpcError, BlockEvent, BlockFetchError, BlockFetcher,
     },
     std_wait,
 };
-use spaces_nums::FullNumOut;
-use spaces_nums::num_id::{NUM_HRP, NumId, NumIdParseError};
+use spaces_nums::num_id::{NumId, NumIdParseError, NUM_HRP};
 use spaces_nums::snumeric::SNumeric;
+use spaces_nums::FullNumOut;
 use spaces_nums::{DelegatorKey, NumOut, NumSource};
 use spaces_protocol::bitcoin::address::ParseError;
 use spaces_protocol::bitcoin::{Network, ScriptBuf};
@@ -218,6 +218,25 @@ pub struct NumEntry {
     pub numout: NumOut,
     #[cfg_attr(feature = "schema", schemars(with = "Option<String>"))]
     pub delegating_for: Option<SLabel>,
+    /// Parsed SIP-7 `RecordSet` when `numout.num.data` is valid SIP-7 (same as `getfallback` `records`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(with = "Option<String>"))]
+    pub records: Option<sip7::RecordSet>,
+}
+
+/// If num payload bytes are valid SIP-7, returns a `RecordSet` for JSON (same check as `getfallback`).
+pub(crate) fn sip7_records_for_num_data(data: &Option<Bytes>) -> Option<sip7::RecordSet> {
+    let b = data.as_ref()?;
+    let raw = b.as_slice();
+    if raw.is_empty() {
+        return None;
+    }
+    let rs = sip7::RecordSet::new(raw.to_vec());
+    if rs.unpack().is_ok() {
+        Some(rs)
+    } else {
+        None
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -260,10 +279,19 @@ fn display_fee(fee: &Option<Amount>) -> String {
     }
 }
 
-fn display_events(events: &[TxEvent]) -> String {
+fn display_events(events: &Vec<TxEvent>) -> String {
     events
         .iter()
-        .map(|e| format!("{} {}", e.kind, e.space.clone().unwrap_or("".to_string())))
+        .map(|e| {
+            format!(
+                "{} {}",
+                e.kind,
+                e.space
+                    .as_ref()
+                    .map(|s| s.clone())
+                    .unwrap_or("".to_string())
+            )
+        })
         .collect::<Vec<String>>()
         .join("\n")
 }
@@ -343,6 +371,11 @@ pub enum WalletCommand {
         subject: Subject,
         resp: crate::rpc::Responder<anyhow::Result<bool>>,
     },
+    SignEvent {
+        subject: Subject,
+        event: NostrEvent,
+        resp: crate::rpc::Responder<anyhow::Result<NostrEvent>>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, ValueEnum)]
@@ -365,7 +398,10 @@ impl spaces_wallet::Mempool for MempoolChecker<'_> {
     }
 }
 
-fn resolve_subject_to_num_id(chain: &mut Chain, subject: &Subject) -> anyhow::Result<NumId> {
+fn resolve_subject_to_num_id<H: KeyHasher>(
+    chain: &mut Chain,
+    subject: &Subject,
+) -> anyhow::Result<NumId> {
     match subject {
         Subject::NumId(id) => Ok(*id),
         Subject::Label(label) if label.is_numeric() => {
@@ -377,6 +413,14 @@ fn resolve_subject_to_num_id(chain: &mut Chain, subject: &Subject) -> anyhow::Re
         Subject::Label(label) => Err(anyhow!(
             "expected a num id or numeric, not a space: '{}'",
             label
+        )),
+        Subject::Handle(h) => Err(anyhow!(
+            "expected a num id or numeric, not a handle: '{}'",
+            h
+        )),
+        Subject::HandlePattern(p) => Err(anyhow!(
+            "expected a num id or numeric, not a pattern: '{}'",
+            p
         )),
     }
 }
@@ -409,6 +453,12 @@ fn commit_params_to_req(
             NumId::from_spk::<Sha256>(info.spaceout.script_pubkey)
         }
         Subject::NumId(id) => *id,
+        Subject::Handle(h) => {
+            return Err(anyhow!("commit: handle '{}' is not a valid subject", h));
+        }
+        Subject::HandlePattern(p) => {
+            return Err(anyhow!("commit: pattern '{}' is not a valid subject", p));
+        }
     };
 
     let num_info = chain
@@ -439,11 +489,12 @@ impl RpcWallet {
         if let Ok(res) = source
             .rpc
             .send_json_blocking::<serde_json::Value>(&source.client, &estimate_req)
-            && let Some(fee_rate) = res["feerate"].as_f64()
         {
-            // Convert BTC/kB to sat/vB
-            let fee_rate_sat_vb = (fee_rate * 100_000.0).ceil() as u64;
-            return FeeRate::from_sat_per_vb(fee_rate_sat_vb);
+            if let Some(fee_rate) = res["feerate"].as_f64() {
+                // Convert BTC/kB to sat/vB
+                let fee_rate_sat_vb = (fee_rate * 100_000.0).ceil() as u64;
+                return FeeRate::from_sat_per_vb(fee_rate_sat_vb);
+            }
         }
 
         None
@@ -462,7 +513,7 @@ impl RpcWallet {
                 None => return Err(anyhow!("could not estimate fee rate")),
                 Some(r) => r,
             },
-            Some(r) => *r,
+            Some(r) => r.clone(),
         };
         info!("Using fee rate: {} sat/vB", fee_rate.to_sat_per_vb_ceil());
 
@@ -567,7 +618,7 @@ impl RpcWallet {
     fn wallet_handle_commands(
         network: ExtendedNetwork,
         source: &BitcoinBlockSource,
-        chain: &mut Chain,
+        mut chain: &mut Chain,
         wallet: &mut SpacesWallet,
         command: WalletCommand,
         progress_update: WalletProgressUpdate,
@@ -597,7 +648,7 @@ impl RpcWallet {
                     _ = resp.send(Err(anyhow::anyhow!("Wallet is syncing")));
                     return Ok(());
                 }
-                let batch_result = Self::batch_tx(network, source, wallet, chain, request);
+                let batch_result = Self::batch_tx(network, &source, wallet, chain, request);
                 _ = resp.send(batch_result);
             }
             WalletCommand::BumpFee {
@@ -610,8 +661,14 @@ impl RpcWallet {
                     _ = resp.send(Err(anyhow::anyhow!("Wallet is syncing")));
                     return Ok(());
                 }
-                let result =
-                    Self::handle_fee_bump(source, chain, wallet, txid, skip_tx_check, fee_rate);
+                let result = Self::handle_fee_bump(
+                    source,
+                    &mut chain,
+                    wallet,
+                    txid,
+                    skip_tx_check,
+                    fee_rate,
+                );
                 _ = resp.send(result);
             }
             WalletCommand::ForceSpendOutput {
@@ -706,6 +763,13 @@ impl RpcWallet {
                 let result = Self::can_operate(wallet, chain, &subject);
                 _ = resp.send(result);
             }
+            WalletCommand::SignEvent {
+                subject,
+                event,
+                resp,
+            } => {
+                _ = resp.send(wallet.sign_event::<Sha256, _>(chain, subject, event));
+            }
         }
         Ok(())
     }
@@ -723,6 +787,18 @@ impl RpcWallet {
                     .get_num_info(id)?
                     .ok_or_else(|| anyhow::anyhow!("num id '{}' not found", id))?;
                 info.numout.num.name.to_slabel()
+            }
+            Subject::Handle(h) => {
+                return Err(anyhow::anyhow!(
+                    "handle '{}' is not supported for this operation",
+                    h
+                ));
+            }
+            Subject::HandlePattern(p) => {
+                return Err(anyhow::anyhow!(
+                    "pattern '{}' is not supported for this operation",
+                    p
+                ));
             }
         };
 
@@ -837,7 +913,6 @@ impl RpcWallet {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn wallet_sync(
         network: ExtendedNetwork,
         source: BitcoinBlockSource,
@@ -948,7 +1023,7 @@ impl RpcWallet {
                         }
                     }
                     BlockEvent::Waiting(_) => {}
-                    BlockEvent::Error(BlockFetchError::BlockMismatch) => {
+                    BlockEvent::Error(e) if matches!(e, BlockFetchError::BlockMismatch) => {
                         let mut checkpoint_in_chain = None;
                         let best_chain = match source
                             .get_best_chain(Some(wallet_tip.height), network.fallback_network())
@@ -1030,22 +1105,21 @@ impl RpcWallet {
                 continue;
             }
 
-            if synced_at_least_once
-                && last_mempool_check.elapsed() > MEMPOOL_CHECK_INTERVAL
-                && let Some(common_tip) = Self::all_synced(&source, &mut chain, &wallet, None)
-            {
-                let mem = MempoolChecker(&source);
-                match wallet.update_unconfirmed_bids(mem, common_tip.height, &mut chain) {
-                    Ok(txids) => {
-                        for txid in txids {
-                            info!("Dropped {} - no longer in the mempool", txid);
+            if synced_at_least_once && last_mempool_check.elapsed() > MEMPOOL_CHECK_INTERVAL {
+                if let Some(common_tip) = Self::all_synced(&source, &mut chain, &wallet, None) {
+                    let mem = MempoolChecker(&source);
+                    match wallet.update_unconfirmed_bids(mem, common_tip.height, &mut chain) {
+                        Ok(txids) => {
+                            for txid in txids {
+                                info!("Dropped {} - no longer in the mempool", txid);
+                            }
+                        }
+                        Err(err) => {
+                            warn!("Could not check for unconfirmed bids in mempool: {}", err)
                         }
                     }
-                    Err(err) => {
-                        warn!("Could not check for unconfirmed bids in mempool: {}", err)
-                    }
+                    last_mempool_check = Instant::now();
                 }
-                last_mempool_check = Instant::now();
             }
 
             std::thread::sleep(Duration::from_millis(10));
@@ -1063,29 +1137,26 @@ impl RpcWallet {
             };
             let rsk = DelegatorKey::from_id::<Sha256>(numout.num.id);
             let delegating_for = chain.get_delegator(&rsk)?;
+            let records = sip7_records_for_num_data(&numout.num.data);
             nums.push(NumEntry {
                 txid: unspent.outpoint.txid,
                 numout,
                 delegating_for,
+                records,
             })
         }
 
         Ok(ListNumsResponse { nums })
     }
 
-    fn list_external_nums(
-        wallet: &mut SpacesWallet,
-        chain: &mut Chain,
-    ) -> anyhow::Result<ListNumsResponse> {
+    fn list_external_nums(wallet: &mut SpacesWallet, chain: &mut Chain) -> anyhow::Result<ListNumsResponse> {
         use spaces_wallet::tx_event::CreateNumEventDetails;
 
         let mut nums: Vec<NumEntry> = Vec::new();
         let mut seen = std::collections::HashSet::new();
 
         for event in wallet.list_create_num_events()? {
-            let Some(details) = event.details else {
-                continue;
-            };
+            let Some(details) = event.details else { continue };
             let Ok(create) = serde_json::from_value::<CreateNumEventDetails>(details) else {
                 continue;
             };
@@ -1106,10 +1177,12 @@ impl RpcWallet {
 
             let rsk = DelegatorKey::from_id::<Sha256>(num_id);
             let delegating_for = chain.get_delegator(&rsk)?;
+            let records = sip7_records_for_num_data(&fpo.numout.num.data);
             nums.push(NumEntry {
                 txid: fpo.txid,
                 numout: fpo.numout,
                 delegating_for,
+                records,
             });
         }
 
@@ -1228,7 +1301,7 @@ impl RpcWallet {
                     ChainPosition::Unconfirmed { .. } => None,
                 };
                 let tx = ctx.tx_node.tx.clone();
-                let txid = ctx.tx_node.txid;
+                let txid = ctx.tx_node.txid.clone();
                 let (sent, received) = wallet.sent_and_received(&tx);
                 let fee = wallet.calculate_fee(&tx).ok();
                 TxInfo {
@@ -1248,8 +1321,9 @@ impl RpcWallet {
                 let conn = wallet.connection.transaction()?;
                 let mut events = TxEvent::all(&conn, tx.txid).expect("tx event");
                 for event in events.iter_mut() {
-                    if event.kind == TxEventKind::Commit {
-                        event.details = None;
+                    match event.kind {
+                        TxEventKind::Commit => event.details = None,
+                        _ => {}
                     }
                 }
                 events
@@ -1325,15 +1399,15 @@ impl RpcWallet {
     ) -> anyhow::Result<WalletResponse> {
         let tip_height = wallet.local_chain().tip().height();
 
-        if let Some(dust) = tx.dust
-            && dust > SpacesAwareCoinSelection::DUST_THRESHOLD
-        {
-            // Allowing higher dust may space outs to be accidentally
-            // spent during coin selection
-            return Err(anyhow!(
-                "dust cannot be higher than {}",
-                SpacesAwareCoinSelection::DUST_THRESHOLD
-            ));
+        if let Some(dust) = tx.dust {
+            if dust > SpacesAwareCoinSelection::DUST_THRESHOLD {
+                // Allowing higher dust may space outs to be accidentally
+                // spent during coin selection
+                return Err(anyhow!(
+                    "dust cannot be higher than {}",
+                    SpacesAwareCoinSelection::DUST_THRESHOLD
+                ));
+            }
         }
 
         let fee_rate = match tx.fee_rate.as_ref() {
@@ -1341,15 +1415,15 @@ impl RpcWallet {
                 None => return Err(anyhow!("could not estimate fee rate")),
                 Some(r) => r,
             },
-            Some(r) => *r,
+            Some(r) => r.clone(),
         };
         info!("Using fee rate: {} sat/vB", fee_rate.to_sat_per_vb_ceil());
 
         let mut builder = spaces_wallet::builder::Builder::new();
         builder = builder.fee_rate(fee_rate);
 
-        if let Some(bidouts) = tx.bidouts {
-            builder = builder.bidouts(bidouts);
+        if tx.bidouts.is_some() {
+            builder = builder.bidouts(tx.bidouts.unwrap());
         }
 
         builder = builder.force(tx.force);
@@ -1370,8 +1444,8 @@ impl RpcWallet {
                 RpcWalletRequest::Transfer(params) => {
                     let secret: Option<[u8; 32]> = match &params.secret {
                         Some(hex) => {
-                            let bytes =
-                                hex::decode(hex).map_err(|_| anyhow!("invalid hex secret key"))?;
+                            let bytes = hex::decode(hex)
+                                .map_err(|_| anyhow!("invalid hex secret key"))?;
                             if bytes.len() != 32 {
                                 return Err(anyhow!("secret key must be 32 bytes"));
                             }
@@ -1395,32 +1469,15 @@ impl RpcWallet {
                         match item {
                             Subject::NumId(id) => {
                                 let num = match chain.get_num_info(id)? {
-                                    None => {
-                                        return Err(anyhow!("transfer: num '{}' not found", id));
+                                    None => return Err(anyhow!("transfer: num '{}' not found", id)),
+                                    Some(full) if secret.is_none() && !wallet.is_mine(full.numout.script_pubkey.clone()) => {
+                                        return Err(anyhow!("transfer: you don't own num '{}'", id))
                                     }
-                                    Some(full)
-                                        if secret.is_none()
-                                            && !wallet
-                                                .is_mine(full.numout.script_pubkey.clone()) =>
-                                    {
-                                        return Err(anyhow!(
-                                            "transfer: you don't own num '{}'",
-                                            id
-                                        ));
-                                    }
-                                    Some(full)
-                                        if secret.is_none()
-                                            && wallet
-                                                .get_utxo(OutPoint::new(
-                                                    full.txid,
-                                                    full.numout.n as u32,
-                                                ))
-                                                .is_none() =>
-                                    {
+                                    Some(full) if secret.is_none() && wallet.get_utxo(OutPoint::new(full.txid, full.numout.n as u32)).is_none() => {
                                         return Err(anyhow!(
                                             "transfer '{}': wallet already has a pending tx for this num",
                                             id
-                                        ));
+                                        ))
                                     }
                                     Some(full) => full,
                                 };
@@ -1443,32 +1500,15 @@ impl RpcWallet {
                                     anyhow!("transfer: numeric '{}' not found", numeric)
                                 })?;
                                 let num = match chain.get_num_info(&id)? {
-                                    None => {
-                                        return Err(anyhow!("transfer: num '{}' not found", id));
+                                    None => return Err(anyhow!("transfer: num '{}' not found", id)),
+                                    Some(full) if secret.is_none() && !wallet.is_mine(full.numout.script_pubkey.clone()) => {
+                                        return Err(anyhow!("transfer: you don't own num '{}'", id))
                                     }
-                                    Some(full)
-                                        if secret.is_none()
-                                            && !wallet
-                                                .is_mine(full.numout.script_pubkey.clone()) =>
-                                    {
-                                        return Err(anyhow!(
-                                            "transfer: you don't own num '{}'",
-                                            id
-                                        ));
-                                    }
-                                    Some(full)
-                                        if secret.is_none()
-                                            && wallet
-                                                .get_utxo(OutPoint::new(
-                                                    full.txid,
-                                                    full.numout.n as u32,
-                                                ))
-                                                .is_none() =>
-                                    {
+                                    Some(full) if secret.is_none() && wallet.get_utxo(OutPoint::new(full.txid, full.numout.n as u32)).is_none() => {
                                         return Err(anyhow!(
                                             "transfer '{}': wallet already has a pending tx for this num",
                                             id
-                                        ));
+                                        ))
                                     }
                                     Some(full) => full,
                                 };
@@ -1485,12 +1525,18 @@ impl RpcWallet {
                                     secret,
                                 });
                             }
+                            Subject::Handle(h) => {
+                                return Err(anyhow!("transfer: handle '{}' is not a valid subject", h));
+                            }
+                            Subject::HandlePattern(p) => {
+                                return Err(anyhow!("transfer: pattern '{}' is not a valid subject", p));
+                            }
                             Subject::Label(space) => {
                                 // Handle space transfer
                                 let spacehash = SpaceKey::from(Sha256::hash(space.as_ref()));
                                 match chain.get_space_info(&spacehash)? {
                                     None => {
-                                        return Err(anyhow!("transfer: you don't own `{}`", space));
+                                        return Err(anyhow!("transfer: you don't own `{}`", space))
                                     }
                                     Some(full)
                                         if full.spaceout.space.is_none()
@@ -1560,13 +1606,17 @@ impl RpcWallet {
                         // Warn if already exists
                         let spacehash = SpaceKey::from(Sha256::hash(name.as_ref()));
                         let full = chain.get_space_info(&spacehash)?;
-                        if let Some(full) = full
-                            && !full
+                        if let Some(full) = full {
+                            if !full
                                 .spaceout
                                 .space
                                 .is_some_and(|s| s.is_expired(tip_height))
-                        {
-                            return Err(anyhow!("open '{}': space already exists", params.name));
+                            {
+                                return Err(anyhow!(
+                                    "open '{}': space already exists",
+                                    params.name
+                                ));
+                            }
                         }
                     }
 
@@ -1669,15 +1719,15 @@ impl RpcWallet {
                     match &params.subject {
                         Subject::Label(label) if label.is_numeric() => {
                             let numeric: SNumeric = label.clone().try_into().unwrap();
-                            let id = chain
-                                .get_num_id(&numeric)?
-                                .ok_or_else(|| anyhow!("operate: numeric '{}' not found", label))?;
+                            let id = chain.get_num_id(&numeric)?.ok_or_else(|| {
+                                anyhow!("operate: numeric '{}' not found", label)
+                            })?;
                             let num = match chain.get_num_info(&id)? {
                                 None => return Err(anyhow!("operate: num '{}' not found", id)),
                                 Some(full)
                                     if !wallet.is_mine(full.numout.script_pubkey.clone()) =>
                                 {
-                                    return Err(anyhow!("operate: you don't own '{}'", label));
+                                    return Err(anyhow!("operate: you don't own '{}'", label))
                                 }
                                 Some(full)
                                     if wallet
@@ -1687,7 +1737,7 @@ impl RpcWallet {
                                     return Err(anyhow!(
                                         "operate '{}': wallet already has a pending tx",
                                         label
-                                    ));
+                                    ))
                                 }
                                 Some(full) => full,
                             };
@@ -1702,7 +1752,7 @@ impl RpcWallet {
                                 Some(full)
                                     if !wallet.is_mine(full.numout.script_pubkey.clone()) =>
                                 {
-                                    return Err(anyhow!("operate: you don't own '{}'", id));
+                                    return Err(anyhow!("operate: you don't own '{}'", id))
                                 }
                                 Some(full)
                                     if wallet
@@ -1712,7 +1762,7 @@ impl RpcWallet {
                                     return Err(anyhow!(
                                         "operate '{}': wallet already has a pending tx",
                                         id
-                                    ));
+                                    ))
                                 }
                                 Some(full) => full,
                             };
@@ -1726,20 +1776,20 @@ impl RpcWallet {
 
                             let full = match chain.get_space_info(&spacehash)? {
                                 None => {
-                                    return Err(anyhow!("operate: space '{}' not found", label));
+                                    return Err(anyhow!("operate: space '{}' not found", label))
                                 }
                                 Some(full)
                                     if full.spaceout.space.is_none()
                                         || !full.spaceout.space.as_ref().unwrap().is_owned()
                                         || !wallet.is_mine(full.spaceout.script_pubkey.clone()) =>
                                 {
-                                    return Err(anyhow!("operate: you don't own '{}'", label));
+                                    return Err(anyhow!("operate: you don't own '{}'", label))
                                 }
                                 Some(full) if wallet.get_utxo(full.outpoint()).is_none() => {
                                     return Err(anyhow!(
                                         "operate '{}': wallet already has a pending tx",
                                         label
-                                    ));
+                                    ))
                                 }
                                 Some(full) => full,
                             };
@@ -1753,6 +1803,12 @@ impl RpcWallet {
                                 recipient,
                                 create_num: true,
                             });
+                        }
+                        Subject::Handle(h) => {
+                            return Err(anyhow!("operate: handle '{}' is not a valid subject", h));
+                        }
+                        Subject::HandlePattern(p) => {
+                            return Err(anyhow!("operate: pattern '{}' is not a valid subject", p));
                         }
                     }
                 }
@@ -1772,6 +1828,18 @@ impl RpcWallet {
                     })
                 }
                 RpcWalletRequest::SetFallback(params) => match params.subject {
+                    Subject::Handle(ref h) => {
+                        return Err(anyhow!(
+                            "setfallback: handle '{}' is not supported; use a space or num",
+                            h
+                        ));
+                    }
+                    Subject::HandlePattern(ref p) => {
+                        return Err(anyhow!(
+                            "setfallback: pattern '{}' is not supported; use a space or num",
+                            p
+                        ));
+                    }
                     Subject::Label(ref label) if !label.is_numeric() => {
                         let spacehash = SpaceKey::from(Sha256::hash(label.as_ref()));
                         let full = chain
@@ -1796,24 +1864,24 @@ impl RpcWallet {
                             .add_data(params.data);
                     }
                     _ => {
-                        let id = resolve_subject_to_num_id(chain, &params.subject)?;
+                        let id = resolve_subject_to_num_id::<Sha256>(chain, &params.subject)?;
                         let num_info = match chain.get_num_info(&id)? {
-                            None => return Err(anyhow!("setfallback: num '{}' not found", id)),
-                            Some(num) if !wallet.is_mine(num.numout.script_pubkey.clone()) => {
-                                return Err(anyhow!("setfallback: you don't own '{}'", id));
-                            }
-                            Some(num)
-                                if wallet
-                                    .get_utxo(OutPoint::new(num.txid, num.numout.n as u32))
-                                    .is_none() =>
-                            {
-                                return Err(anyhow!(
-                                    "setfallback '{}': wallet already has a pending tx for this num",
-                                    id
-                                ));
-                            }
-                            Some(num) => num,
-                        };
+                                None => return Err(anyhow!("setfallback: num '{}' not found", id)),
+                                Some(num) if !wallet.is_mine(num.numout.script_pubkey.clone()) => {
+                                    return Err(anyhow!("setfallback: you don't own '{}'", id))
+                                }
+                                Some(num)
+                                    if wallet
+                                        .get_utxo(OutPoint::new(num.txid, num.numout.n as u32))
+                                        .is_none() =>
+                                {
+                                    return Err(anyhow!(
+                                        "setfallback '{}': wallet already has a pending tx for this num",
+                                        id
+                                    ))
+                                }
+                                Some(num) => num,
+                            };
                         let recipient = SpaceAddress(
                             Address::from_script(
                                 num_info.numout.script_pubkey.as_script(),
@@ -2122,9 +2190,7 @@ impl RpcWallet {
 
     pub async fn send_list_nums(&self, external: bool) -> anyhow::Result<ListNumsResponse> {
         let (resp, resp_rx) = oneshot::channel();
-        self.sender
-            .send(WalletCommand::ListPtrs { external, resp })
-            .await?;
+        self.sender.send(WalletCommand::ListPtrs { external, resp }).await?;
         resp_rx.await?
     }
 
@@ -2174,6 +2240,22 @@ impl RpcWallet {
         let (resp, resp_rx) = oneshot::channel();
         self.sender
             .send(WalletCommand::CanOperate { subject, resp })
+            .await?;
+        resp_rx.await?
+    }
+
+    pub async fn send_sign_event(
+        &self,
+        subject: Subject,
+        event: NostrEvent,
+    ) -> anyhow::Result<NostrEvent> {
+        let (resp, resp_rx) = oneshot::channel();
+        self.sender
+            .send(WalletCommand::SignEvent {
+                subject,
+                event,
+                resp,
+            })
             .await?;
         resp_rx.await?
     }
@@ -2227,15 +2309,25 @@ fn advance_address_to_unique_num_spk(
     }
 }
 
+
 fn find_delegate_utxo(chain: &mut Chain, subject: &Subject) -> anyhow::Result<FullNumOut> {
     let num_id = match &subject {
-        Subject::NumId(id) => Some(*id),
+        Subject::NumId(id) => Some(id.clone()),
         Subject::Label(label) if label.is_numeric() => {
-            let numeric: SNumeric = label.clone().try_into().expect("valid numeric");
-            let id = chain
-                .get_num_id(&numeric)?
-                .ok_or_else(|| anyhow!("delegate: numeric '{}' not found", label))?;
+            let numeric: SNumeric = label
+                .clone()
+                .try_into()
+                .expect("valid numeric");
+            let id = chain.get_num_id(&numeric)?.ok_or_else(|| {
+                anyhow!("delegate: numeric '{}' not found", label)
+            })?;
             Some(id)
+        }
+        Subject::Handle(h) => {
+            return Err(anyhow!("delegate: handle '{}' is not a valid subject", h));
+        }
+        Subject::HandlePattern(p) => {
+            return Err(anyhow!("delegate: pattern '{}' is not a valid subject", p));
         }
         Subject::Label(_) => None,
     };
@@ -2247,39 +2339,28 @@ fn find_delegate_utxo(chain: &mut Chain, subject: &Subject) -> anyhow::Result<Fu
 
         let target = NumId::from_spk::<Sha256>(num_utxo.numout.script_pubkey);
         if target == num_id {
-            return Err(anyhow!(
-                "delegate: num has no separate operator - call operate first"
-            ));
+            return Err(anyhow!("delegate: num has no separate operator - call operate first"))
         }
 
         let dk = DelegatorKey::from_id::<Sha256>(target);
         let Some(delegator) = chain.get_delegator(&dk)? else {
-            return Err(anyhow!(
-                "delegate: num {} is not operated - call operate first",
-                subject
-            ));
+            return Err(anyhow!("delegate: num {} is not operated - call operate first", subject));
         };
         if !delegator.is_numeric() {
-            return Err(anyhow!(
-                "delegate: num {} is delegated to {} - call operate to switch",
-                subject,
-                delegator
-            ));
+            return Err(anyhow!("delegate: num {} is delegated to {} - call operate to switch",
+                subject, delegator));
         }
-        let numeric: SNumeric = delegator.clone().try_into().expect("valid numeric");
+        let numeric : SNumeric = delegator.clone().try_into().expect("valid numeric");
 
         if numeric != num_utxo.numout.num.name {
-            return Err(anyhow!(
-                "delegate: num {} is delegated to {} - call operate to switch",
-                subject,
-                delegator
-            ));
+            return Err(anyhow!("delegate: num {} is delegated to {} - call operate to switch",
+                subject, delegator));
         }
 
         target
     } else {
         let Subject::Label(label) = subject else {
-            return Err(anyhow!("delegate: expected a space, got {}", subject));
+            return Err(anyhow!("delegate: expected a space, got {}", subject))
         };
 
         let space_utxo = chain
@@ -2292,28 +2373,20 @@ fn find_delegate_utxo(chain: &mut Chain, subject: &Subject) -> anyhow::Result<Fu
         let target = NumId::from_spk::<Sha256>(space_utxo.spaceout.script_pubkey);
         let dk = DelegatorKey::from_id::<Sha256>(target);
         let Some(delegator) = chain.get_delegator(&dk)? else {
-            return Err(anyhow!(
-                "delegate: space {} is not operated - call operate first",
-                subject
-            ));
+            return Err(anyhow!("delegate: space {} is not operated - call operate first", subject));
         };
 
         if delegator != space.name {
-            return Err(anyhow!(
-                "delegate: num {} is delegated to {} - call operate to switch",
-                target,
-                delegator
-            ));
+            return Err(anyhow!("delegate: num {} is delegated to {} - call operate to switch",
+            target, delegator)
+            );
         }
 
         target
     };
 
     let Some(num_utxo) = chain.get_num_info(&target)? else {
-        return Err(anyhow!(
-            "delegate: target '{}' not found - call operate first",
-            target
-        ));
+        return Err(anyhow!("delegate: target '{}' not found - call operate first", target));
     };
 
     Ok(num_utxo)

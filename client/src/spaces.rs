@@ -6,6 +6,7 @@ use tokio::sync::broadcast;
 
 use crate::store::chain::Chain;
 use crate::{
+    callbacks::CallbackRegistry,
     client::{BlockSource, Client},
     config::ExtendedNetwork,
     source::{
@@ -80,6 +81,8 @@ impl Spaced {
         node: &mut Client,
         id: ChainAnchor,
         block: Block,
+        callback_registry: &CallbackRegistry,
+        tokio_runtime: &tokio::runtime::Handle,
     ) -> anyhow::Result<()> {
         let sp_idx = self.chain.has_spaces_index();
         let pt_idx = self.chain.has_nums_index();
@@ -101,6 +104,22 @@ impl Spaced {
         if self.chain.maybe_commit(new_tip)? {
             self.update_anchors()?;
         }
+
+        let block_txids: Vec<_> = block.txdata.iter().map(|tx| tx.compute_txid()).collect();
+        let chain_tip = self.chain.tip();
+        let block_hash_str = id.hash.to_string();
+        let registry = callback_registry.clone();
+        tokio_runtime.spawn(async move {
+            registry
+                .check_and_notify(
+                    id.height,
+                    &block_hash_str,
+                    &block_txids,
+                    chain_tip.height,
+                )
+                .await;
+        });
+
         Ok(())
     }
 
@@ -108,6 +127,8 @@ impl Spaced {
         &mut self,
         source: BitcoinBlockSource,
         shutdown: broadcast::Sender<()>,
+        callback_registry: CallbackRegistry,
+        tokio_runtime: tokio::runtime::Handle,
     ) -> anyhow::Result<()> {
         let start_block = self.chain.tip();
         let mut node = Client::new(self.block_index_full);
@@ -151,7 +172,13 @@ impl Spaced {
                         }
                     }
                     BlockEvent::Block(id, block) => {
-                        self.handle_block(&mut node, id, block)?;
+                        self.handle_block(
+                            &mut node,
+                            id,
+                            block,
+                            &callback_registry,
+                            &tokio_runtime,
+                        )?;
                         info!("block={} height={}", id.hash, id.height);
                         if self.enable_pruning && id.height % PRUNING_BUFFER == 0 {
                             self.prune(&source, id.height);
@@ -195,13 +222,7 @@ impl Spaced {
     }
 
     pub fn genesis(network: ExtendedNetwork) -> ChainAnchor {
-        match network {
-            ExtendedNetwork::Testnet => ChainAnchor::TESTNET(),
-            ExtendedNetwork::Testnet4 => ChainAnchor::TESTNET4(),
-            ExtendedNetwork::Regtest => ChainAnchor::REGTEST(),
-            ExtendedNetwork::Mainnet => ChainAnchor::MAINNET(),
-            _ => panic!("unsupported network"),
-        }
+        network.genesis()
     }
 
     pub fn nums_genesis(network: ExtendedNetwork) -> ChainAnchor {
