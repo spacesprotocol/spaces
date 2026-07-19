@@ -57,10 +57,7 @@ impl NostrEvent {
     }
 
     pub fn serialize_for_signing(&self) -> Option<String> {
-        let pubkey = match &self.pubkey {
-            None => return None,
-            Some(pubkey) => pubkey,
-        };
+        let pubkey = self.pubkey.as_ref()?;
         // Nostr requires a specific serialization format for signing:
         // [0, <pubkey>, <created_at>, <kind>, <tags>, <content>]
         let serialized = json!([

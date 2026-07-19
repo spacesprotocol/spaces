@@ -2,6 +2,8 @@ pub mod constants;
 pub mod num_id;
 pub mod snumeric;
 
+use std::collections::{BTreeMap, BTreeSet};
+
 #[cfg(feature = "borsh")]
 use borsh::{BorshDeserialize, BorshSerialize};
 
@@ -26,6 +28,11 @@ pub trait NumSource {
         &mut self,
         id: &NumId,
     ) -> spaces_protocol::errors::Result<Option<OutPoint>>;
+
+    fn get_num_rebind(
+        &mut self,
+        key: &RebindKey,
+    ) -> spaces_protocol::errors::Result<Option<RebindData>>;
 
     fn get_commitment(
         &mut self,
@@ -70,6 +77,17 @@ pub struct TxChangeSet {
     pub spends: Vec<usize>,
     /// List of transaction outputs creating numouts.
     pub creates: Vec<NumOut>,
+    /// Dormant deaths (spent, no valid successor). Each carries the spent
+    /// tombstone numout. Apply overwrites the numout in place and parks a
+    /// rebind — derived verbatim from the tombstone — at `rebind(death spk)`.
+    /// The identity slot is never touched: it keeps pointing at the (now
+    /// spent) outpoint so `num_id -> outpoint` resolution works through
+    /// dormancy.
+    pub unbinds: Vec<FullNumOut>,
+    /// Revivals: each consumes a parked rebind (deletes the slot) and deletes
+    /// the tombstone `outpoint -> numout` entry. The revived num itself is in
+    /// `creates`, whose identity write repoints the genesis slot.
+    pub rebinds: Vec<RebindInfo>,
     /// New commitments made
     pub commitments: Vec<CommitmentInfo>,
     pub revoked_commitments: Vec<CommitmentInfo>,
@@ -138,6 +156,64 @@ pub struct NumOut {
         )
     )]
     pub script_pubkey: ScriptBuf,
+
+    /// Whether this num is spent. If so, it can be rebound.
+    pub spent: bool,
+}
+
+/// A parked rebind, stored at `rebind(spk) = ns_hash(NumRebind, H(spk))` —
+/// its own key domain, independent of the identity slot at
+/// `ns_hash(NumId, H(spk))`.
+///
+/// Written when a num dies at `spk` (spent with no valid successor); deleted
+/// when an `is_revival_output` (`value % 100 == 88`) at `spk` revives it.
+/// One rebind per spk: a second death at the same spk overwrites the parked
+/// one (requires `spk`'s key — death means spending a utxo at that spk — so
+/// no outsider can plant or grief it).
+///
+/// The identity slot is a separate, append-forever record: minted once,
+/// repointed on every rotation and revival, never deleted. Dormancy is read
+/// from `NumOut.spent`, not from either slot.
+#[derive(Clone, PartialEq, Debug)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "borsh", derive(BorshSerialize, BorshDeserialize))]
+pub struct RebindData {
+    /// The num's last outpoint before it was destroyed (now a spent
+    /// tombstone). The num may be foreign (rotated in from another spk)
+    /// or native (died at its own genesis spk) — revival treats them
+    /// identically.
+    #[cfg_attr(
+        feature = "borsh",
+        borsh(
+            serialize_with = "borsh_utils::serialize_outpoint",
+            deserialize_with = "borsh_utils::deserialize_outpoint"
+        )
+    )]
+    pub prev_outpoint: OutPoint,
+    /// The num to revive.
+    pub prev: Num,
+}
+
+/// A revival: consumes the rebind parked at `key`. The revived num is
+/// rebound to a new utxo, created in `creates`.
+#[derive(Clone, PartialEq, Debug)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "borsh", derive(BorshSerialize, BorshDeserialize))]
+pub struct RebindInfo {
+    /// The rebind slot to delete: `rebind(revival spk)`.
+    pub key: RebindKey,
+
+    /// The num's last outpoint before destruction. This
+    /// `outpoint -> numout` tombstone mapping must be deleted, because the
+    /// num is rebound to a different utxo (created in `creates`).
+    #[cfg_attr(
+        feature = "borsh",
+        borsh(
+            serialize_with = "borsh_utils::serialize_outpoint",
+            deserialize_with = "borsh_utils::deserialize_outpoint"
+        )
+    )]
+    pub prev_outpoint: OutPoint,
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -197,6 +273,7 @@ pub enum KeyKind {
     Delegator = 0x04,
     NumOutpoint = 0x05,
     SNumeric = 0x06,
+    NumRebind = 0x07,
 }
 
 impl KeyKind {
@@ -230,6 +307,14 @@ pub struct CommitmentKey([u8; 32]);
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "borsh", derive(BorshSerialize, BorshDeserialize))]
 pub struct NumOutpointKey([u8; 32]);
+
+/// Key of a parked rebind: `ns_hash(NumRebind, H(spk))`. A separate domain
+/// from the identity key (`NumId`), so deaths and rotations at one spk can
+/// never clobber each other's records.
+#[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "borsh", derive(BorshSerialize, BorshDeserialize))]
+pub struct RebindKey([u8; 32]);
 
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
 #[cfg_attr(feature = "borsh", derive(BorshSerialize, BorshDeserialize))]
@@ -285,6 +370,7 @@ pub struct ChainProofRequest {
 pub enum NumKeyKind {
     Id(NumId),
     Num(SNumeric),
+    Rebind(RebindKey),
     Commitment(CommitmentKey),
     CommitmentTip(CommitmentTipKey),
 }
@@ -294,6 +380,7 @@ impl KeyHash for DelegatorKey {}
 impl KeyHash for CommitmentKey {}
 impl KeyHash for NumOutpointKey {}
 impl KeyHash for NumericKey {}
+impl KeyHash for RebindKey {}
 
 impl Commitment {
     pub fn is_finalized(&self, height: u32) -> bool {
@@ -338,6 +425,18 @@ impl From<NumOutpointKey> for Hash {
 impl From<NumericKey> for Hash {
     fn from(value: NumericKey) -> Self {
         value.0
+    }
+}
+
+impl From<RebindKey> for Hash {
+    fn from(value: RebindKey) -> Self {
+        value.0
+    }
+}
+
+impl RebindKey {
+    pub fn from_spk<H: KeyHasher>(spk: ScriptBuf) -> Self {
+        Self(ns_hash::<H>(KeyKind::NumRebind, H::hash(spk.as_bytes())))
     }
 }
 
@@ -397,7 +496,12 @@ pub struct DelegateContext {
 
 pub struct TxContext {
     pub inputs: Vec<Stxo>,
+    /// Mint-intent output spks (`…77`) whose identity slot is already
+    /// occupied (a num was minted there at some point — identity slots are
+    /// never deleted).
     pub existing_num_spks: Vec<ScriptBuf>,
+    /// Revival-intent output spks (`…88`) with a parked rebind.
+    pub parked_rebinds: BTreeMap<ScriptBuf, RebindData>,
     // nums with existing delegations cannot be used multiple times
     pub nums_with_delegations: Vec<DelegatorKey>,
 }
@@ -428,7 +532,7 @@ impl TxContext {
         height: u32,
     ) -> spaces_protocol::errors::Result<Option<TxContext>> {
         let has_num_outputs = is_num_minting_locktime(&tx.lock_time)
-            && tx.output.iter().any(|out| out.is_ptr_output());
+            && tx.output.iter().any(|out| out.is_num_output());
         let has_spaces = spends_spaces || !space_outputs.is_empty();
 
         let relevant = has_spaces || has_num_outputs || Self::spending_nums(src, tx)?;
@@ -507,22 +611,32 @@ impl TxContext {
             }
         }
 
-        // Output script pubkeys that already have a num (skip minting duplicates)
-        let existing_num_spks = tx
-            .output
-            .iter()
-            .filter(|out| out.is_ptr_output())
-            .filter_map(|out| {
+        // One lookup per num output, keyed by intent: mint outputs check the
+        // identity slot (skip duplicates), revival outputs check the rebind
+        // slot (load the num to revive).
+        let mut existing_num_spks = Vec::new();
+        let mut parked_rebinds = BTreeMap::new();
+        for out in tx.output.iter() {
+            if out.is_mint_output() {
+                if existing_num_spks.contains(&out.script_pubkey) {
+                    continue;
+                }
                 let id = NumId::from_spk::<H>(out.script_pubkey.clone());
-                src.get_num_outpoint_by_id(&id)
-                    .ok()?
-                    .map(|_| out.script_pubkey.clone())
-            })
-            .collect();
+                if src.get_num_outpoint_by_id(&id)?.is_some() {
+                    existing_num_spks.push(out.script_pubkey.clone());
+                }
+            } else if out.is_revival_output() && !parked_rebinds.contains_key(&out.script_pubkey) {
+                let key = RebindKey::from_spk::<H>(out.script_pubkey.clone());
+                if let Some(rebind) = src.get_num_rebind(&key)? {
+                    parked_rebinds.insert(out.script_pubkey.clone(), rebind);
+                }
+            }
+        }
 
         Ok(Some(TxContext {
             inputs,
             existing_num_spks,
+            parked_rebinds,
             nums_with_delegations,
         }))
     }
@@ -559,6 +673,8 @@ impl Validator {
             txid: tx.compute_txid(),
             spends: vec![],
             creates: vec![],
+            unbinds: vec![],
+            rebinds: vec![],
             commitments: vec![],
             revoked_commitments: vec![],
             revoked_delegations: vec![],
@@ -637,6 +753,24 @@ impl Validator {
             _ => [].iter(), // Empty iterator for rollback or no-op
         };
 
+        // Successor outputs claimed by a same-index value match. Only input N
+        // can value-match output N, so each claim is unique and independent of
+        // input ordering: it beats a neighboring input's N+1 fallback no
+        // matter how an (untrusted) assembler arranges the tx, and the losing
+        // fallback goes down the unbind path instead of dangling. Outputs
+        // minted into spaces never host num successors and are excluded.
+        let value_matched_outputs: BTreeSet<usize> = ctx
+            .inputs
+            .iter()
+            .filter(|input| {
+                tx.output
+                    .get(input.n)
+                    .is_some_and(|o| o.value == input.numout.value)
+                    && !new_space_utxos.iter().any(|s| s.n == input.n)
+            })
+            .map(|input| input.n)
+            .collect();
+
         for input_ctx in ctx.inputs.into_iter() {
             // Handle delegate commitments (only first delegate gets commitment_root)
             if let Some(delegate) = input_ctx.delegate {
@@ -688,48 +822,86 @@ impl Validator {
                 }
             }
             // Process spend
-            changeset.spends.push(input_ctx.n);
             self.process_spend(
                 tx,
                 input_ctx.n,
                 input_ctx.numout,
                 &new_space_utxos,
+                &value_matched_outputs,
                 &mut changeset,
                 height,
                 &data_op,
             );
         }
 
-        // Process new nums
+        // Dedup is per (spk, intent): one tx may both mint (77) and revive
+        // (88) at the same spk; duplicate outputs with the same spk AND
+        // intent act once.
+        let mut seen_spks: Vec<(ScriptBuf, bool)> = Vec::with_capacity(tx.output.len());
+        // Process new nums (mints & revivals). Both require an opt-in signal:
+        // the minting locktime, or the tx being a spaces tx — space flows like
+        // operate (space transfer + create_num) can't carry the num locktime
+        // since spaces tracking claims it. A tx that is only relevant because
+        // it spends nums must not mint at incidental num-valued outputs.
+        // Successors created in process_spend are rotations, not mints, and
+        // are exempt (an output claimed as a successor is skipped here, so it
+        // never doubles as a mint or revival trigger).
+        let minting = is_num_minting_locktime(&tx.lock_time) || has_spaces;
         for (n, output) in tx.output.iter().enumerate() {
-            // Skip if not a PTR output or already processed
-            if !output.is_ptr_output()
+            // Skip if not a num output or already processed
+            if !minting
+                || !output.is_num_output()
                 || changeset.creates.iter().any(|x| x.n == n)
                 || new_space_utxos.iter().any(|x| x.n == n)
+                || seen_spks.contains(&(output.script_pubkey.clone(), output.is_mint_output()))
             {
                 continue;
             }
+            seen_spks.push((output.script_pubkey.clone(), output.is_mint_output()));
 
-            // Skip if num id already exists
-            if ctx
-                .existing_num_spks
-                .iter()
-                .any(|spk| output.script_pubkey.as_bytes() == spk.as_bytes())
-            {
-                continue;
+            if output.is_mint_output() {
+                // Fresh mint. Skip if an identity was ever minted at this spk:
+                // anti-dup for live nums, and the rotated-away/dormant genesis
+                // guard — identity slots are never deleted, so a compromised
+                // genesis key cannot re-mint over a num that lives (or died)
+                // elsewhere. Parked rebinds don't block minting.
+                if ctx.existing_num_spks.contains(&output.script_pubkey) {
+                    continue;
+                }
+                changeset.creates.push(NumOut {
+                    n,
+                    num: Num {
+                        id: NumId::from_spk::<H>(output.script_pubkey.clone()),
+                        name: SNumeric::new(height, tx_pos, n as u16),
+                        data: data_op.clone(),
+                        last_update: height,
+                    },
+                    value: output.value,
+                    script_pubkey: output.script_pubkey.clone(),
+                    spent: false,
+                });
+            } else {
+                // Revival. Consume the parked rebind if any (an `88` output
+                // at an empty slot is a no-op). The create's identity write
+                // repoints the revived num's genesis slot to the new utxo —
+                // uniform for native and foreign rebinds.
+                let Some(rebind) = ctx.parked_rebinds.get(&output.script_pubkey) else {
+                    continue;
+                };
+                let mut num = rebind.prev.clone();
+                num.last_update = height;
+                changeset.rebinds.push(RebindInfo {
+                    key: RebindKey::from_spk::<H>(output.script_pubkey.clone()),
+                    prev_outpoint: rebind.prev_outpoint,
+                });
+                changeset.creates.push(NumOut {
+                    n,
+                    num,
+                    value: output.value,
+                    script_pubkey: output.script_pubkey.clone(),
+                    spent: false,
+                });
             }
-
-            changeset.creates.push(NumOut {
-                n,
-                num: Num {
-                    id: NumId::from_spk::<H>(output.script_pubkey.clone()),
-                    name: SNumeric::new(height, tx_pos, n as u16),
-                    data: data_op.clone(),
-                    last_update: height,
-                },
-                value: output.value,
-                script_pubkey: output.script_pubkey.clone(),
-            });
         }
 
         // Create delegations for nums that opt in via output
@@ -766,37 +938,63 @@ impl Validator {
         input_index: usize,
         mut numout: NumOut,
         new_space_utxos: &[SpaceOut],
+        value_matched_outputs: &BTreeSet<usize>,
         changeset: &mut TxChangeSet,
         height: u32,
         data: &Option<Bytes>,
     ) {
-        let mut ptr = numout.num;
-        // if a corresponding output at the same index has the same value,
-        // that output becomes the num
-        let mut output_index = input_index;
-        let mut output = match tx.output.get(input_index) {
-            None => return, // cannot be rebound, if N doesn't exist, then we can skip n+1 rule check
-            Some(output) => output,
+        let output = match tx.output.get(input_index) {
+            // input N moves to Output N if value is the same.
+            Some(o) if o.value == numout.value => Some((o, input_index)),
+            // otherwise we assume it's a trading tx - new num should be at n+1,
+            // unless input n+1 value-matches output n+1: that claim wins and
+            // this num falls through to the unbind path (dormant, rebindable).
+            Some(_) => tx
+                .output
+                .get(input_index + 1)
+                .filter(|_| !value_matched_outputs.contains(&(input_index + 1)))
+                .map(|o| (o, input_index + 1)),
+            None => None,
         };
 
-        // if the values don't match, then we assume it's a trading tx - ptr should be at n+1
-        if output.value != numout.value {
-            output_index = input_index + 1;
-            output = match tx.output.get(output_index) {
-                None => return, // no rebounds
-                Some(output) => output,
-            };
-        }
+        // A successor being minted into a space is not a valid num successor;
+        // fall through to the unbind (dormant) path so the spent numout isn't
+        // left dangling as an active entry at a now-spent outpoint.
+        let output = output.filter(|(_, idx)| !new_space_utxos.iter().any(|s| s.n == *idx));
 
-        // if the output is already a space, then it can't be rebound
-        if new_space_utxos.iter().any(|s| s.n == output_index) {
+        let Some((output, output_index)) = output else {
+            // No valid num successor: either the output is missing, or it's
+            // being minted into a space (filtered out above). The num goes
+            // dormant and can be rebound later: apply overwrites the numout
+            // with this tombstone and parks a rebind (derived from it) at
+            // `rebind(death spk)`. The identity slot is never touched — it
+            // keeps pointing at this (now spent) outpoint, so resolution by
+            // id works through dormancy. No reads, no rotated/non-rotated
+            // distinction.
+            let input = tx
+                .input
+                .get(input_index)
+                .expect("spent numout should exist in tx inputs");
+            assert_eq!(
+                input.previous_output.vout as usize, numout.n,
+                "numout vout to match the spent numout"
+            );
+            numout.num.last_update = height;
+            numout.spent = true;
+
+            changeset.unbinds.push(FullNumOut {
+                txid: input.previous_output.txid,
+                numout,
+            });
             return;
-        }
+        };
 
+        let mut ptr = numout.num;
         ptr.last_update = height;
         // Only update data if:
         // 1. A data OP_RETURN is present
-        // 2. PTR is P2TR and input uses SIGHASH_ALL (prevents malicious data injection)
+        // 2. PTR is P2TR and input uses SIGHASH_ALL
+        // (prevents malicious data injection for modular txs)
         if let Some(new_data) = data
             && numout.script_pubkey.is_p2tr()
             && is_p2tr_sighash_all(tx, input_index)
@@ -808,6 +1006,9 @@ impl Validator {
         numout.script_pubkey = output.script_pubkey.clone();
         numout.num = ptr;
         changeset.creates.push(numout);
+
+        // only remove num output if it was re-created
+        changeset.spends.push(input_index);
     }
 }
 
@@ -910,12 +1111,24 @@ pub fn is_num_minting_locktime(lock_time: &LockTime) -> bool {
 }
 
 pub trait PtrTrackableOutput {
-    fn is_ptr_output(&self) -> bool;
+    /// Mint intent: create a fresh num at this spk (if its identity slot is
+    /// free).
+    fn is_mint_output(&self) -> bool;
+    /// Revival intent: consume the rebind parked at this spk (no-op if none).
+    fn is_revival_output(&self) -> bool;
+    /// Any num-intent output (relevance / dispatch loop).
+    fn is_num_output(&self) -> bool {
+        self.is_mint_output() || self.is_revival_output()
+    }
 }
 
 impl PtrTrackableOutput for TxOut {
-    fn is_ptr_output(&self) -> bool {
+    fn is_mint_output(&self) -> bool {
         self.value.to_sat() % 100 == 77
+    }
+
+    fn is_revival_output(&self) -> bool {
+        self.value.to_sat() % 100 == 88
     }
 }
 

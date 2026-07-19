@@ -84,6 +84,34 @@ pub fn deserialize_outpoint<R: io::Read>(reader: &mut R) -> io::Result<OutPoint>
     })
 }
 
+/// Serialize an `Option<OutPoint>`
+pub fn serialize_optional_outpoint<W: io::Write>(
+    outpoint: &Option<OutPoint>,
+    writer: &mut W,
+) -> io::Result<()> {
+    match outpoint {
+        None => writer.write_all(&[0u8]),
+        Some(outpoint) => {
+            writer.write_all(&[1u8])?;
+            serialize_outpoint(outpoint, writer)
+        }
+    }
+}
+
+/// Deserialize an `Option<OutPoint>`
+pub fn deserialize_optional_outpoint<R: io::Read>(reader: &mut R) -> io::Result<Option<OutPoint>> {
+    let mut tag = [0u8; 1];
+    reader.read_exact(&mut tag)?;
+    match tag[0] {
+        0 => Ok(None),
+        1 => Ok(Some(deserialize_outpoint(reader)?)),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid Option tag for OutPoint",
+        )),
+    }
+}
+
 /// Serialize a BlockHash
 pub fn serialize_block_hash<W: io::Write>(hash: &BlockHash, writer: &mut W) -> io::Result<()> {
     writer.write_all(&hash.to_byte_array())

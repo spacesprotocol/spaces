@@ -39,7 +39,7 @@ use spaces_nums::num_id::NumId;
 use spaces_nums::snumeric::SNumeric;
 use spaces_nums::{
     ChainProofRequest, Commitment, CommitmentKey, CommitmentTipKey, DelegatorKey, FullNumOut,
-    NumKeyKind, NumOut, NumOutpointKey, NumSource, RootAnchor,
+    NumKeyKind, NumOut, NumOutpointKey, NumSource, RebindData, RebindKey, RootAnchor,
 };
 use spaces_protocol::bitcoin::ScriptBuf;
 use spaces_protocol::hasher::Hash;
@@ -157,6 +157,10 @@ pub enum ChainStateCommand {
         subject: Subject,
         resp: Responder<anyhow::Result<Option<SLabel>>>,
     },
+    GetRebind {
+        script_pubkey: ScriptBuf,
+        resp: Responder<anyhow::Result<Option<RebindData>>>,
+    },
     GetNum {
         subject: Subject,
         resp: Responder<anyhow::Result<Option<FullNumOut>>>,
@@ -260,6 +264,14 @@ pub trait Rpc {
 
     #[method(name = "getdelegator")]
     async fn get_delegator(&self, subject: Subject) -> Result<Option<SLabel>, ErrorObjectOwned>;
+
+    /// Get the rebind parked at a script pubkey (a num that died there and
+    /// can be revived with a `…88` output), if any.
+    #[method(name = "getrebind")]
+    async fn get_rebind(
+        &self,
+        script_pubkey: ScriptBuf,
+    ) -> Result<Option<RebindData>, ErrorObjectOwned>;
 
     #[method(name = "checkpackage")]
     async fn check_package(
@@ -447,6 +459,29 @@ pub trait Rpc {
         space: &str,
         expire_height: u32,
     ) -> Result<(), ErrorObjectOwned>;
+
+    /// Debug builder: construct, sign, and broadcast a raw unbind/revive tx
+    /// that bypasses the wallet's correctness invariants (single-output rule,
+    /// same-tx revive+die filtering). Intended for protocol-level edge-case
+    /// tests; regtest only.
+    #[method(name = "debugbuildunbindraw")]
+    async fn debug_build_unbind_raw(
+        &self,
+        wallet: &str,
+        num_outpoints: Vec<OutPoint>,
+        extra_outputs: Vec<DebugRawOutput>,
+        locktime: Option<u32>,
+        fee_rate: FeeRate,
+    ) -> Result<TxResponse, ErrorObjectOwned>;
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct DebugRawOutput {
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
+    pub script_pubkey: ScriptBuf,
+    #[cfg_attr(feature = "schema", schemars(with = "u64"))]
+    pub amount: Amount,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -489,6 +524,8 @@ pub enum RpcWalletRequest {
     Transfer(TransferSpacesParams),
     #[serde(rename = "createnum")]
     CreateNum(CreateNumParams),
+    #[serde(rename = "unbind")]
+    Unbind(UnbindParams),
     #[serde(rename = "operate")]
     Operate(OperateParams),
     #[serde(rename = "commit")]
@@ -525,6 +562,18 @@ pub struct CreateNumParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schema", schemars(with = "Option<String>"))]
     pub bind_spk: Option<ScriptBuf>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct UnbindParams {
+    /// List of nums to destroy (becomes dormant; revivable at the death spk).
+    #[cfg_attr(feature = "schema", schemars(with = "Vec<String>"))]
+    pub subjects: Vec<Subject>,
+
+    /// Hex-encoded 32-byte secret key for unbinding nums not owned by the wallet
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secret: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -1069,6 +1118,18 @@ impl RpcServer for RpcServerImpl {
         Ok(delegator)
     }
 
+    async fn get_rebind(
+        &self,
+        script_pubkey: ScriptBuf,
+    ) -> Result<Option<RebindData>, ErrorObjectOwned> {
+        let rebind = self
+            .store
+            .get_rebind(script_pubkey)
+            .await
+            .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))?;
+        Ok(rebind)
+    }
+
     async fn check_package(
         &self,
         txs: Vec<String>,
@@ -1489,6 +1550,39 @@ impl RpcServer for RpcServerImpl {
             .await
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
     }
+
+    async fn debug_build_unbind_raw(
+        &self,
+        wallet: &str,
+        num_outpoints: Vec<OutPoint>,
+        extra_outputs: Vec<DebugRawOutput>,
+        locktime: Option<u32>,
+        fee_rate: FeeRate,
+    ) -> Result<TxResponse, ErrorObjectOwned> {
+        let info = self
+            .store
+            .get_server_info()
+            .await
+            .map_err(|e| ErrorObjectOwned::owned(-1, e.to_string(), None::<String>))?;
+        if info.network != ExtendedNetwork::Regtest {
+            return Err(ErrorObjectOwned::owned(
+                -1,
+                "debug_build_unbind_raw is only available on regtest",
+                None::<String>,
+            ));
+        }
+
+        let extras = extra_outputs
+            .into_iter()
+            .map(|o| (o.script_pubkey, o.amount))
+            .collect();
+
+        self.wallet(wallet)
+            .await?
+            .send_debug_build_unbind_raw(num_outpoints, extras, locktime, fee_rate)
+            .await
+            .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
+    }
 }
 
 impl AsyncChainState {
@@ -1690,6 +1784,15 @@ impl AsyncChainState {
                         .get_delegator(&DelegatorKey::from_id::<Sha256>(id))
                         .map_err(|e| anyhow!("could not get delegator: {}", e))
                 });
+                let _ = resp.send(result);
+            }
+            ChainStateCommand::GetRebind {
+                script_pubkey,
+                resp,
+            } => {
+                let result = state
+                    .get_num_rebind(&RebindKey::from_spk::<Sha256>(script_pubkey))
+                    .map_err(|e| anyhow!("could not get rebind: {}", e));
                 let _ = resp.send(result);
             }
             ChainStateCommand::GetNumOut { outpoint, resp } => {
@@ -1938,6 +2041,11 @@ impl AsyncChainState {
                         // non-existence proof
                         num_tree_keys.insert(id.into());
                     }
+                }
+                NumKeyKind::Rebind(k) => {
+                    // Inclusion proves a parked rebind; exclusion proves
+                    // nothing is revivable at the spk.
+                    num_tree_keys.insert(k.into());
                 }
                 NumKeyKind::Commitment(k) => {
                     num_tree_keys.insert(k.into());
@@ -2236,6 +2344,17 @@ impl AsyncChainState {
         resp_rx.await?
     }
 
+    pub async fn get_rebind(&self, script_pubkey: ScriptBuf) -> anyhow::Result<Option<RebindData>> {
+        let (resp, resp_rx) = oneshot::channel();
+        self.sender
+            .send(ChainStateCommand::GetRebind {
+                script_pubkey,
+                resp,
+            })
+            .await?;
+        resp_rx.await?
+    }
+
     pub async fn get_block_meta(
         &self,
         height_or_hash: HeightOrHash,
@@ -2325,7 +2444,7 @@ async fn get_server_info(
 
     let network = info.chain;
     let network = ExtendedNetwork::from_core_arg(&network)
-        .map_err(|_| anyhow!("Unknown network ({})", &network))?;
+        .map_err(|_| anyhow!("Unknown network ({})", network))?;
 
     let start_block = match network {
         ExtendedNetwork::Mainnet => 871_222,

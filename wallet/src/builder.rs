@@ -90,6 +90,7 @@ pub enum StackRequest {
     Execute(ExecuteRequest),
     Num(NumRequest),
     NumTransfer(NumTransfer),
+    NumUnbind(NumUnbind),
     NumDelegate(NumDelegate),
     Commitment(CommitmentRequest),
 }
@@ -99,6 +100,7 @@ pub enum StackOp {
     Open(OpenRevealParams),
     Bid(BidRequest),
     Num(NumParams),
+    NumUnbind { nums: Vec<NumUnbind> },
     NumDelegate(NumDelegate),
     Commitment(Vec<CommitmentRequest>),
 }
@@ -125,6 +127,9 @@ pub struct RegisterRequest {
 #[derive(Debug, Clone)]
 pub struct NumRequest {
     pub bind_spk: ScriptBuf,
+    /// Emit a revival output (`…88`, consumes the rebind parked at
+    /// `bind_spk`) instead of a mint output (`…77`).
+    pub revive: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -148,6 +153,13 @@ pub struct NumTransfer {
     pub recipient: SpaceAddress,
     /// Whether this transfer is a delegation (authorize) rather than a regular transfer
     pub is_delegate: bool,
+    /// Must be specified if num isn't owned by wallet
+    pub secret: Option<[u8; 32]>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NumUnbind {
+    pub num: FullNumOut,
     /// Must be specified if num isn't owned by wallet
     pub secret: Option<[u8; 32]>,
 }
@@ -690,6 +702,33 @@ impl Iterator for BuilderIterator<'_> {
                     detailed
                 }))
             }
+            StackOp::NumUnbind { nums } => {
+                let event_info: Vec<_> = nums
+                    .iter()
+                    .map(|n| {
+                        (
+                            n.num.numout.num.name.to_string(),
+                            n.num.numout.num.id.to_string(),
+                            // death spk doubles as the revival key
+                            n.num.numout.script_pubkey.clone(),
+                        )
+                    })
+                    .collect();
+                let tx = create_unbind_nums_tx(
+                    self.wallet,
+                    self.fee_rate,
+                    self.unspendables.clone(),
+                    self.confirmed_only,
+                    nums,
+                );
+                Some(tx.map(|tx| {
+                    let mut detailed = TxRecord::new(tx);
+                    for (name, num_id, death_spk) in event_info {
+                        detailed.add_unbind_num(name, num_id, death_spk);
+                    }
+                    detailed
+                }))
+            }
             StackOp::NumDelegate(d) => {
                 let num_name = d.num.numout.num.name.to_string();
                 let delegate_spk = d.unique_num_spk.clone();
@@ -815,6 +854,11 @@ impl Builder {
         self
     }
 
+    pub fn add_num_unbind(mut self, request: NumUnbind) -> Self {
+        self.requests.push(StackRequest::NumUnbind(request));
+        self
+    }
+
     pub fn add_num_delegate(mut self, request: NumDelegate) -> Self {
         self.requests.push(StackRequest::NumDelegate(request));
         self
@@ -916,6 +960,7 @@ impl Builder {
         let mut executes = Vec::new();
         let mut nums = Vec::new();
         let mut num_transfers = Vec::new();
+        let mut num_unbinds: Vec<NumUnbind> = Vec::new();
         let mut num_delegates = Vec::new();
         let mut commitments = Vec::new();
         for req in self.requests {
@@ -938,6 +983,7 @@ impl Builder {
                 StackRequest::Execute(params) => executes.push(params),
                 StackRequest::Num(params) => nums.push(params),
                 StackRequest::NumTransfer(params) => num_transfers.push(params),
+                StackRequest::NumUnbind(params) => num_unbinds.push(params),
                 StackRequest::NumDelegate(params) => num_delegates.push(params),
                 StackRequest::Commitment(req) => commitments.push(req),
             }
@@ -971,6 +1017,12 @@ impl Builder {
                 data: self.data.clone(),
             };
             stack.push(StackOp::Num(params))
+        }
+
+        if !num_unbinds.is_empty() {
+            // Batch every unbind into one destroy tx — matches the single-output
+            // correctness rule (the lone drain output is the entire output set).
+            stack.push(StackOp::NumUnbind { nums: num_unbinds });
         }
 
         for d in num_delegates {
@@ -1173,6 +1225,12 @@ pub fn num_utxo_dust(amount: Amount) -> Amount {
     Amount::from_sat(amount - (amount % 100) + 77)
 }
 
+/// Revival signal: consumes the rebind parked at the output's spk.
+pub fn num_utxo_revive_dust(amount: Amount) -> Amount {
+    let amount = amount.to_sat();
+    Amount::from_sat(amount - (amount % 100) + 88)
+}
+
 pub fn num_utxo_delegate_dust(amount: Amount) -> Amount {
     let amount = amount.to_sat();
     Amount::from_sat(amount - (amount % 100) + 78)
@@ -1306,6 +1364,131 @@ fn create_commitment_tx(
     Ok(signed)
 }
 
+fn create_unbind_nums_tx(
+    w: &mut SpacesWallet,
+    fee_rate: FeeRate,
+    unspendables: Vec<OutPoint>,
+    confirmed_only: bool,
+    nums: Vec<NumUnbind>,
+) -> anyhow::Result<Transaction> {
+    let sink = w
+        .internal
+        .next_unused_address(KeychainKind::Internal)
+        .script_pubkey();
+
+    let mut builder = w.build_tx(unspendables, confirmed_only)?;
+    builder.fee_rate(fee_rate);
+
+    // Spend every num to destroy. Input index is irrelevant with one output.
+    for unbind in &nums {
+        let outpoint = unbind.num.outpoint();
+        if let Some(secret) = unbind.secret {
+            // destroy foreign num
+            let mut spend_input = Input {
+                witness_utxo: Some(TxOut {
+                    value: unbind.num.numout.value,
+                    script_pubkey: unbind.num.numout.script_pubkey.clone(),
+                }),
+                final_script_witness: Some(Witness::default()),
+                final_script_sig: Some(ScriptBuf::new()),
+                proprietary: BTreeMap::new(),
+                ..Default::default()
+            };
+            spend_input.proprietary.insert(
+                SpacesWallet::spaces_signer("sign_with_custom_secret"),
+                secret.to_vec(),
+            );
+            builder
+                .add_foreign_utxo_with_sequence(
+                    outpoint,
+                    spend_input,
+                    tap_key_spend_weight(),
+                    Sequence::ENABLE_RBF_NO_LOCKTIME,
+                )
+                .map_err(|e| anyhow!("could not spend foreign num at {}: {}", outpoint, e))?;
+        } else {
+            builder
+                .add_utxo(outpoint)
+                .map_err(|e| anyhow!("could not spend num at {}: {}", outpoint, e))?;
+        }
+    }
+
+    // EXACTLY ONE output. Drain everything (num dust + funding − fee) into the
+    // internal sink so bdk creates no separate change output. A change output
+    // here would land at n+1 and REBIND the num instead of destroying it.
+    builder.drain_to(sink);
+
+    let psbt = builder.finish()?;
+    let tx = &psbt.unsigned_tx;
+
+    // Destroy requires that NO num finds a positional successor.
+    // With a single drain output this holds, but coin selection controls the
+    // output set, so verify on the unsigned psbt rather than waste signing work.
+    if tx.output.len() != 1 {
+        return Err(anyhow!(
+            "unbind tx must have exactly one output, got {} — a second output \
+             at n+1 would REBIND a num instead of destroying it",
+            tx.output.len()
+        ));
+    }
+    // Belt-and-suspenders: the lone output must not value-match any spent num
+    // (would be an n-successor = rotation, not a death).
+    let out_val = tx.output[0].value;
+    if nums.iter().any(|n| n.num.numout.value == out_val) {
+        return Err(anyhow!(
+            "drain output value-matches a num — could rotate, not destroy"
+        ));
+    }
+
+    let signed = w.sign(psbt, None)?;
+    Ok(signed)
+}
+
+/// Debug builder: construct a tx spending the given outpoints, drained to the
+/// wallet's internal sink, with explicit extra outputs appended. NO invariants
+/// are enforced — callers can produce txs that `create_unbind_nums_tx` would
+/// reject (e.g. value-matching n+1, multi-output destroys, same-tx revive+die).
+///
+/// Intended for regtest debug RPCs; do not expose to mainnet callers.
+pub fn debug_create_unbind_raw_tx(
+    w: &mut SpacesWallet,
+    fee_rate: FeeRate,
+    unspendables: Vec<OutPoint>,
+    confirmed_only: bool,
+    num_outpoints: Vec<OutPoint>,
+    extra_outputs: Vec<(ScriptBuf, Amount)>,
+    locktime: Option<LockTime>,
+) -> anyhow::Result<Transaction> {
+    let sink = w
+        .internal
+        .next_unused_address(KeychainKind::Internal)
+        .script_pubkey();
+
+    let mut builder = w.build_tx(unspendables, confirmed_only)?;
+    builder.ordering(TxOrdering::Untouched);
+    builder.fee_rate(fee_rate);
+    if let Some(lt) = locktime {
+        builder.nlocktime(lt);
+    }
+
+    for outpoint in &num_outpoints {
+        builder
+            .add_utxo(*outpoint)
+            .map_err(|e| anyhow!("could not spend outpoint {}: {}", outpoint, e))?;
+    }
+
+    // With Untouched ordering, explicit recipients appear in insertion order
+    // followed by the drain output. Callers can rely on these output indices.
+    for (spk, amount) in &extra_outputs {
+        builder.add_recipient(spk.clone(), *amount);
+    }
+    builder.drain_to(sink);
+
+    let psbt = builder.finish()?;
+    let signed = w.sign(psbt, None)?;
+    Ok(signed)
+}
+
 fn create_num_tx(
     w: &mut SpacesWallet,
     median_time: u64,
@@ -1369,7 +1552,12 @@ fn create_num_tx(
 
     // Handle binds: add any binds last to not mess with input/output order for transfers
     for num in params.binds {
-        builder.add_recipient(num.bind_spk, num_utxo_dust(Amount::from_sat(1000)));
+        let dust = if num.revive {
+            num_utxo_revive_dust(Amount::from_sat(1000))
+        } else {
+            num_utxo_dust(Amount::from_sat(1000))
+        };
+        builder.add_recipient(num.bind_spk, dust);
     }
 
     // Add data OP_RETURN if present (only makes sense with transfers)

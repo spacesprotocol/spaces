@@ -89,6 +89,13 @@ pub struct TransferNumEventDetails {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct UnbindNumEventDetails {
+    pub num_id: String,
+    /// The spk at which the num was destroyed; doubles as the revival key.
+    pub death_spk: ScriptBuf,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct DelegateEventDetails {
     pub script_pubkey: ScriptBuf,
 }
@@ -114,6 +121,7 @@ pub enum TxEventKind {
     Buy,
     CreateNum,
     TransferNum,
+    UnbindNum,
     Delegate,
     CommitRoot,
     RollbackRoot,
@@ -487,6 +495,18 @@ impl TxRecord {
         });
     }
 
+    pub fn add_unbind_num(&mut self, num: String, num_id: String, death_spk: ScriptBuf) {
+        self.events.push(TxEvent {
+            kind: TxEventKind::UnbindNum,
+            space: Some(num),
+            previous_spaceout: None,
+            details: Some(
+                serde_json::to_value(UnbindNumEventDetails { num_id, death_spk })
+                    .expect("json value"),
+            ),
+        });
+    }
+
     pub fn add_delegate(&mut self, num: String, to: ScriptBuf) {
         self.events.push(TxEvent {
             kind: TxEventKind::Delegate,
@@ -571,6 +591,7 @@ impl Display for TxEventKind {
             TxEventKind::Renew => "renew",
             TxEventKind::CreateNum => "create-num",
             TxEventKind::TransferNum => "transfer-num",
+            TxEventKind::UnbindNum => "unbind-num",
             TxEventKind::Delegate => "delegate",
             TxEventKind::CommitRoot => "commit-root",
             TxEventKind::RollbackRoot => "rollback-root",
@@ -596,6 +617,7 @@ impl FromStr for TxEventKind {
             "renew" => Ok(TxEventKind::Renew),
             "create-num" => Ok(TxEventKind::CreateNum),
             "transfer-num" => Ok(TxEventKind::TransferNum),
+            "unbind-num" => Ok(TxEventKind::UnbindNum),
             "delegate" => Ok(TxEventKind::Delegate),
             "commit-root" => Ok(TxEventKind::CommitRoot),
             "rollback-root" => Ok(TxEventKind::RollbackRoot),

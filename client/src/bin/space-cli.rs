@@ -8,7 +8,7 @@ use jsonrpsee::{
     http_client::HttpClient,
 };
 use spaces_client::rpc::{
-    CommitParams, CreateNumParams, DelegateParams, OperateParams, SetFallbackParams,
+    CommitParams, CreateNumParams, DelegateParams, OperateParams, SetFallbackParams, UnbindParams,
 };
 use spaces_client::store::Sha256;
 use spaces_client::{
@@ -161,6 +161,26 @@ enum Commands {
     GetNum {
         /// Space name, numeric, or num id
         subject: Subject,
+    },
+    /// Unbind nums: spend them with no successor so they go dormant.
+    /// A dormant num can be revived at its death spk with `createnum`.
+    #[command(name = "unbind")]
+    Unbind {
+        /// Nums to unbind (e.g., num1... or #800000-3-1)
+        subjects: Vec<Subject>,
+        /// Read hex-encoded secret key from stdin for unbinding nums not owned by wallet
+        #[arg(long)]
+        secret_stdin: bool,
+        /// Fee rate to use in sat/vB
+        #[arg(long, short)]
+        fee_rate: Option<u64>,
+    },
+    /// Get the rebind parked at a script pubkey (a num that died there,
+    /// revivable with `createnum --bind-spk <hex>`), if any
+    #[command(name = "getrebind")]
+    GetRebind {
+        /// Script public key as hex string
+        script_pubkey: String,
     },
     /// Transfer ownership of spaces and/or nums to the given name or address
     #[command(
@@ -607,7 +627,7 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
             let response = cli.client.wallet_create(&cli.wallet).await?;
             println!("⚠️ Write down your recovery phrase NOW!");
             println!("This is the ONLY time it will be shown:");
-            println!("{}", &response);
+            println!("{}", response);
         }
         Commands::RecoverWallet => {
             print!("Enter mnemonic phrase: ");
@@ -1018,6 +1038,43 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
                 .await
                 .map_err(|e| ClientError::Custom(e.to_string()))?;
             println!("{}", serde_json::to_string(&num).expect("result"));
+        }
+        Commands::Unbind {
+            subjects,
+            secret_stdin,
+            fee_rate,
+        } => {
+            let secret = if secret_stdin {
+                let mut input = String::new();
+                io::stdin().read_line(&mut input).map_err(|e| {
+                    ClientError::Custom(format!("failed to read secret from stdin: {}", e))
+                })?;
+                Some(input.trim().to_string())
+            } else {
+                None
+            };
+            cli.send_request(
+                Some(RpcWalletRequest::Unbind(UnbindParams { subjects, secret })),
+                None,
+                fee_rate,
+                false,
+            )
+            .await?;
+            println!(
+                "Num(s) go dormant once the tx confirms; revive with `createnum --bind-spk <death spk>`"
+            );
+        }
+        Commands::GetRebind { script_pubkey } => {
+            let spk = ScriptBuf::from(
+                hex::decode(script_pubkey)
+                    .map_err(|_| ClientError::Custom("Invalid spk hex".to_string()))?,
+            );
+            let rebind = cli
+                .client
+                .get_rebind(spk)
+                .await
+                .map_err(|e| ClientError::Custom(e.to_string()))?;
+            println!("{}", serde_json::to_string(&rebind).expect("result"));
         }
 
         Commands::GetNumOut { outpoint } => {
