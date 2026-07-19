@@ -52,8 +52,7 @@ use spaces_nums::{DelegatorKey, NumOut, NumSource, RebindKey};
 use spaces_protocol::bitcoin::address::ParseError;
 use spaces_protocol::bitcoin::{Network, ScriptBuf};
 use spaces_wallet::builder::{
-    CommitmentRequest, NumDelegate, NumRequest, NumTransfer, NumUnbind,
-    debug_create_unbind_raw_tx,
+    CommitmentRequest, NumDelegate, NumRequest, NumTransfer, NumUnbind, debug_create_unbind_raw_tx,
 };
 use tabled::Tabled;
 use tokio::{
@@ -756,7 +755,7 @@ impl RpcWallet {
     ) -> anyhow::Result<TxResponse> {
         let unspendables = wallet.list_spaces_outpoints(chain)?;
         let lock = locktime
-            .map(|h| LockTime::from_height(h))
+            .map(LockTime::from_height)
             .transpose()
             .map_err(|e| anyhow::anyhow!("invalid locktime height: {}", e))?;
 
@@ -1791,10 +1790,7 @@ impl RpcWallet {
                             Some(full)
                                 if secret.is_none()
                                     && wallet
-                                        .get_utxo(OutPoint::new(
-                                            full.txid,
-                                            full.numout.n as u32,
-                                        ))
+                                        .get_utxo(OutPoint::new(full.txid, full.numout.n as u32))
                                         .is_none() =>
                             {
                                 return Err(anyhow!(
@@ -1806,8 +1802,8 @@ impl RpcWallet {
                         };
                         // Only attach the secret to nums the wallet doesn't own —
                         // owned nums sign through the wallet as usual.
-                        let secret = secret
-                            .filter(|_| !wallet.is_mine(num.numout.script_pubkey.clone()));
+                        let secret =
+                            secret.filter(|_| !wallet.is_mine(num.numout.script_pubkey.clone()));
                         builder = builder.add_num_unbind(NumUnbind { num, secret });
                     }
                 }

@@ -6,18 +6,18 @@
 
 use std::collections::HashMap;
 
-use bitcoin::hashes::{sha256, Hash as _};
+use bitcoin::hashes::{Hash as _, sha256};
 use bitcoin::{
-    absolute::LockTime, transaction::Version, Amount, OutPoint, ScriptBuf, Sequence, Transaction,
-    TxIn, TxOut, Txid, Witness,
+    Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, Witness,
+    absolute::LockTime, transaction::Version,
 };
 use spaces_nums::num_id::NumId;
 use spaces_nums::snumeric::SNumeric;
 use spaces_nums::{
     Num, NumOut, NumSource, RebindData, RebindKey, TxChangeSet, TxContext, Validator,
 };
-use spaces_protocol::hasher::KeyHasher;
 use spaces_protocol::SpaceOut;
+use spaces_protocol::hasher::KeyHasher;
 
 const HEIGHT: u32 = 100;
 const TX_POS: u16 = 3;
@@ -80,10 +80,7 @@ impl NumSource for MockSrc {
         Ok(self.numouts.get(outpoint).cloned())
     }
 
-    fn get_num_id(
-        &mut self,
-        _snum: &SNumeric,
-    ) -> spaces_protocol::errors::Result<Option<NumId>> {
+    fn get_num_id(&mut self, _snum: &SNumeric) -> spaces_protocol::errors::Result<Option<NumId>> {
         Ok(None)
     }
 }
@@ -190,8 +187,8 @@ fn process(src: &mut MockSrc, tx: &Transaction, new_spaces: Vec<SpaceOut>) -> Tx
 fn mint_requires_locktime_signal_for_relevance() {
     let mut src = MockSrc::default();
     let tx = build_tx(LockTime::ZERO, &[outpoint(9, 0)], &[(spk(1), 1077)]);
-    let ctx = TxContext::from_tx::<MockSrc, TestHasher>(&mut src, &tx, false, vec![], HEIGHT)
-        .unwrap();
+    let ctx =
+        TxContext::from_tx::<MockSrc, TestHasher>(&mut src, &tx, false, vec![], HEIGHT).unwrap();
     assert!(
         ctx.is_none(),
         "num-valued outputs without the minting locktime must not make a tx relevant"
@@ -246,11 +243,18 @@ fn spaces_tx_mints_without_num_locktime() {
         value: Amount::from_sat(662),
         script_pubkey: spk(1),
     };
-    let tx = build_tx(LockTime::ZERO, &[outpoint(9, 0)], &[(spk(1), 662), (spk(2), 1077)]);
+    let tx = build_tx(
+        LockTime::ZERO,
+        &[outpoint(9, 0)],
+        &[(spk(1), 662), (spk(2), 1077)],
+    );
     let changeset = process(&mut src, &tx, vec![space_out]);
 
     assert_eq!(changeset.creates.len(), 1);
-    assert_eq!(changeset.creates[0].n, 1, "space-claimed output 0 must not mint");
+    assert_eq!(
+        changeset.creates[0].n, 1,
+        "space-claimed output 0 must not mint"
+    );
     assert_eq!(
         changeset.creates[0].num.id,
         NumId::from_spk::<TestHasher>(spk(2))
@@ -281,7 +285,10 @@ fn unbind_emits_tombstone_only() {
         assert_eq!(fno.outpoint(), outpoint(1, 0));
         assert_eq!(fno.numout.num.id, a.id);
         assert_eq!(fno.numout.num.last_update, HEIGHT);
-        assert_eq!(fno.numout.script_pubkey, current, "tombstone keeps the death spk");
+        assert_eq!(
+            fno.numout.script_pubkey, current,
+            "tombstone keeps the death spk"
+        );
     }
 }
 
@@ -302,10 +309,21 @@ fn value_match_beats_fallback_and_loser_unbinds() {
     );
     let changeset = process(&mut src, &tx, vec![]);
 
-    assert_eq!(changeset.creates.len(), 1, "output 1 hosts exactly one successor");
+    assert_eq!(
+        changeset.creates.len(),
+        1,
+        "output 1 hosts exactly one successor"
+    );
     assert_eq!(changeset.creates[0].n, 1);
-    assert_eq!(changeset.creates[0].num.id, b.id, "value-match wins the output");
-    assert_eq!(changeset.spends, vec![1], "only the winner's input is a plain spend");
+    assert_eq!(
+        changeset.creates[0].num.id, b.id,
+        "value-match wins the output"
+    );
+    assert_eq!(
+        changeset.spends,
+        vec![1],
+        "only the winner's input is a plain spend"
+    );
 
     assert_eq!(changeset.unbinds.len(), 1, "the displaced num goes dormant");
     let fno = &changeset.unbinds[0];
@@ -352,7 +370,11 @@ fn revival_consumes_rebind_and_deletes_slot() {
         let dormant = foreign_num(&genesis_spk);
         seed_rebind(&mut src, &revival_spk, outpoint(4, 0), dormant.clone());
 
-        let tx = build_tx(mint_locktime(), &[outpoint(9, 0)], &[(revival_spk.clone(), 1088)]);
+        let tx = build_tx(
+            mint_locktime(),
+            &[outpoint(9, 0)],
+            &[(revival_spk.clone(), 1088)],
+        );
         let changeset = process(&mut src, &tx, vec![]);
 
         assert_eq!(changeset.rebinds.len(), 1);
@@ -362,11 +384,18 @@ fn revival_consumes_rebind_and_deletes_slot() {
             RebindKey::from_spk::<TestHasher>(revival_spk.clone()),
             "the parked rebind slot is deleted"
         );
-        assert_eq!(rebind.prev_outpoint, outpoint(4, 0), "tombstone entry is deleted");
+        assert_eq!(
+            rebind.prev_outpoint,
+            outpoint(4, 0),
+            "tombstone entry is deleted"
+        );
 
         assert_eq!(changeset.creates.len(), 1);
         let created = &changeset.creates[0];
-        assert_eq!(created.num.id, dormant.id, "revival keeps the genesis identity");
+        assert_eq!(
+            created.num.id, dormant.id,
+            "revival keeps the genesis identity"
+        );
         assert_eq!(created.num.name, dormant.name);
         assert_eq!(created.num.last_update, HEIGHT);
         assert!(!created.spent);
@@ -388,9 +417,15 @@ fn revival_requires_mint_signal() {
     );
     let changeset = process(&mut src, &tx, vec![]);
 
-    assert!(changeset.rebinds.is_empty(), "no revival without the mint signal");
+    assert!(
+        changeset.rebinds.is_empty(),
+        "no revival without the mint signal"
+    );
     assert_eq!(changeset.creates.len(), 1);
-    assert_eq!(changeset.creates[0].num.id, unrelated.id, "only the rotation");
+    assert_eq!(
+        changeset.creates[0].num.id, unrelated.id,
+        "only the rotation"
+    );
 }
 
 #[test]
@@ -404,7 +439,10 @@ fn mint_value_does_not_revive() {
     let tx = build_tx(mint_locktime(), &[outpoint(9, 0)], &[(spk(1), 1077)]);
     let changeset = process(&mut src, &tx, vec![]);
 
-    assert!(changeset.rebinds.is_empty(), "the parked rebind is untouched");
+    assert!(
+        changeset.rebinds.is_empty(),
+        "the parked rebind is untouched"
+    );
     assert_eq!(changeset.creates.len(), 1);
     assert_eq!(
         changeset.creates[0].num.id,
@@ -441,7 +479,10 @@ fn same_tx_mint_and_revive_at_same_spk() {
     let changeset = process(&mut src, &tx, vec![]);
 
     assert_eq!(changeset.creates.len(), 2);
-    assert_eq!(changeset.creates[0].num.id, NumId::from_spk::<TestHasher>(spk(1)));
+    assert_eq!(
+        changeset.creates[0].num.id,
+        NumId::from_spk::<TestHasher>(spk(1))
+    );
     assert_eq!(changeset.creates[1].num.id, dormant.id);
     assert_eq!(changeset.rebinds.len(), 1);
 }
@@ -498,7 +539,10 @@ fn rotation_successor_not_double_minted() {
     let changeset = process(&mut src, &tx, vec![]);
 
     assert_eq!(changeset.creates.len(), 1);
-    assert_eq!(changeset.creates[0].num.id, a.id, "rotation, not a fresh mint");
+    assert_eq!(
+        changeset.creates[0].num.id, a.id,
+        "rotation, not a fresh mint"
+    );
     assert_eq!(changeset.spends, vec![0]);
 }
 
@@ -517,5 +561,8 @@ fn successor_claim_beats_revival_dispatch() {
 
     assert_eq!(changeset.creates.len(), 1);
     assert_eq!(changeset.creates[0].num.id, a.id, "successor claim wins");
-    assert!(changeset.rebinds.is_empty(), "revival does not fire on a claimed output");
+    assert!(
+        changeset.rebinds.is_empty(),
+        "revival does not fire on a claimed output"
+    );
 }

@@ -15,7 +15,10 @@ use spacedb::{
 };
 use spaces_nums::num_id::NumId;
 use spaces_nums::snumeric::SNumeric;
-use spaces_nums::{Commitment, CommitmentKey, CommitmentTipKey, DelegatorKey, FullNumOut, NumOut, NumOutpointKey, NumSource, RebindData, RebindKey};
+use spaces_nums::{
+    Commitment, CommitmentKey, CommitmentTipKey, DelegatorKey, FullNumOut, NumOut, NumOutpointKey,
+    NumSource, RebindData, RebindKey,
+};
 use spaces_protocol::slabel::SLabel;
 use spaces_protocol::{
     bitcoin::{BlockHash, OutPoint},
@@ -302,9 +305,9 @@ impl NumSource for NumLiveSnapshot {
         &mut self,
         id: &NumId,
     ) -> spaces_protocol::errors::Result<Option<OutPoint>> {
-        let result: Option<EncodableOutpoint> = self
-            .get(*id)
-            .map_err(|err| spaces_protocol::errors::Error::IO(format!("getnumoutpoint: {}", err)))?;
+        let result: Option<EncodableOutpoint> = self.get(*id).map_err(|err| {
+            spaces_protocol::errors::Error::IO(format!("getnumoutpoint: {}", err))
+        })?;
         Ok(result.map(|o| o.into()))
     }
 

@@ -7,7 +7,9 @@ use anyhow::{Result, anyhow};
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::de::Error as SerdeError;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use spaces_nums::{CommitmentKey, CommitmentTipKey, DelegatorKey, NumOutpointKey, RebindData, RebindKey};
+use spaces_nums::{
+    CommitmentKey, CommitmentTipKey, DelegatorKey, NumOutpointKey, RebindData, RebindKey,
+};
 use spaces_protocol::{
     Bytes, Covenant, FullSpaceOut, RevokeReason, SpaceOut,
     bitcoin::{Amount, Block, BlockHash, OutPoint, Txid},
@@ -366,8 +368,6 @@ impl Client {
             // commitment key = HASH(HASH(space) || state root) -> commitment
             state.insert_commitment(commitment_key, commitment_info.commitment);
         }
-
-
 
         // Rebinds (revivals): consume the parked rebind and delete the
         // tombstone. The revived num itself is in `creates`, whose identity

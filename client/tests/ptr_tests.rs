@@ -1,7 +1,7 @@
 use anyhow::anyhow;
 use spaces_client::rpc::{
-    CommitParams, CreateNumParams, OperateParams, SetFallbackParams, Subject,
-    TransferSpacesParams, UnbindParams,
+    CommitParams, CreateNumParams, OperateParams, SetFallbackParams, Subject, TransferSpacesParams,
+    UnbindParams,
 };
 use spaces_client::store::Sha256;
 use spaces_client::{
@@ -2780,10 +2780,7 @@ async fn it_should_guard_rotated_away_genesis(rig: &TestRig) -> anyhow::Result<(
         .get_num(Subject::NumId(id_x))
         .await?
         .expect("X's identity slot still resolves to a spent tombstone");
-    assert!(
-        after_unbind.numout.spent,
-        "X is dormant after Bob's unbind"
-    );
+    assert!(after_unbind.numout.spent, "X is dormant after Bob's unbind");
 
     // (4) Guard fires: CreateNum at the GENESIS spk_G must NOT revive X.
     // No rebind is parked at spk_G (X died at spk_R), so this is a mint
@@ -2811,11 +2808,7 @@ async fn it_should_guard_rotated_away_genesis(rig: &TestRig) -> anyhow::Result<(
         "expected already-exists rejection, got: {err_msg}"
     );
     assert!(
-        rig.spaced
-            .client
-            .get_rebind(spk_g.clone())
-            .await?
-            .is_none(),
+        rig.spaced.client.get_rebind(spk_g.clone()).await?.is_none(),
         "no rebind parked at the genesis spk"
     );
     let after_genesis_try = rig
@@ -3045,11 +3038,7 @@ async fn it_should_not_clobber_identity_on_rotated_death(rig: &TestRig) -> anyho
     assert!(!y_revived.numout.spent, "Y is live again");
     assert_eq!(y_revived.numout.script_pubkey, spk_a, "Y revived at spk_A");
     assert!(
-        rig.spaced
-            .client
-            .get_rebind(spk_a.clone())
-            .await?
-            .is_none(),
+        rig.spaced.client.get_rebind(spk_a.clone()).await?.is_none(),
         "rebind consumed"
     );
     let n_final = rig
@@ -3058,7 +3047,10 @@ async fn it_should_not_clobber_identity_on_rotated_death(rig: &TestRig) -> anyho
         .get_num(Subject::NumId(id_n))
         .await?
         .expect("N still resolves");
-    assert!(!n_final.numout.spent, "N still live — both co-exist at spk_A");
+    assert!(
+        !n_final.numout.spent,
+        "N still live — both co-exist at spk_A"
+    );
     println!("✓ Y revived; N and Y co-live at spk_A");
 
     Ok(())
@@ -3169,11 +3161,7 @@ async fn it_should_not_clobber_rebind_on_subsequent_move(rig: &TestRig) -> anyho
         "precondition: N stays live through Y's rotated death"
     );
     assert!(
-        rig.spaced
-            .client
-            .get_rebind(spk_a.clone())
-            .await?
-            .is_some(),
+        rig.spaced.client.get_rebind(spk_a.clone()).await?.is_some(),
         "precondition: Y's rebind parked at rebind(spk_A)"
     );
     println!("✓ pre-condition: rebind(spk_A) = Y, N live");
@@ -3256,7 +3244,6 @@ async fn it_should_not_clobber_rebind_on_subsequent_move(rig: &TestRig) -> anyho
 
     Ok(())
 }
-
 
 // ============== Test: Unbind a Foreign Num With a Secret ==============
 //

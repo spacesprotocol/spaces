@@ -95,7 +95,6 @@ pub struct TxChangeSet {
     pub new_delegations: Vec<DelegationInfo>,
 }
 
-
 #[derive(Clone, PartialEq, Debug)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "borsh", derive(BorshSerialize, BorshDeserialize))]
@@ -955,14 +954,13 @@ impl Validator {
                 .get(input_index + 1)
                 .filter(|_| !value_matched_outputs.contains(&(input_index + 1)))
                 .map(|o| (o, input_index + 1)),
-            None => None
+            None => None,
         };
 
         // A successor being minted into a space is not a valid num successor;
         // fall through to the unbind (dormant) path so the spent numout isn't
         // left dangling as an active entry at a now-spent outpoint.
-        let output = output
-            .filter(|(_, idx)| !new_space_utxos.iter().any(|s| s.n == *idx));
+        let output = output.filter(|(_, idx)| !new_space_utxos.iter().any(|s| s.n == *idx));
 
         let Some((output, output_index)) = output else {
             // No valid num successor: either the output is missing, or it's
@@ -973,10 +971,14 @@ impl Validator {
             // keeps pointing at this (now spent) outpoint, so resolution by
             // id works through dormancy. No reads, no rotated/non-rotated
             // distinction.
-            let input = tx.input.get(input_index)
+            let input = tx
+                .input
+                .get(input_index)
                 .expect("spent numout should exist in tx inputs");
-            assert_eq!(input.previous_output.vout as usize, numout.n,
-                       "numout vout to match the spent numout");
+            assert_eq!(
+                input.previous_output.vout as usize, numout.n,
+                "numout vout to match the spent numout"
+            );
             numout.num.last_update = height;
             numout.spent = true;
 
@@ -984,7 +986,7 @@ impl Validator {
                 txid: input.previous_output.txid,
                 numout,
             });
-            return
+            return;
         };
 
         let mut ptr = numout.num;

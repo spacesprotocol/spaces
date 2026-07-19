@@ -2444,7 +2444,7 @@ async fn get_server_info(
 
     let network = info.chain;
     let network = ExtendedNetwork::from_core_arg(&network)
-        .map_err(|_| anyhow!("Unknown network ({})", &network))?;
+        .map_err(|_| anyhow!("Unknown network ({})", network))?;
 
     let start_block = match network {
         ExtendedNetwork::Mainnet => 871_222,

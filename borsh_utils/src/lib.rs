@@ -99,9 +99,7 @@ pub fn serialize_optional_outpoint<W: io::Write>(
 }
 
 /// Deserialize an `Option<OutPoint>`
-pub fn deserialize_optional_outpoint<R: io::Read>(
-    reader: &mut R,
-) -> io::Result<Option<OutPoint>> {
+pub fn deserialize_optional_outpoint<R: io::Read>(reader: &mut R) -> io::Result<Option<OutPoint>> {
     let mut tag = [0u8; 1];
     reader.read_exact(&mut tag)?;
     match tag[0] {

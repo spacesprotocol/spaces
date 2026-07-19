@@ -11,7 +11,10 @@ use log::info;
 use spacedb::Hash;
 use spaces_nums::num_id::NumId;
 use spaces_nums::snumeric::SNumeric;
-use spaces_nums::{Commitment, CommitmentKey, CommitmentTipKey, DelegatorKey, FullNumOut, NumOut, NumOutpointKey, NumSource, RebindData, RebindKey, RootAnchor};
+use spaces_nums::{
+    Commitment, CommitmentKey, CommitmentTipKey, DelegatorKey, FullNumOut, NumOut, NumOutpointKey,
+    NumSource, RebindData, RebindKey, RootAnchor,
+};
 use spaces_protocol::bitcoin::hashes::Hash as HashUtil;
 use spaces_protocol::bitcoin::{BlockHash, OutPoint};
 use spaces_protocol::constants::ChainAnchor;

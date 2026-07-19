@@ -627,7 +627,7 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
             let response = cli.client.wallet_create(&cli.wallet).await?;
             println!("⚠️ Write down your recovery phrase NOW!");
             println!("This is the ONLY time it will be shown:");
-            println!("{}", &response);
+            println!("{}", response);
         }
         Commands::RecoverWallet => {
             print!("Enter mnemonic phrase: ");
@@ -1060,7 +1060,9 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
                 false,
             )
             .await?;
-            println!("Num(s) go dormant once the tx confirms; revive with `createnum --bind-spk <death spk>`");
+            println!(
+                "Num(s) go dormant once the tx confirms; revive with `createnum --bind-spk <death spk>`"
+            );
         }
         Commands::GetRebind { script_pubkey } => {
             let spk = ScriptBuf::from(
