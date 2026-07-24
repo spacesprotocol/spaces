@@ -194,7 +194,11 @@ impl Chain {
         cache_size: Option<usize>,
     ) -> anyhow::Result<Self> {
         let proto_db_path = dir.join("root.sdb");
-        let nums_db_path = dir.join("nums.sdb");
+        // Versioned filename: the numout storage format changed (spent flag +
+        // split identity/rebind slots), so the old `nums.sdb` is incompatible.
+        // Bumping the name makes upgrading nodes miss the file and rebuild the
+        // nums tree from `nums_genesis` (root.sdb / spaces state is untouched).
+        let nums_db_path = dir.join("nums_v2.sdb");
         let initial_num_sync = !nums_db_path.exists();
 
         let sp_store = SpStore::open(proto_db_path, index_hashes, cache_size)?;

@@ -12,7 +12,7 @@ cargo run -p spaces_checkpoint --bin checkpoint-builder -- --data-dir /path/to/s
 
 This will:
 1. Read the current tip (block hash + height) from `root.sdb`
-2. Create `checkpoint-<height>.tar.gz` containing `root.sdb`, `nums.sdb`, and `index.sqlite`
+2. Create `checkpoint-<height>.tar.gz` containing `root.sdb`, `nums_v2.sdb`, and `index.sqlite`
 3. Update `checkpoint/src/integrity.rs` with the SHA-256 digest
 4. If `--upload` is specified, upload the archive and `latest.json` to S3
 
