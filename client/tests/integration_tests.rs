@@ -1185,6 +1185,7 @@ async fn it_should_allow_buy_sell(rig: &TestRig) -> anyhow::Result<()> {
         .wallet_buy(
             BOB,
             listing.clone(),
+            None,
             Some(FeeRate::from_sat_per_vb(1).expect("rate")),
             false,
         )

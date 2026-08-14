@@ -23,7 +23,7 @@ use spaces_wallet::{
         chain::{BlockId, ChainPosition, local_chain::CheckPoint},
     },
     bitcoin,
-    bitcoin::{Address, Amount, FeeRate, OutPoint, absolute::LockTime, secp256k1::schnorr},
+    bitcoin::{Address, Amount, FeeRate, OutPoint, Psbt, absolute::LockTime, secp256k1::schnorr},
     builder::{CoinTransfer, SpaceTransfer, SpacesAwareCoinSelection},
     tx_event::{TxEvent, TxEventKind, TxRecord},
 };
@@ -312,7 +312,13 @@ pub enum WalletCommand {
     },
     Buy {
         listing: Listing,
+        recipient: Option<String>,
         skip_tx_check: bool,
+        fee_rate: Option<FeeRate>,
+        resp: crate::rpc::Responder<anyhow::Result<TxResponse>>,
+    },
+    FundTransfer {
+        psbts: Vec<String>,
         fee_rate: Option<FeeRate>,
         resp: crate::rpc::Responder<anyhow::Result<TxResponse>>,
     },
@@ -354,6 +360,11 @@ pub enum WalletCommand {
         locktime: Option<u32>,
         fee_rate: FeeRate,
         resp: crate::rpc::Responder<anyhow::Result<TxResponse>>,
+    },
+    DebugSignTransfer {
+        subject: String,
+        recipient: ScriptBuf,
+        resp: crate::rpc::Responder<anyhow::Result<String>>,
     },
 }
 
@@ -466,6 +477,7 @@ impl RpcWallet {
         chain: &mut Chain,
         wallet: &mut SpacesWallet,
         listing: Listing,
+        recipient: Option<String>,
         skip_tx_check: bool,
         fee_rate: Option<FeeRate>,
     ) -> anyhow::Result<TxResponse> {
@@ -478,17 +490,24 @@ impl RpcWallet {
         };
         info!("Using fee rate: {} sat/vB", fee_rate.to_sat_per_vb_ceil());
 
-        let (_, fullspaceout) = SpacesWallet::verify_listing::<Sha256>(chain, &listing)?;
+        // Optional external delivery address (e.g. an outside keystore). If
+        // absent, the subject goes to a fresh address of this wallet.
+        let recipient_spk = match recipient {
+            None => None,
+            Some(s) => Some(match SpaceAddress::from_str(&s) {
+                Ok(addr) => addr.script_pubkey(),
+                Err(_) => Address::from_str(&s)
+                    .map_err(|e| anyhow!("invalid recipient address: {}", e))?
+                    .assume_checked()
+                    .script_pubkey(),
+            }),
+        };
 
-        let space = fullspaceout
-            .spaceout
-            .space
-            .as_ref()
-            .expect("space")
-            .name
-            .to_string();
-        let previous_spaceout = fullspaceout.outpoint();
-        let tx = wallet.buy::<Sha256>(chain, &listing, fee_rate)?;
+        let verified = SpacesWallet::verify_listing::<Sha256>(chain, &listing)?;
+
+        let subject = listing.subject.clone();
+        let previous_spaceout = verified.outpoint;
+        let tx = wallet.buy::<Sha256>(chain, &listing, fee_rate, recipient_spk)?;
 
         if !skip_tx_check {
             let tip = wallet.local_chain().tip().height();
@@ -503,7 +522,7 @@ impl RpcWallet {
             tx,
             vec![TxEvent {
                 kind: TxEventKind::Buy,
-                space: Some(space),
+                space: Some(subject),
                 previous_spaceout: Some(previous_spaceout),
                 details: None,
             }],
@@ -519,6 +538,64 @@ impl RpcWallet {
         Ok(TxResponse {
             txid: new_txid,
             events,
+            error: None,
+            raw: None,
+        })
+    }
+
+    fn handle_fund_transfer(
+        source: &BitcoinBlockSource,
+        chain: &mut Chain,
+        wallet: &mut SpacesWallet,
+        psbts: Vec<String>,
+        fee_rate: Option<FeeRate>,
+    ) -> anyhow::Result<TxResponse> {
+        let fee_rate = match fee_rate.as_ref() {
+            None => match Self::estimate_fee_rate(source) {
+                None => return Err(anyhow!("could not estimate fee rate")),
+                Some(r) => r,
+            },
+            Some(r) => *r,
+        };
+        info!("Using fee rate: {} sat/vB", fee_rate.to_sat_per_vb_ceil());
+
+        if psbts.is_empty() {
+            return Err(anyhow!("no transfer psbts provided"));
+        }
+        let parsed = psbts
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                Psbt::from_str(s.trim()).map_err(|e| anyhow!("transfer {i}: invalid psbt: {e}"))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+
+        // Exclude the funder's own space and num utxos from fee coin selection
+        // so we never spend one to pay the fee.
+        let mut unspendables = wallet.list_spaces_outpoints(chain)?;
+        for utxo in wallet.list_unspent() {
+            if chain.get_numout(&utxo.outpoint)?.is_some() {
+                unspendables.push(utxo.outpoint);
+            }
+        }
+
+        let tx = wallet.fund_transfers(unspendables, parsed, fee_rate)?;
+
+        // Validate the resulting protocol state transition before broadcast.
+        let tip = wallet.local_chain().tip().height();
+        let mut checker = TxChecker::new(chain);
+        checker.check_apply_tx(tip + 1, &tx)?;
+
+        let new_txid = tx.compute_txid();
+        let last_seen = source.rpc.broadcast_tx(&source.client, &tx)?;
+
+        let tx_record = TxRecord::new(tx);
+        wallet.apply_unconfirmed_tx_record(tx_record, last_seen + 1)?;
+        wallet.commit()?;
+
+        Ok(TxResponse {
+            txid: new_txid,
+            events: vec![],
             error: None,
             raw: None,
         })
@@ -691,6 +768,7 @@ impl RpcWallet {
             }
             WalletCommand::Buy {
                 listing,
+                recipient,
                 resp,
                 skip_tx_check,
                 fee_rate,
@@ -700,12 +778,22 @@ impl RpcWallet {
                     chain,
                     wallet,
                     listing,
+                    recipient,
                     skip_tx_check,
                     fee_rate,
                 ));
             }
             WalletCommand::Sell { space, price, resp } => {
                 _ = resp.send(wallet.sell::<Sha256>(chain, &space, Amount::from_sat(price)));
+            }
+            WalletCommand::FundTransfer {
+                psbts,
+                fee_rate,
+                resp,
+            } => {
+                _ = resp.send(Self::handle_fund_transfer(
+                    source, chain, wallet, psbts, fee_rate,
+                ));
             }
             WalletCommand::SignSchnorr {
                 subject,
@@ -734,6 +822,16 @@ impl RpcWallet {
                     locktime,
                     fee_rate,
                 );
+                _ = resp.send(result);
+            }
+            WalletCommand::DebugSignTransfer {
+                subject,
+                recipient,
+                resp,
+            } => {
+                let result = wallet
+                    .sign_transfer::<Sha256>(chain, &subject, recipient)
+                    .map(|psbt| psbt.to_string());
                 _ = resp.send(result);
             }
         }
@@ -2194,6 +2292,22 @@ impl RpcWallet {
         resp_rx.await?
     }
 
+    pub async fn send_debug_sign_transfer(
+        &self,
+        subject: String,
+        recipient: ScriptBuf,
+    ) -> anyhow::Result<String> {
+        let (resp, resp_rx) = oneshot::channel();
+        self.sender
+            .send(WalletCommand::DebugSignTransfer {
+                subject,
+                recipient,
+                resp,
+            })
+            .await?;
+        resp_rx.await?
+    }
+
     pub async fn send_get_new_address(&self, kind: AddressKind) -> anyhow::Result<String> {
         let (resp, resp_rx) = oneshot::channel();
         self.sender
@@ -2231,6 +2345,7 @@ impl RpcWallet {
     pub async fn send_buy(
         &self,
         listing: Listing,
+        recipient: Option<String>,
         fee_rate: Option<FeeRate>,
         skip_tx_check: bool,
     ) -> anyhow::Result<TxResponse> {
@@ -2238,6 +2353,7 @@ impl RpcWallet {
         self.sender
             .send(WalletCommand::Buy {
                 listing,
+                recipient,
                 fee_rate,
                 skip_tx_check,
                 resp,
@@ -2250,6 +2366,22 @@ impl RpcWallet {
         let (resp, resp_rx) = oneshot::channel();
         self.sender
             .send(WalletCommand::Sell { space, resp, price })
+            .await?;
+        resp_rx.await?
+    }
+
+    pub async fn send_fund_transfer(
+        &self,
+        psbts: Vec<String>,
+        fee_rate: Option<FeeRate>,
+    ) -> anyhow::Result<TxResponse> {
+        let (resp, resp_rx) = oneshot::channel();
+        self.sender
+            .send(WalletCommand::FundTransfer {
+                psbts,
+                fee_rate,
+                resp,
+            })
             .await?;
         resp_rx.await?
     }

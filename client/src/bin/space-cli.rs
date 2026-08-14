@@ -320,16 +320,16 @@ enum Commands {
     /// List a space you own for sale
     #[command(name = "sell")]
     Sell {
-        /// The space to sell
-        space: String,
+        /// The space (@bitcoin), numeric (#800000-3-1), or num id (num1...) to sell
+        subject: String,
         /// Amount in satoshis
         price: u64,
     },
-    /// Buy a space from the specified listing
+    /// Buy a space or num from the specified listing
     #[command(name = "buy")]
     Buy {
-        /// The space to buy
-        space: String,
+        /// The space (@bitcoin), numeric (#800000-3-1), or num id (num1...) to buy
+        subject: String,
         /// The listing price
         price: u64,
         /// The seller's signature
@@ -338,6 +338,23 @@ enum Commands {
         /// The seller's address
         #[arg(long)]
         seller: String,
+        /// Deliver the space/num to this address instead of the wallet's own
+        /// (e.g. an external keystore)
+        #[arg(long)]
+        to: Option<String>,
+        /// Fee rate to use in sat/vB
+        #[arg(long, short)]
+        fee_rate: Option<u64>,
+    },
+    /// Fund and broadcast one or more externally-signed transfer PSBTs.
+    /// Each PSBT must be a single input/output pair signed with
+    /// SIGHASH_SINGLE|ANYONECANPAY whose input value equals its output value;
+    /// the wallet adds fee inputs and change and broadcasts one transaction.
+    #[command(name = "fundtransfer")]
+    FundTransfer {
+        /// Base64-encoded PSBT(s), one per transfer to batch into the tx
+        #[arg(required = true)]
+        psbts: Vec<String>,
         /// Fee rate to use in sat/vB
         #[arg(long, short)]
         fee_rate: Option<u64>,
@@ -345,8 +362,8 @@ enum Commands {
     /// Verify a listing
     #[command(name = "verifylisting")]
     VerifyListing {
-        /// The space to buy
-        space: String,
+        /// The space (@bitcoin), numeric (#800000-3-1), or num id (num1...)
+        subject: String,
         /// The listing price
         price: u64,
         /// The seller's signature
@@ -544,6 +561,14 @@ fn normalize_space(space: &str) -> String {
     } else {
         format!("@{}", lowercase)
     }
+}
+
+/// Normalize a listing subject: @space, #numeric, or num1... — validated and
+/// canonicalized via [`Subject`].
+fn normalize_subject(subject: &str) -> Result<String, ClientError> {
+    spaces_wallet::Subject::from_str(subject)
+        .map(|s| s.to_string())
+        .map_err(ClientError::Custom)
 }
 
 #[tokio::main]
@@ -917,14 +942,15 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
             );
         }
         Commands::Buy {
-            space,
+            subject,
             price,
             signature,
             seller,
+            to,
             fee_rate,
         } => {
             let listing = Listing {
-                space: normalize_space(&space),
+                subject: normalize_subject(&subject)?,
                 price,
                 seller,
                 signature: Signature::from_slice(
@@ -941,6 +967,7 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
                 .wallet_buy(
                     &cli.wallet,
                     listing,
+                    to,
                     fee_rate.map(|rate| FeeRate::from_sat_per_vb(rate).expect("valid fee rate")),
                     cli.skip_tx_check,
                 )
@@ -953,19 +980,36 @@ async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), Client
                 cli.format,
             );
         }
-        Commands::Sell { mut space, price } => {
-            space = normalize_space(&space);
-            let result = cli.client.wallet_sell(&cli.wallet, space, price).await?;
+        Commands::FundTransfer { psbts, fee_rate } => {
+            let result = cli
+                .client
+                .wallet_fund_transfer(
+                    &cli.wallet,
+                    psbts,
+                    fee_rate.map(|rate| FeeRate::from_sat_per_vb(rate).expect("valid fee rate")),
+                )
+                .await?;
+            print_wallet_response(
+                cli.network.fallback_network(),
+                WalletResponse {
+                    result: vec![result],
+                },
+                cli.format,
+            );
+        }
+        Commands::Sell { subject, price } => {
+            let subject = normalize_subject(&subject)?;
+            let result = cli.client.wallet_sell(&cli.wallet, subject, price).await?;
             println!("{}", serde_json::to_string_pretty(&result).expect("result"));
         }
         Commands::VerifyListing {
-            space,
+            subject,
             price,
             signature,
             seller,
         } => {
             let listing = Listing {
-                space: normalize_space(&space),
+                subject: normalize_subject(&subject)?,
                 price,
                 seller,
                 signature: Signature::from_slice(
