@@ -157,6 +157,20 @@ pub fn build_schema() -> Vec<MethodSchema> {
             result_schema: None,
             extra_examples: vec![],
         },
+        MethodSchema {
+            name: "getrebind",
+            description: "Get the rebind parked at a script pubkey (a num that died \
+                          there and can be revived with a `…88` output), if any",
+            params: vec![param(
+                "script_pubkey",
+                "string",
+                "Script pubkey (hex)",
+                json!("5120..."),
+            )],
+            result_type: "Option<RebindData>",
+            result_schema: None,
+            extra_examples: vec![],
+        },
         // Commitment/delegation queries
         MethodSchema {
             name: "getcommitment",
@@ -497,6 +511,21 @@ pub fn build_schema() -> Vec<MethodSchema> {
                     }),
                 ),
                 (
+                    "Unbind a num (make it dormant / revivable at its death spk). \
+                     Pass an optional hex `secret` to unbind a num not owned by the wallet.",
+                    json!({
+                        "jsonrpc": "2.0", "id": 1,
+                        "method": "walletsendrequest",
+                        "params": ["default", {
+                            "requests": [{"request": "unbind", "subjects": ["num1..."]}],
+                            "fee_rate": 1.0,
+                            "force": false,
+                            "confirmed_only": false,
+                            "skip_tx_check": false,
+                        }]
+                    }),
+                ),
+                (
                     "Set up an operator for a space",
                     json!({
                         "jsonrpc": "2.0", "id": 1,
@@ -625,14 +654,21 @@ pub fn build_schema() -> Vec<MethodSchema> {
         },
         MethodSchema {
             name: "walletbuy",
-            description: "Buy a space from a listing",
+            description: "Buy a listed space or num. Optionally deliver it to an \
+                          external recipient address instead of this wallet.",
             params: vec![
                 param("wallet", "string", "Wallet name", json!("default")),
                 param(
                     "listing",
                     "Listing",
                     "The listing to buy",
-                    json!({"space": "@example", "price": 100000, "seller_psbt": "..."}),
+                    json!({"subject": "@example", "price": 100000, "seller": "bcrt1p...", "signature": "hex..."}),
+                ),
+                opt_param(
+                    "recipient",
+                    "string",
+                    "Address to deliver the space/num to (defaults to a fresh wallet address)",
+                    json!("bcrt1p..."),
                 ),
                 opt_param("fee_rate", "number", "Fee rate in sat/vB", json!(1.0)),
                 param(
@@ -648,10 +684,15 @@ pub fn build_schema() -> Vec<MethodSchema> {
         },
         MethodSchema {
             name: "walletsell",
-            description: "Create a listing to sell a space",
+            description: "Create a listing to sell a space or num",
             params: vec![
                 param("wallet", "string", "Wallet name", json!("default")),
-                param("space", "string", "Space name", json!("@example")),
+                param(
+                    "subject",
+                    "string",
+                    "Space (@bitcoin), numeric (#800000-3-1), or num id (num1...)",
+                    json!("@example"),
+                ),
                 param(
                     "amount",
                     "integer",
@@ -664,13 +705,33 @@ pub fn build_schema() -> Vec<MethodSchema> {
             extra_examples: vec![],
         },
         MethodSchema {
+            name: "walletfundtransfer",
+            description: "Fund and broadcast one or more externally-signed transfer \
+                          PSBTs (single input/output, SIGHASH_SINGLE|ANYONECANPAY, \
+                          input value == output value) as a single transaction. The \
+                          wallet supplies fee inputs and change.",
+            params: vec![
+                param("wallet", "string", "Wallet name", json!("default")),
+                param(
+                    "psbts",
+                    "array<string>",
+                    "Base64-encoded transfer PSBT(s) to batch into one tx",
+                    json!(["cHNidP8B..."]),
+                ),
+                opt_param("fee_rate", "number", "Fee rate in sat/vB", json!(1.0)),
+            ],
+            result_type: "TxResponse",
+            result_schema: Some(serde_json::to_value(schema_for!(TxResponse)).unwrap()),
+            extra_examples: vec![],
+        },
+        MethodSchema {
             name: "verifylisting",
             description: "Verify that a listing is valid",
             params: vec![param(
                 "listing",
                 "Listing",
                 "The listing to verify",
-                json!({"space": "@example", "price": 100000, "seller_psbt": "..."}),
+                json!({"subject": "@example", "price": 100000, "seller": "bcrt1p...", "signature": "hex..."}),
             )],
             result_type: "()",
             result_schema: None,
@@ -810,6 +871,55 @@ pub fn build_schema() -> Vec<MethodSchema> {
                 ),
             ],
             result_type: "()",
+            result_schema: None,
+            extra_examples: vec![],
+        },
+        MethodSchema {
+            name: "debugbuildunbindraw",
+            description: "Debug method to build a raw num-unbind transaction with \
+                          positional inputs/outputs (regtest only)",
+            params: vec![
+                param("wallet", "string", "Wallet name", json!("default")),
+                param(
+                    "num_outpoints",
+                    "array<OutPoint>",
+                    "Num outpoints to spend",
+                    json!(["txid:0"]),
+                ),
+                param(
+                    "extra_outputs",
+                    "array<DebugRawOutput>",
+                    "Extra outputs (script_pubkey + amount) to append",
+                    json!([{"script_pubkey": "5120...", "amount": 662}]),
+                ),
+                opt_param("locktime", "integer", "Optional locktime height", json!(0)),
+                param("fee_rate", "number", "Fee rate in sat/vB", json!(1.0)),
+            ],
+            result_type: "TxResponse",
+            result_schema: Some(serde_json::to_value(schema_for!(TxResponse)).unwrap()),
+            extra_examples: vec![],
+        },
+        MethodSchema {
+            name: "debugsigntransfer",
+            description: "Debug method to produce a value-preserving num transfer \
+                          PSBT for one of the wallet's nums, to be funded via \
+                          walletfundtransfer (regtest only)",
+            params: vec![
+                param("wallet", "string", "Wallet name", json!("default")),
+                param(
+                    "subject",
+                    "string",
+                    "Space, numeric, or num id to transfer",
+                    json!("num1..."),
+                ),
+                param(
+                    "recipient",
+                    "string",
+                    "Recipient script pubkey (hex)",
+                    json!("5120..."),
+                ),
+            ],
+            result_type: "string",
             result_schema: None,
             extra_examples: vec![],
         },

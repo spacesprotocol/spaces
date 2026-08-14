@@ -36,7 +36,7 @@ use spaces_nums::{
     num_id::{NUM_HRP, NumId},
 };
 use spaces_protocol::{
-    Covenant, FullSpaceOut, Space,
+    Covenant, Space,
     bitcoin::{
         Address, ScriptBuf, XOnlyPublicKey,
         constants::genesis_block,
@@ -156,10 +156,106 @@ impl<'de> Deserialize<'de> for Subject {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Listing {
-    pub space: String,
+    /// The space (@bitcoin), numeric (#800000-3-1), or num id (num1...) for
+    /// sale. `space` is a deprecated alias accepted on input for older clients.
+    #[serde(alias = "space")]
+    pub subject: String,
     pub price: u64,
     pub seller: String,
     pub signature: schnorr::Signature,
+}
+
+/// What a [`Listing`] refers to, resolved on-chain.
+#[derive(Debug, Clone)]
+pub enum ListingKind {
+    Space(SLabel),
+    Num(NumId),
+}
+
+/// A verified listing: the seller's committed input/output and what it sells.
+#[derive(Debug, Clone)]
+pub struct VerifiedListing {
+    /// The seller's proceeds address (output 0 of the signed pair).
+    pub recipient: SpaceAddress,
+    /// The utxo being sold.
+    pub outpoint: OutPoint,
+    /// Its value + script pubkey (committed by the seller's signature).
+    pub prevout: TxOut,
+    pub kind: ListingKind,
+}
+
+/// A validated single-input/single-output transfer pair extracted from a PSBT.
+#[derive(Debug)]
+struct TransferPair {
+    outpoint: OutPoint,
+    prevout: TxOut,
+    sequence: Sequence,
+    output: TxOut,
+    witness: Witness,
+}
+
+/// Parse and validate one externally-signed transfer PSBT: exactly one input
+/// and one output, tx version 2 / locktime 0, a present witness_utxo, a
+/// `SIGHASH_SINGLE|ANYONECANPAY` key-path signature, and input value == output
+/// value. Returns the finalized foreign-input material for funding.
+fn parse_transfer_pair(psbt: &Psbt) -> anyhow::Result<TransferPair> {
+    let tx = &psbt.unsigned_tx;
+    if tx.input.len() != 1 || tx.output.len() != 1 {
+        return Err(anyhow!("expected exactly 1 input and 1 output"));
+    }
+    // The taproot sighash commits to version and locktime, so every maker must
+    // agree with the tx we build (and each other).
+    if tx.version != Version::TWO {
+        return Err(anyhow!("expected tx version 2"));
+    }
+    if tx.lock_time != LockTime::ZERO {
+        return Err(anyhow!("expected locktime 0"));
+    }
+
+    let prevout = psbt.inputs[0]
+        .witness_utxo
+        .clone()
+        .ok_or_else(|| anyhow!("missing witness_utxo"))?;
+    let output = tx.output[0].clone();
+
+    // Safety invariant: value in == value out.
+    if prevout.value != output.value {
+        return Err(anyhow!(
+            "input value {} does not match output value {}",
+            prevout.value,
+            output.value
+        ));
+    }
+
+    let single_acp = TapSighashType::SinglePlusAnyoneCanPay as u8;
+    let witness = if let Some(w) = psbt.inputs[0].final_script_witness.as_ref() {
+        let sig = w
+            .iter()
+            .next()
+            .filter(|_| w.len() == 1)
+            .ok_or_else(|| anyhow!("expected single key-path witness"))?;
+        if sig.len() != 65 || sig[64] != single_acp {
+            return Err(anyhow!("sighash must be SINGLE|ANYONECANPAY"));
+        }
+        w.clone()
+    } else if let Some(sig) = psbt.inputs[0].tap_key_sig.as_ref() {
+        if sig.sighash_type != TapSighashType::SinglePlusAnyoneCanPay {
+            return Err(anyhow!("sighash must be SINGLE|ANYONECANPAY"));
+        }
+        let mut w = Witness::new();
+        w.push(sig.to_vec());
+        w
+    } else {
+        return Err(anyhow!("input is not signed (no tap key signature)"));
+    };
+
+    Ok(TransferPair {
+        outpoint: tx.input[0].previous_output,
+        prevout,
+        sequence: tx.input[0].sequence,
+        output,
+        witness,
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -980,13 +1076,27 @@ impl SpacesWallet {
         Ok(not_auctioned)
     }
 
+    /// Buy a listed space or num. The subject is delivered to `recipient` if
+    /// given (e.g. an external keystore's script pubkey), otherwise to a fresh
+    /// address of this wallet. The funding wallet always pays the price + fee.
     pub fn buy<H: KeyHasher>(
         &mut self,
-        src: &mut impl SpacesSource,
+        src: &mut (impl SpacesSource + NumSource),
         listing: &Listing,
         fee_rate: FeeRate,
+        recipient: Option<ScriptBuf>,
     ) -> anyhow::Result<Transaction> {
-        let (seller, spaceout) = Self::verify_listing::<H>(src, listing)?;
+        let verified = Self::verify_listing::<H>(src, listing)?;
+
+        // The seller signed input 0 -> output 0 (their proceeds). The subject
+        // (space or num) rotates to the *N+1* output the buyer adds, which the
+        // seller's SINGLE signature does not commit to. For that N+1 routing to
+        // happen the seller's output 0 must not value-match the input, so a num
+        // sale requires a non-zero price (a zero-price num sale would rotate the
+        // num straight to the seller — use a transfer instead).
+        if matches!(verified.kind, ListingKind::Num(_)) && listing.price == 0 {
+            return Err(anyhow!("a num sale requires a non-zero price"));
+        }
 
         let mut witness = Witness::new();
         witness.push(
@@ -999,8 +1109,11 @@ impl SpacesWallet {
 
         let funded_psbt = {
             let unspendables = self.list_spaces_outpoints(src)?;
-            let space_address = self.next_unused_space_address();
-            let dust_amount = space_dust(space_address.script_pubkey().minimal_non_dust().mul(2));
+            let recipient_spk = match recipient {
+                Some(spk) => spk,
+                None => self.next_unused_space_address().script_pubkey(),
+            };
+            let dust_amount = space_dust(recipient_spk.minimal_non_dust().mul(2));
 
             let mut builder = self.build_tx(unspendables, false)?;
             builder
@@ -1010,12 +1123,9 @@ impl SpacesWallet {
                 .nlocktime(LockTime::Blocks(Height::ZERO))
                 .set_exact_sequence(Sequence::ENABLE_RBF_NO_LOCKTIME)
                 .add_foreign_utxo_with_sequence(
-                    spaceout.outpoint(),
+                    verified.outpoint,
                     psbt::Input {
-                        witness_utxo: Some(TxOut {
-                            value: spaceout.spaceout.value,
-                            script_pubkey: spaceout.spaceout.script_pubkey.clone(),
-                        }),
+                        witness_utxo: Some(verified.prevout.clone()),
                         final_script_witness: Some(witness),
                         ..Default::default()
                     },
@@ -1023,10 +1133,10 @@ impl SpacesWallet {
                     BID_PSBT_INPUT_SEQUENCE,
                 )?
                 .add_recipient(
-                    seller.script_pubkey(),
-                    spaceout.spaceout.value + Amount::from_sat(listing.price),
+                    verified.recipient.script_pubkey(),
+                    verified.prevout.value + Amount::from_sat(listing.price),
                 )
-                .add_recipient(space_address.script_pubkey(), dust_amount);
+                .add_recipient(recipient_spk, dust_amount);
             builder.finish()?
         };
 
@@ -1034,53 +1144,150 @@ impl SpacesWallet {
         Ok(tx)
     }
 
-    pub fn verify_listing<H: KeyHasher>(
-        src: &mut impl SpacesSource,
-        listing: &Listing,
-    ) -> anyhow::Result<(SpaceAddress, FullSpaceOut)> {
-        let label = SLabel::from_str(&listing.space)?;
-        let space_key = SpaceKey::from(H::hash(label.as_ref()));
-        let outpoint = match src.get_space_outpoint(&space_key)? {
-            None => {
-                return Err(anyhow::anyhow!(
-                    "Unknown space {} - no outpoint found",
-                    listing.space
-                ));
+    /// Fund and finalize one or more externally-signed transfer PSBTs into a
+    /// single transaction. Each PSBT must be a single-input/single-output pair
+    /// signed with `SIGHASH_SINGLE | ANYONECANPAY` whose input value equals its
+    /// output value. Those two properties make funding *blind and safe*: the
+    /// maker's output is fully covered by the maker's own input, so the funder
+    /// only ever contributes the fee — it can neither be tricked into covering
+    /// the recipient's amount nor redirect the maker's output.
+    ///
+    /// Layout is index-aligned: transfer `k`'s input sits at `vin[k]` and its
+    /// output at `vout[k]` (funder inputs and change are appended after).
+    /// Because the taproot SINGLE message commits to the *content* of the
+    /// output at the input's position (not the position number), each maker
+    /// signature stays valid at any index as long as its paired output keeps
+    /// the same content — which the alignment guarantees. The same alignment
+    /// satisfies the num successor rule (input `k` value-matches output `k`, so
+    /// the num rotates to its recipient).
+    ///
+    /// `unspendables` must include the funder's own space/num utxos so coin
+    /// selection never spends one to pay the fee.
+    pub fn fund_transfers(
+        &mut self,
+        unspendables: Vec<OutPoint>,
+        psbts: Vec<Psbt>,
+        fee_rate: FeeRate,
+    ) -> anyhow::Result<Transaction> {
+        if psbts.is_empty() {
+            return Err(anyhow!("no transfer psbts provided"));
+        }
+
+        let mut pairs: Vec<TransferPair> = Vec::with_capacity(psbts.len());
+        let mut seen = std::collections::HashSet::new();
+        for (i, psbt) in psbts.iter().enumerate() {
+            let pair = parse_transfer_pair(psbt).map_err(|e| anyhow!("transfer {i}: {e}"))?;
+            if !seen.insert(pair.outpoint) {
+                return Err(anyhow!("transfer {i}: duplicate input {}", pair.outpoint));
             }
-            Some(outpoint) => outpoint,
-        };
-
-        let spaceout = match src.get_spaceout(&outpoint)? {
-            None => return Err(anyhow!("Unknown or spent spaces utxo: {}", outpoint)),
-            Some(outpoint) => outpoint,
-        };
-
-        if spaceout.space.is_none() {
-            return Err(anyhow!("No associated space"));
-        }
-        if !matches!(
-            spaceout.space.as_ref().unwrap().covenant,
-            Covenant::Transfer { .. }
-        ) {
-            return Err(anyhow::anyhow!("Space not registered"));
+            pairs.push(pair);
         }
 
-        let recipient = Self::verify_listing_signature(
-            listing,
-            outpoint,
-            TxOut {
-                value: spaceout.value,
-                script_pubkey: spaceout.script_pubkey.clone(),
-            },
-        )?;
+        let funded_psbt = {
+            let mut builder = self.build_tx(unspendables, false)?;
+            builder
+                .version(2)
+                .ordering(TxOrdering::Untouched)
+                .nlocktime(LockTime::ZERO)
+                .fee_rate(fee_rate);
 
-        Ok((
+            // Foreign inputs first, in order -> vin[0..N]. Preserve each
+            // maker's own sequence (committed by its sighash).
+            for pair in &pairs {
+                builder.add_foreign_utxo_with_sequence(
+                    pair.outpoint,
+                    psbt::Input {
+                        witness_utxo: Some(pair.prevout.clone()),
+                        final_script_witness: Some(pair.witness.clone()),
+                        ..Default::default()
+                    },
+                    tap_key_spend_weight(),
+                    pair.sequence,
+                )?;
+            }
+            // Recipient outputs in the same order -> vout[0..N], aligning
+            // input k with output k. Funder fee inputs + change are appended
+            // after by coin selection (TxOrdering::Untouched).
+            for pair in &pairs {
+                builder.add_recipient(pair.output.script_pubkey.clone(), pair.output.value);
+            }
+            builder.finish()?
+        };
+
+        let tx = self.sign(funded_psbt, None)?;
+        Ok(tx)
+    }
+
+    /// Resolve a listing subject (@space, #numeric, or num1...) to the on-chain
+    /// utxo it sells, validating that the utxo is transferable.
+    fn resolve_listing_subject<H: KeyHasher>(
+        src: &mut (impl SpacesSource + NumSource),
+        subject: &str,
+    ) -> anyhow::Result<(OutPoint, TxOut, ListingKind)> {
+        let parsed = Subject::from_str(subject).map_err(|e| anyhow!(e))?;
+        match parsed {
+            Subject::Label(label) if !label.is_numeric() => {
+                let space_key = SpaceKey::from(H::hash(label.as_ref()));
+                let outpoint = src
+                    .get_space_outpoint(&space_key)?
+                    .ok_or_else(|| anyhow!("Unknown space {} - no outpoint found", subject))?;
+                let spaceout = src
+                    .get_spaceout(&outpoint)?
+                    .ok_or_else(|| anyhow!("Unknown or spent spaces utxo: {}", outpoint))?;
+                let space = spaceout
+                    .space
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("No associated space"))?;
+                if !matches!(space.covenant, Covenant::Transfer { .. }) {
+                    return Err(anyhow!("Space not registered"));
+                }
+                let name = space.name.clone();
+                let prevout = TxOut {
+                    value: spaceout.value,
+                    script_pubkey: spaceout.script_pubkey,
+                };
+                Ok((outpoint, prevout, ListingKind::Space(name)))
+            }
+            parsed => {
+                let id = match parsed {
+                    Subject::NumId(id) => id,
+                    Subject::Label(numeric_label) => {
+                        let numeric = SNumeric::try_from(numeric_label)
+                            .map_err(|_| anyhow!("invalid numeric: {}", subject))?;
+                        src.get_num_id(&numeric)?
+                            .ok_or_else(|| anyhow!("Unknown numeric {}", subject))?
+                    }
+                };
+                let outpoint = src
+                    .get_num_outpoint_by_id(&id)?
+                    .ok_or_else(|| anyhow!("Unknown num {}", subject))?;
+                let numout = src
+                    .get_numout(&outpoint)?
+                    .ok_or_else(|| anyhow!("Unknown or spent num utxo: {}", outpoint))?;
+                if numout.spent {
+                    return Err(anyhow!("Num {} is dormant", subject));
+                }
+                let prevout = TxOut {
+                    value: numout.value,
+                    script_pubkey: numout.script_pubkey,
+                };
+                Ok((outpoint, prevout, ListingKind::Num(id)))
+            }
+        }
+    }
+
+    pub fn verify_listing<H: KeyHasher>(
+        src: &mut (impl SpacesSource + NumSource),
+        listing: &Listing,
+    ) -> anyhow::Result<VerifiedListing> {
+        let (outpoint, prevout, kind) = Self::resolve_listing_subject::<H>(src, &listing.subject)?;
+        let recipient = Self::verify_listing_signature(listing, outpoint, prevout.clone())?;
+        Ok(VerifiedListing {
             recipient,
-            FullSpaceOut {
-                txid: outpoint.txid,
-                spaceout,
-            },
-        ))
+            outpoint,
+            prevout,
+            kind,
+        })
     }
 
     fn verify_listing_signature(
@@ -1126,32 +1333,18 @@ impl SpacesWallet {
 
     pub fn sell<H: KeyHasher>(
         &mut self,
-        src: &mut impl SpacesSource,
-        space: &str,
+        src: &mut (impl SpacesSource + NumSource),
+        subject: &str,
         asking_price: Amount,
     ) -> anyhow::Result<Listing> {
-        let label = SLabel::from_str(space)?;
-        let spacehash = SpaceKey::from(H::hash(label.as_ref()));
-        let space_outpoint = match src.get_space_outpoint(&spacehash)? {
-            None => return Err(anyhow::anyhow!("Space not found")),
-            Some(outpoint) => outpoint,
-        };
-        let spaceout = match src.get_spaceout(&space_outpoint)? {
-            None => return Err(anyhow::anyhow!("Space not found")),
-            Some(spaceout) => spaceout,
-        };
-        if !matches!(
-            spaceout.space.as_ref().unwrap().covenant,
-            Covenant::Transfer { .. }
-        ) {
-            return Err(anyhow::anyhow!("Space not registered"));
-        }
+        let (outpoint, _prevout, _kind) = Self::resolve_listing_subject::<H>(src, subject)?;
 
-        let utxo = match self.internal.get_utxo(space_outpoint) {
+        let utxo = match self.internal.get_utxo(outpoint) {
             None => {
                 return Err(anyhow::anyhow!(
-                    "Wallet does not own a space with outpoint {}",
-                    space_outpoint
+                    "Wallet does not own {} (outpoint {})",
+                    subject,
+                    outpoint
                 ));
             }
             Some(utxo) => utxo,
@@ -1201,12 +1394,60 @@ impl SpacesWallet {
             .expect("signed listing must have a single witness item");
 
         Ok(Listing {
-            space: space.to_string(),
+            subject: subject.to_string(),
             price: asking_price.to_sat(),
             seller: recipient.to_string(),
             signature: Signature::from_slice(&signature[..64])
                 .expect("signed listing has a valid signature"),
         })
+    }
+
+    /// Produce a value-preserving transfer PSBT for one of the wallet's own
+    /// nums: a single input (the num utxo) -> single output (`recipient`, same
+    /// value) signed with `SIGHASH_SINGLE|ANYONECANPAY`. The result can be
+    /// funded and broadcast by any wallet via [`Self::fund_transfers`].
+    pub fn sign_transfer<H: KeyHasher>(
+        &mut self,
+        src: &mut (impl SpacesSource + NumSource),
+        subject: &str,
+        recipient: ScriptBuf,
+    ) -> anyhow::Result<Psbt> {
+        let (outpoint, prevout, _kind) = Self::resolve_listing_subject::<H>(src, subject)?;
+        let utxo = self
+            .internal
+            .get_utxo(outpoint)
+            .ok_or_else(|| anyhow!("Wallet does not own {} (outpoint {})", subject, outpoint))?;
+
+        let mut psbt = {
+            let mut builder = self
+                .internal
+                .build_tx()
+                .coin_selection(RequiredUtxosOnlyCoinSelectionAlgorithm);
+            builder
+                .version(2)
+                .allow_dust(true)
+                .ordering(TxOrdering::Untouched)
+                .nlocktime(LockTime::Blocks(Height::ZERO))
+                .set_exact_sequence(Sequence::ENABLE_RBF_NO_LOCKTIME)
+                .manually_selected_only()
+                .sighash(TapSighashType::SinglePlusAnyoneCanPay.into())
+                .add_utxo(utxo.outpoint)?
+                // Value-preserving: output value == input value.
+                .add_recipient(recipient, prevout.value);
+            builder.finish()?
+        };
+
+        let finalized = self.internal.sign(
+            &mut psbt,
+            SignOptions {
+                allow_all_sighashes: true,
+                ..Default::default()
+            },
+        )?;
+        if !finalized {
+            return Err(anyhow!("signing transfer psbt failed"));
+        }
+        Ok(psbt)
     }
 
     pub fn new_bid_psbt(
@@ -1747,5 +1988,77 @@ impl<'de> Deserialize<'de> for SpaceScriptSigningInfo {
         }
 
         deserializer.deserialize_seq(OpenSigningInfoVisitor)
+    }
+}
+
+#[cfg(test)]
+mod transfer_tests {
+    use super::*;
+
+    // A real single-input/single-output num transfer PSBT produced by the
+    // nacho app: P2TR num input (2000 sats) -> P2PKH recipient (2000 sats),
+    // signed SIGHASH_SINGLE|ANYONECANPAY (0x83).
+    const NACHO_PSBT: &str = "cHNidP8BAFUCAAAAAUmIZzfEOyHTqdRTVljO3sK4Vp4C2rKsXzG+Nvjw1RVaAgAAAAD/////AdAHAAAAAAAAGXapFMbmtRt9wz0wsaJKPjjcUkQyOgmfiKwAAAAAAAEBK9AHAAAAAAAAIlEgt9mEd9UzAwXAZNpkSMxuU1SM42Y7BCqgRRvaZHj9nawBAwSDAAAAARNB4BASbMDLf7MkxOjEGPgttqQPynbrKa+GtyLuN7sQkOzaP5HP8mVtfKXsxYugKVePWea5rS5vKyrtj3ii4tK87YMAAA==";
+
+    fn nacho() -> Psbt {
+        Psbt::from_str(NACHO_PSBT).expect("valid base64 psbt")
+    }
+
+    #[test]
+    fn accepts_value_preserving_single_acp() {
+        let pair = parse_transfer_pair(&nacho()).expect("valid transfer");
+        assert_eq!(pair.prevout.value, pair.output.value);
+        assert_eq!(pair.prevout.value, Amount::from_sat(2000));
+        assert_eq!(pair.sequence, Sequence::MAX);
+        assert_eq!(pair.witness.len(), 1, "single key-path witness element");
+        let sig = pair.witness.iter().next().unwrap();
+        assert_eq!(sig.len(), 65);
+        assert_eq!(sig[64], TapSighashType::SinglePlusAnyoneCanPay as u8);
+    }
+
+    #[test]
+    fn rejects_value_mismatch() {
+        let mut psbt = nacho();
+        psbt.unsigned_tx.output[0].value = Amount::from_sat(1999);
+        let err = parse_transfer_pair(&psbt).unwrap_err().to_string();
+        assert!(err.contains("does not match"), "got: {err}");
+    }
+
+    #[test]
+    fn rejects_multi_output() {
+        let mut psbt = nacho();
+        let extra = psbt.unsigned_tx.output[0].clone();
+        psbt.unsigned_tx.output.push(extra);
+        let err = parse_transfer_pair(&psbt).unwrap_err().to_string();
+        assert!(err.contains("1 input and 1 output"), "got: {err}");
+    }
+
+    #[test]
+    fn rejects_wrong_sighash() {
+        let mut psbt = nacho();
+        let sig = psbt.inputs[0].tap_key_sig.unwrap();
+        psbt.inputs[0].tap_key_sig = Some(taproot::Signature {
+            signature: sig.signature,
+            sighash_type: TapSighashType::All,
+        });
+        let err = parse_transfer_pair(&psbt).unwrap_err().to_string();
+        assert!(err.contains("SINGLE|ANYONECANPAY"), "got: {err}");
+    }
+
+    #[test]
+    fn rejects_missing_witness_utxo() {
+        let mut psbt = nacho();
+        psbt.inputs[0].witness_utxo = None;
+        let err = parse_transfer_pair(&psbt).unwrap_err().to_string();
+        assert!(err.contains("witness_utxo"), "got: {err}");
+    }
+
+    #[test]
+    fn rejects_unsigned() {
+        let mut psbt = nacho();
+        psbt.inputs[0].tap_key_sig = None;
+        psbt.inputs[0].final_script_witness = None;
+        let err = parse_transfer_pair(&psbt).unwrap_err().to_string();
+        assert!(err.contains("not signed"), "got: {err}");
     }
 }

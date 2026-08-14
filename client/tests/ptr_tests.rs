@@ -1531,7 +1531,239 @@ async fn run_ptr_tests() -> anyhow::Result<()> {
     println!("\n=== Running Foreign Unbind (secret) Tests ===");
     it_should_unbind_foreign_num_with_secret(&rig).await?;
 
+    println!("\n=== Running Fund Transfer (PSBT) Tests ===");
+    it_should_fund_and_broadcast_transfers(&rig).await?;
+
+    println!("\n=== Running Num Sell/Buy Tests ===");
+    it_should_sell_and_buy_num(&rig).await?;
+
     println!("\n=== All tests passed! ===");
+    Ok(())
+}
+
+/// Mint a fresh num at a new address of `wallet`; returns (id, spk).
+async fn mint_num_at_new_address(
+    rig: &TestRig,
+    wallet: &str,
+) -> anyhow::Result<(NumId, bitcoin::ScriptBuf)> {
+    let addr = rig
+        .spaced
+        .client
+        .wallet_get_new_address(wallet, AddressKind::Coin)
+        .await?;
+    let spk = bitcoin::address::Address::from_str(&addr)
+        .expect("valid")
+        .assume_checked()
+        .script_pubkey();
+    let id = NumId::from_spk::<Sha256>(spk.clone());
+    wallet_res_err(
+        &wallet_do(
+            rig,
+            wallet,
+            vec![RpcWalletRequest::CreateNum(CreateNumParams {
+                bind_spk: Some(spk.clone()),
+            })],
+            false,
+        )
+        .await?,
+    )?;
+    mine_and_sync(rig, 1).await?;
+    Ok((id, spk))
+}
+
+// ============== Test: Fund + broadcast transfer PSBTs (single & batch) ==============
+//
+// A maker signs a value-preserving single-in/single-out transfer with
+// SIGHASH_SINGLE|ANYONECANPAY; a different wallet funds the fee and broadcasts.
+// Batching two such transfers in one tx exercises the index-alignment
+// invariant (input k rotates to output k).
+async fn it_should_fund_and_broadcast_transfers(rig: &TestRig) -> anyhow::Result<()> {
+    sync_all(rig).await?;
+
+    // (1) Single transfer: ALICE signs, BOB funds.
+    println!("Test 1: ALICE signs a num transfer, BOB funds + broadcasts");
+    let (id_a, _spk_a) = mint_num_at_new_address(rig, ALICE).await?;
+    let value_a = rig
+        .spaced
+        .client
+        .get_num(Subject::NumId(id_a))
+        .await?
+        .expect("num A exists")
+        .numout
+        .value;
+    let (recip_a, _) = gen_p2tr_keypair();
+
+    let psbt_a = rig
+        .spaced
+        .client
+        .debug_sign_transfer(ALICE, id_a.to_string(), recip_a.clone())
+        .await?;
+    let resp = rig
+        .spaced
+        .client
+        .wallet_fund_transfer(BOB, vec![psbt_a], None)
+        .await?;
+    assert!(
+        resp.error.is_none(),
+        "fund transfer errored: {:?}",
+        resp.error
+    );
+    mine_and_sync(rig, 1).await?;
+
+    let moved = rig
+        .spaced
+        .client
+        .get_num(Subject::NumId(id_a))
+        .await?
+        .expect("num A resolves after transfer");
+    assert!(!moved.numout.spent, "transferred num must be live");
+    assert_eq!(
+        moved.numout.script_pubkey, recip_a,
+        "num A landed at the recipient"
+    );
+    assert_eq!(moved.numout.value, value_a, "transfer preserves value");
+    println!("✓ single transfer funded and broadcast");
+
+    // (2) Batch: two transfers in one funded tx (index alignment).
+    println!("\nTest 2: batch two transfers into one tx");
+    let (id_b, _spk_b) = mint_num_at_new_address(rig, ALICE).await?;
+    let (id_c, _spk_c) = mint_num_at_new_address(rig, ALICE).await?;
+    let (recip_b, _) = gen_p2tr_keypair();
+    let (recip_c, _) = gen_p2tr_keypair();
+
+    let psbt_b = rig
+        .spaced
+        .client
+        .debug_sign_transfer(ALICE, id_b.to_string(), recip_b.clone())
+        .await?;
+    let psbt_c = rig
+        .spaced
+        .client
+        .debug_sign_transfer(ALICE, id_c.to_string(), recip_c.clone())
+        .await?;
+
+    let resp = rig
+        .spaced
+        .client
+        .wallet_fund_transfer(BOB, vec![psbt_b, psbt_c], None)
+        .await?;
+    assert!(
+        resp.error.is_none(),
+        "batch fund transfer errored: {:?}",
+        resp.error
+    );
+    mine_and_sync(rig, 1).await?;
+
+    let moved_b = rig
+        .spaced
+        .client
+        .get_num(Subject::NumId(id_b))
+        .await?
+        .expect("num B resolves");
+    let moved_c = rig
+        .spaced
+        .client
+        .get_num(Subject::NumId(id_c))
+        .await?
+        .expect("num C resolves");
+    assert_eq!(
+        moved_b.numout.script_pubkey, recip_b,
+        "num B landed at its recipient (index 0)"
+    );
+    assert_eq!(
+        moved_c.numout.script_pubkey, recip_c,
+        "num C landed at its recipient (index 1) — alignment holds"
+    );
+    assert!(!moved_b.numout.spent && !moved_c.numout.spent);
+    println!("✓ batch of two transfers funded in one tx, alignment correct");
+
+    Ok(())
+}
+
+// ============== Test: Sell + buy a num (numeric and num id subjects) ==============
+async fn it_should_sell_and_buy_num(rig: &TestRig) -> anyhow::Result<()> {
+    sync_all(rig).await?;
+
+    for use_numeric in [true, false] {
+        let (id, _spk) = mint_num_at_new_address(rig, ALICE).await?;
+        let info = rig
+            .spaced
+            .client
+            .get_num(Subject::NumId(id))
+            .await?
+            .expect("minted num exists");
+
+        // Sell by numeric (#b-t-v) on one pass, by num id (num1...) on the other.
+        let subject = if use_numeric {
+            info.numout.num.name.to_string()
+        } else {
+            id.to_string()
+        };
+        println!("Selling num via subject {}", subject);
+
+        let listing = rig
+            .spaced
+            .client
+            .wallet_sell(ALICE, subject.clone(), 5000)
+            .await?;
+        assert_eq!(listing.price, 5000);
+
+        // A third party can verify the listing before buying.
+        rig.spaced.client.verify_listing(listing.clone()).await?;
+
+        // On the num-id pass, deliver to an EXTERNAL recipient (EVE) while BOB
+        // funds — the Nacho case. On the numeric pass, deliver to BOB itself.
+        let deliver_external = !use_numeric;
+        let recipient = if deliver_external {
+            Some(
+                rig.spaced
+                    .client
+                    .wallet_get_new_address(EVE, AddressKind::Coin)
+                    .await?,
+            )
+        } else {
+            None
+        };
+
+        let resp = rig
+            .spaced
+            .client
+            .wallet_buy(BOB, listing, recipient, None, false)
+            .await?;
+        assert!(resp.error.is_none(), "buy errored: {:?}", resp.error);
+        mine_and_sync(rig, 1).await?;
+
+        let bought = rig
+            .spaced
+            .client
+            .get_num(Subject::NumId(id))
+            .await?
+            .expect("num resolves after sale");
+        assert!(!bought.numout.spent, "sold num must be live");
+
+        // The num rotated to the intended owner's N+1 receiving output: EVE
+        // when delivered externally (BOB only funded), else BOB.
+        let owner = if deliver_external { EVE } else { BOB };
+        let owner_nums = rig.spaced.client.wallet_list_nums(owner, None).await?;
+        assert!(
+            owner_nums.nums.iter().any(|n| n.numout.num.id == id),
+            "{} owns the num after buying (subject {})",
+            owner,
+            subject
+        );
+        if deliver_external {
+            let buyer_nums = rig.spaced.client.wallet_list_nums(BOB, None).await?;
+            assert!(
+                !buyer_nums.nums.iter().any(|n| n.numout.num.id == id),
+                "funder BOB must NOT receive an externally-delivered num"
+            );
+        }
+        println!(
+            "✓ num sold and bought via {} (delivered to {})",
+            subject, owner
+        );
+    }
+
     Ok(())
 }
 
