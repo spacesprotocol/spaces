@@ -258,6 +258,38 @@ fn parse_transfer_pair(psbt: &Psbt) -> anyhow::Result<TransferPair> {
     })
 }
 
+/// Protocol-reserved output values that get special consensus treatment: a num
+/// is minted at `value % 100 == 77`, a delegation opts in at 78, a revival is
+/// signalled at 88, and spaces track `value % 10 == 2`. A wallet change output
+/// that coincidentally lands on one of these in a spaces / num-minting tx would
+/// be captured by the protocol, so change must avoid them.
+fn is_reserved_value(value: Amount) -> bool {
+    let sats = value.to_sat();
+    matches!(sats % 100, 77 | 78 | 88) || sats % 10 == 2
+}
+
+/// Nearest non-reserved value, preferring to move DOWN (which raises the fee by
+/// the delta — always safe against the relay floor). The only adjacent reserved
+/// pair is 77/78, so a downward move resolves within 2 sats and stays well
+/// above dust for any realistic change amount.
+fn nearest_unreserved_value(value: Amount) -> Amount {
+    let sats = value.to_sat();
+    for delta in 1..=2 {
+        if sats > delta {
+            let candidate = Amount::from_sat(sats - delta);
+            if !is_reserved_value(candidate) {
+                return candidate;
+            }
+        }
+    }
+    // Fallback upward (fee decreases); unreachable for values above dust.
+    let mut candidate = sats + 1;
+    while is_reserved_value(Amount::from_sat(candidate)) {
+        candidate += 1;
+    }
+    Amount::from_sat(candidate)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BalanceDetails {
     #[serde(flatten)]
@@ -1569,11 +1601,52 @@ impl SpacesWallet {
         Ok(keypair.tap_tweak(&ctx, None))
     }
 
+    /// Move the wallet's drain/change output off a protocol-reserved value so
+    /// it cannot be silently captured (e.g. minted into a num) when the tx is a
+    /// spaces or num-minting transaction.
+    ///
+    /// `build_tx` pins `TxOrdering::Untouched` for every wallet-built tx and bdk
+    /// appends the drain output last, so the change (when present) is always the
+    /// final output — we only ever inspect that one. It's touched only when it
+    /// is unambiguously ordinary change:
+    ///
+    /// - the tx has more than one output (a single-output tx is a drain such as
+    ///   an unbind sink or a listing maker psbt, never ordinary change);
+    /// - the last output is an is-mine output on the internal (change) keychain
+    ///   — received nums/spaces and funded-transfer maker outputs use the
+    ///   external keychain, so they're never considered;
+    /// - above the dust floor, so the intentional space/num dust outputs (always
+    ///   well below it) can never match.
+    ///
+    /// The resulting `<=2`-sat adjustment is absorbed by the fee.
+    fn sanitize_change(&self, psbt: &mut Psbt) {
+        let outputs = &mut psbt.unsigned_tx.output;
+        if outputs.len() < 2 {
+            return;
+        }
+        let last = outputs.last_mut().expect("checked len >= 2");
+        let is_internal_change = self
+            .internal
+            .derivation_of_spk(last.script_pubkey.clone())
+            .is_some_and(|(keychain, _)| keychain == KeychainKind::Internal);
+        if is_internal_change
+            && last.value > SpacesAwareCoinSelection::DUST_THRESHOLD
+            && is_reserved_value(last.value)
+        {
+            last.value = nearest_unreserved_value(last.value);
+        }
+    }
+
     pub fn sign(
         &mut self,
         mut psbt: Psbt,
         mut extra_prevouts: Option<BTreeMap<OutPoint, TxOut>>,
     ) -> anyhow::Result<Transaction> {
+        // Keep the wallet's change off protocol-reserved values BEFORE signing,
+        // so it can't be silently captured (e.g. minted into a num) in a spaces
+        // or num-minting transaction.
+        self.sanitize_change(&mut psbt);
+
         // mark any spends needing the spaces signer to be signed later
         for (input_index, input) in psbt.inputs.iter_mut().enumerate() {
             if extra_prevouts.is_none() {
@@ -2060,5 +2133,77 @@ mod transfer_tests {
         psbt.inputs[0].final_script_witness = None;
         let err = parse_transfer_pair(&psbt).unwrap_err().to_string();
         assert!(err.contains("not signed"), "got: {err}");
+    }
+}
+
+#[cfg(test)]
+mod change_hygiene_tests {
+    use super::*;
+
+    #[test]
+    fn identifies_reserved_values() {
+        // 77 mint, 78 delegate, 88 revive (mod 100); 2 spaces (mod 10).
+        for s in [
+            77u64, 78, 88, 177, 288, 2, 12, 72, 1202, 662, 1077, 99_263_102,
+        ] {
+            assert!(
+                is_reserved_value(Amount::from_sat(s)),
+                "{s} should be reserved"
+            );
+        }
+        for s in [76u64, 79, 87, 89, 100, 1201, 1203, 1000, 99_263_109] {
+            assert!(
+                !is_reserved_value(Amount::from_sat(s)),
+                "{s} should NOT be reserved"
+            );
+        }
+    }
+
+    #[test]
+    fn nearest_is_never_reserved_moves_down_by_at_most_two() {
+        // Exhaustive across a wide range straddling many hundreds boundaries.
+        for s in 1000u64..=300_000 {
+            let v = Amount::from_sat(s);
+            if !is_reserved_value(v) {
+                continue;
+            }
+            let adj = nearest_unreserved_value(v);
+            assert!(
+                !is_reserved_value(adj),
+                "adjusted {} still reserved (from {s})",
+                adj.to_sat()
+            );
+            assert!(
+                adj.to_sat() < s,
+                "should move down: {s} -> {}",
+                adj.to_sat()
+            );
+            assert!(
+                s - adj.to_sat() <= 2,
+                "moved {s} by more than 2 to {}",
+                adj.to_sat()
+            );
+        }
+    }
+
+    #[test]
+    fn worst_case_77_78_pair() {
+        // 78 -> 76 (77 is also reserved), the only 2-sat move.
+        assert_eq!(
+            nearest_unreserved_value(Amount::from_sat(1278)),
+            Amount::from_sat(1276)
+        );
+        assert_eq!(
+            nearest_unreserved_value(Amount::from_sat(1277)),
+            Amount::from_sat(1276)
+        );
+        assert_eq!(
+            nearest_unreserved_value(Amount::from_sat(1288)),
+            Amount::from_sat(1287)
+        );
+        assert_eq!(
+            nearest_unreserved_value(Amount::from_sat(1202)),
+            Amount::from_sat(1201)
+        );
     }
 }
