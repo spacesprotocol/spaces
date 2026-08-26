@@ -3,7 +3,7 @@ resolver = "2"
 members = ["borsh_utils", "checkpoint", "client", "protocol", "testutil", "wallet", "nums", "sip7"]
 
 [workspace.package]
-version = "0.3.1"
+version = "0.3.2"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
@@ -13,12 +13,12 @@ authors = ["Buffrr <contact@buffrr.dev>"]
 
 [workspace.dependencies]
 # Internal crates
-borsh_utils = { path = "borsh_utils", version = "0.3.1", default-features = false }
-spaces_protocol = { path = "protocol", version = "0.3.1", default-features = false }
-spaces_nums = { path = "nums", version = "0.3.1", default-features = false }
-sip7 = { path = "sip7", version = "0.3.1", default-features = false }
-spaces_wallet = { path = "wallet", version = "0.3.1", default-features = false }
-spaces_client = { path = "client", version = "0.3.1", default-features = false }
+borsh_utils = { path = "borsh_utils", version = "0.3.2", default-features = false }
+spaces_protocol = { path = "protocol", version = "0.3.2", default-features = false }
+spaces_nums = { path = "nums", version = "0.3.2", default-features = false }
+sip7 = { path = "sip7", version = "0.3.2", default-features = false }
+spaces_wallet = { path = "wallet", version = "0.3.2", default-features = false }
+spaces_client = { path = "client", version = "0.3.2", default-features = false }
 spaces_testutil = { path = "testutil", default-features = false }
 
 # External
