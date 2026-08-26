@@ -424,7 +424,7 @@ impl SpLiveSnapshot {
             })
             .map(|result| result.map(|(bidhash, spacehash)| (bidhash.priority(), spacehash)))
             .skip(skip)
-            .take(limit.map_or(usize::MAX, |l| l))
+            .take(limit.unwrap_or(usize::MAX))
             .collect()
     }
 }

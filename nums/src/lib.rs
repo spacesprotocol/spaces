@@ -1038,10 +1038,8 @@ pub fn find_op_commit(tx_outputs: &[TxOut]) -> Option<CommitmentOp> {
                     None
                 } else {
                     let mut commitments = Vec::with_capacity(payload.len() / 32);
-                    for chunk in payload.as_bytes().chunks_exact(32) {
-                        let mut commitment = [0u8; 32];
-                        commitment.copy_from_slice(chunk);
-                        commitments.push(commitment);
+                    for chunk in payload.as_bytes().as_chunks::<32>().0 {
+                        commitments.push(*chunk);
                     }
                     Some(CommitmentOp::Commit(commitments))
                 }
