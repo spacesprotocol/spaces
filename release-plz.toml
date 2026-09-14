@@ -81,16 +81,8 @@ git_tag_name = "spaces_wallet-v{{ version }}"
 name = "spaces_client"
 publish = true
 git_release_enable = true
-git_release_latest = false
+git_release_latest = true
 git_tag_name = "spaces_client-v{{ version }}"
-git_release_body = """
-> ⚠️ **Subspaces preview — for mainnet alpha testing.**
->
-> This release is built from the `subspaces` branch and ships new protocol changes. If you are running a production mainnet node, continue using the latest `v0.0.9a` release from the `main` branch:
-> https://github.com/spacesprotocol/spaces/releases/tag/v0.0.9a
-
-{{ changelog }}
-"""
 
 [[package]]
 name = "spaces_checkpoint"

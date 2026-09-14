@@ -6,7 +6,7 @@ permissions:
 
 on:
   push:
-    branches: [subspaces]
+    branches: [main]
 
 jobs:
   # Opens / updates the "release PR" that bumps versions and edits the CHANGELOG.
