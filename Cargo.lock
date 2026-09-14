@@ -2706,6 +2706,7 @@ dependencies = [
  "hex",
  "log",
  "serde",
+ "serde_json",
  "spaces_protocol",
 ]
 

@@ -21,6 +21,9 @@ bech32 = { workspace = true, optional = true }
 hex = { workspace = true, optional = true }
 log = "0.4.29"
 
+[dev-dependencies]
+serde_json = { workspace = true }
+
 [features]
 default = ["std"]
 serde = ["dep:serde", "dep:hex", "spaces_protocol/serde"]

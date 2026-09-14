@@ -39,7 +39,7 @@ use spaces_nums::num_id::NumId;
 use spaces_nums::snumeric::SNumeric;
 use spaces_nums::{
     ChainProofRequest, Commitment, CommitmentKey, CommitmentTipKey, DelegatorKey, FullNumOut,
-    NumKeyKind, NumOut, NumOutpointKey, NumSource, RebindData, RebindKey, RootAnchor,
+    NumKeyKind, NumOut, NumOutpointKey, NumSource, RebindData, RebindKey, RootAnchor, TrustId,
 };
 use spaces_protocol::bitcoin::ScriptBuf;
 use spaces_protocol::hasher::Hash;
@@ -419,6 +419,9 @@ pub trait Rpc {
 
     #[method(name = "getrootanchors")]
     async fn get_root_anchors(&self) -> Result<Vec<RootAnchor>, ErrorObjectOwned>;
+
+    #[method(name = "gettrustids")]
+    async fn get_trust_ids(&self) -> Result<Vec<TrustId>, ErrorObjectOwned>;
 
     #[method(name = "walletlisttransactions")]
     async fn wallet_list_transactions(
@@ -980,6 +983,7 @@ impl RpcServerImpl {
                     "/root-anchors.json",
                     "getrootanchors",
                 )?)
+                .layer(ProxyGetRequestLayer::new("/trust-ids.json", "gettrustids")?)
                 .layer(ProxyGetRequestLayer::new("/", "getserverinfo")?);
 
             let server = Server::builder()
@@ -1439,6 +1443,15 @@ impl RpcServer for RpcServerImpl {
             .get_root_anchors()
             .await
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
+    }
+
+    async fn get_trust_ids(&self) -> Result<Vec<TrustId>, ErrorObjectOwned> {
+        let anchors = self
+            .store
+            .get_root_anchors()
+            .await
+            .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))?;
+        Ok(spaces_nums::compute_trust_ids(&anchors))
     }
 
     async fn wallet_list_transactions(
