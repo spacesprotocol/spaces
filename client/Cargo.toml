@@ -43,6 +43,7 @@ rand = { workspace = true }
 jsonrpsee = { workspace = true }
 directories = { workspace = true }
 env_logger = { workspace = true }
+qrcode = { version = "0.14", default-features = false }
 serde_json = { workspace = true }
 borsh = { version = "1.5", features = ["derive"] }
 base64 = { workspace = true }

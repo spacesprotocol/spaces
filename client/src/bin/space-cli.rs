@@ -385,6 +385,22 @@ enum Commands {
         /// The OutPoint
         outpoint: OutPoint,
     },
+    /// Show the node's trust id (as an ASCII QR code) for clients to pin.
+    ///
+    /// The trust id commits to the most recent window of root anchors. By
+    /// default the latest id is shown with a QR; use --all to list every id
+    /// or --json for the raw list.
+    Trust {
+        /// List all trust ids (newest first) instead of just the latest.
+        #[arg(long)]
+        all: bool,
+        /// Print the raw JSON list of trust ids.
+        #[arg(long)]
+        json: bool,
+        /// Print only the hex id(s), without the QR code.
+        #[arg(long)]
+        no_qr: bool,
+    },
     /// Get the estimated rollout batch for the specified interval
     #[command(name = "getrollout")]
     GetRollout {
@@ -571,6 +587,25 @@ fn normalize_subject(subject: &str) -> Result<String, ClientError> {
         .map_err(ClientError::Custom)
 }
 
+/// Render `data` as an ASCII QR code to stdout. Colors are inverted so the code
+/// scans on a typical dark terminal; failure is non-fatal (the caller still
+/// prints the hex).
+fn print_qr(data: &str) {
+    use qrcode::{QrCode, render::unicode};
+    match QrCode::new(data.as_bytes()) {
+        Ok(code) => {
+            let qr = code
+                .render::<unicode::Dense1x2>()
+                .dark_color(unicode::Dense1x2::Light)
+                .light_color(unicode::Dense1x2::Dark)
+                .quiet_zone(true)
+                .build();
+            println!("{qr}");
+        }
+        Err(err) => eprintln!("could not render QR code: {err}"),
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let (cli, args) = SpaceCli::configure().await?;
@@ -625,6 +660,28 @@ async fn main() -> anyhow::Result<()> {
 
 async fn handle_commands(cli: &SpaceCli, command: Commands) -> Result<(), ClientError> {
     match command {
+        Commands::Trust { all, json, no_qr } => {
+            let ids = cli.client.get_trust_ids().await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&ids)?);
+            } else if ids.is_empty() {
+                println!("No trust ids yet (node still syncing root anchors)");
+            } else if all {
+                for (i, t) in ids.iter().enumerate() {
+                    let tag = if i == 0 { " (latest)" } else { "" };
+                    println!("{}  height {}{}", hex::encode(t.id), t.block.height, tag);
+                }
+            } else {
+                let latest = &ids[0];
+                let id_hex = hex::encode(latest.id);
+                if !no_qr {
+                    // Encode the scannable veritas URI, not the bare hex, so a
+                    // veritas client recognizes it as a trust id to pin.
+                    print_qr(&format!("veritas://scan?id={id_hex}"));
+                }
+                println!("{}  height {}", id_hex, latest.block.height);
+            }
+        }
         Commands::GetRollout {
             target_interval: target,
         } => {
