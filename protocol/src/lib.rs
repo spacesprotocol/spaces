@@ -7,16 +7,15 @@ pub extern crate bitcoin;
 
 use alloc::{vec, vec::Vec};
 
-#[cfg(feature = "bincode")]
-use bincode::{Decode, Encode};
 use bitcoin::{
-    psbt,
-    secp256k1::{schnorr, Message},
+    Amount, OutPoint, ScriptBuf, Transaction, TxIn, TxOut, Txid, Witness, psbt,
+    secp256k1::{Message, schnorr},
     sighash::{Prevouts, SighashCache, TapSighashType},
     taproot,
     transaction::Version,
-    Amount, OutPoint, ScriptBuf, Transaction, TxIn, TxOut, Txid, Witness,
 };
+#[cfg(feature = "borsh")]
+use borsh::{BorshDeserialize, BorshSerialize};
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
@@ -31,13 +30,20 @@ pub mod hasher;
 pub mod prepare;
 pub mod script;
 pub mod slabel;
+pub mod sname;
 pub mod validate;
 
 #[derive(Clone, PartialEq, Debug)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "bincode", derive(Encode, Decode))]
+#[cfg_attr(feature = "borsh", derive(BorshSerialize, BorshDeserialize))]
 pub struct FullSpaceOut {
-    #[cfg_attr(feature = "bincode", bincode(with_serde))]
+    #[cfg_attr(
+        feature = "borsh",
+        borsh(
+            serialize_with = "borsh_utils::serialize_txid",
+            deserialize_with = "borsh_utils::deserialize_txid"
+        )
+    )]
     pub txid: Txid,
 
     #[cfg_attr(feature = "serde", serde(flatten))]
@@ -48,23 +54,35 @@ pub struct FullSpaceOut {
 /// This structure is a superset of [bitcoin::TxOut]
 #[derive(Clone, PartialEq, Debug)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "bincode", derive(Encode, Decode))]
+#[cfg_attr(feature = "borsh", derive(BorshSerialize, BorshDeserialize))]
 pub struct SpaceOut {
     pub n: usize,
     /// Any space associated with this output
     #[cfg_attr(feature = "serde", serde(flatten))]
     pub space: Option<Space>,
     /// The value of the output, in satoshis.
-    #[cfg_attr(feature = "bincode", bincode(with_serde))]
+    #[cfg_attr(
+        feature = "borsh",
+        borsh(
+            serialize_with = "borsh_utils::serialize_amount",
+            deserialize_with = "borsh_utils::deserialize_amount"
+        )
+    )]
     pub value: Amount,
     /// The script which must be satisfied for the output to be spent.
-    #[cfg_attr(feature = "bincode", bincode(with_serde))]
+    #[cfg_attr(
+        feature = "borsh",
+        borsh(
+            serialize_with = "borsh_utils::serialize_script",
+            deserialize_with = "borsh_utils::deserialize_script"
+        )
+    )]
     pub script_pubkey: ScriptBuf,
 }
 
 #[derive(Clone, PartialEq, Debug)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "bincode", derive(Encode, Decode))]
+#[cfg_attr(feature = "borsh", derive(BorshSerialize, BorshDeserialize))]
 pub struct Space {
     /// The target is the Space name if a spend does not follow
     /// protocol rules the target space will be disassociated from future
@@ -76,20 +94,38 @@ pub struct Space {
 
 #[derive(Clone, PartialEq, Debug)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "bincode", derive(Encode, Decode))]
+#[cfg_attr(feature = "borsh", derive(BorshSerialize, BorshDeserialize))]
 #[cfg_attr(feature = "serde", serde(tag = "type"))]
 pub enum Covenant {
     #[cfg_attr(feature = "serde", serde(rename = "bid"))]
     Bid {
         /// The current burn increment
-        #[cfg_attr(feature = "bincode", bincode(with_serde))]
+        #[cfg_attr(
+            feature = "borsh",
+            borsh(
+                serialize_with = "borsh_utils::serialize_amount",
+                deserialize_with = "borsh_utils::deserialize_amount"
+            )
+        )]
         burn_increment: Amount,
         /// The signature of the bid psbt
-        #[cfg_attr(feature = "bincode", bincode(with_serde))]
+        #[cfg_attr(
+            feature = "borsh",
+            borsh(
+                serialize_with = "borsh_utils::serialize_signature",
+                deserialize_with = "borsh_utils::deserialize_signature"
+            )
+        )]
         signature: schnorr::Signature,
         /// Total amount of BTC burned during auction lifetime
         /// including the current burn increment
-        #[cfg_attr(feature = "bincode", bincode(with_serde))]
+        #[cfg_attr(
+            feature = "borsh",
+            borsh(
+                serialize_with = "borsh_utils::serialize_amount",
+                deserialize_with = "borsh_utils::deserialize_amount"
+            )
+        )]
         total_burned: Amount,
         /// Block height at which he space may be safely registered
         /// by winning bidder.
@@ -112,7 +148,7 @@ pub enum Covenant {
 
 #[derive(Copy, Clone, PartialEq, Debug)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "bincode", derive(Encode, Decode))]
+#[cfg_attr(feature = "borsh", derive(BorshSerialize, BorshDeserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case", tag = "reason"))]
 pub enum RevokeReason {
     /// Space was prematurely spent during the auctions phase
@@ -131,7 +167,7 @@ pub enum RevokeReason {
     derive(Serialize, Deserialize),
     serde(rename_all = "snake_case", tag = "reason")
 )]
-#[cfg_attr(feature = "bincode", derive(Encode, Decode))]
+#[cfg_attr(feature = "borsh", derive(BorshSerialize, BorshDeserialize))]
 pub enum RejectReason {
     AlreadyExists,
     #[cfg_attr(feature = "serde", serde(untagged))]
@@ -144,7 +180,7 @@ pub enum RejectReason {
     derive(Serialize, Deserialize),
     serde(tag = "reason")
 )]
-#[cfg_attr(feature = "bincode", derive(Encode, Decode))]
+#[cfg_attr(feature = "borsh", derive(BorshSerialize, BorshDeserialize))]
 pub enum BidPsbtReason {
     #[cfg_attr(feature = "serde", serde(rename = "bid_psbt_required"))]
     Required,
@@ -177,6 +213,9 @@ impl Bytes {
 
 #[cfg(feature = "serde")]
 pub mod serde_bytes_impl {
+    use alloc::string::String;
+    use alloc::vec::Vec;
+
     use bitcoin::hex::prelude::*;
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -212,50 +251,43 @@ pub mod serde_bytes_impl {
     }
 }
 
-#[cfg(feature = "bincode")]
-pub mod bincode_bytes_impl {
+#[cfg(feature = "borsh")]
+pub mod borsh_bytes_impl {
     use alloc::vec::Vec;
 
-    use bincode::{
-        de::Decoder,
-        enc::Encoder,
-        error::{DecodeError, EncodeError},
-        impl_borrow_decode, Decode, Encode,
-    };
+    use borsh::{BorshDeserialize, BorshSerialize, io};
 
     use super::Bytes;
 
-    impl Encode for Bytes {
-        fn encode<E: Encoder>(&self, encoder: &mut E) -> Result<(), EncodeError> {
-            Encode::encode(&self.as_slice(), encoder)
+    impl BorshSerialize for Bytes {
+        fn serialize<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
+            self.as_slice().serialize(writer)
         }
     }
 
-    impl<Context> Decode<Context> for Bytes {
-        fn decode<D: Decoder<Context = Context>>(decoder: &mut D) -> Result<Self, DecodeError> {
-            let raw: Vec<u8> = Decode::decode(decoder)?;
+    impl BorshDeserialize for Bytes {
+        fn deserialize_reader<R: io::Read>(reader: &mut R) -> io::Result<Self> {
+            let raw: Vec<u8> = BorshDeserialize::deserialize_reader(reader)?;
             Ok(Bytes::new(raw))
         }
     }
-
-    impl_borrow_decode!(Bytes);
 }
 
 impl Space {
     pub fn is_expired(&self, height: u32) -> bool {
         match self.covenant {
             Covenant::Transfer { expire_height, .. } => expire_height < height,
-            _ => return false,
+            _ => false,
         }
     }
 
     pub fn is_owned(&self) -> bool {
-        return matches!(self.covenant, Covenant::Transfer { .. });
+        matches!(self.covenant, Covenant::Transfer { .. })
     }
 
     pub fn claim_height(&self) -> Option<u32> {
         match &self.covenant {
-            Covenant::Bid { claim_height, .. } => claim_height.clone(),
+            Covenant::Bid { claim_height, .. } => *claim_height,
             _ => None,
         }
     }
@@ -278,20 +310,16 @@ impl Space {
 
     pub fn data(&self) -> Option<&[u8]> {
         match &self.covenant {
-            Covenant::Transfer { data, .. } => match &data {
-                None => None,
-                Some(data) => Some(data.as_slice()),
-            },
+            Covenant::Transfer {
+                data: Some(data), ..
+            } => Some(data.as_slice()),
             _ => None,
         }
     }
 
     pub fn data_owned(&self) -> Option<Bytes> {
         match &self.covenant {
-            Covenant::Transfer { data, .. } => match &data {
-                None => None,
-                Some(data) => Some(data.clone()),
-            },
+            Covenant::Transfer { data, .. } => data.clone(),
             _ => None,
         }
     }
@@ -351,9 +379,7 @@ impl FullSpaceOut {
     pub fn refund_signing_info(
         &self,
     ) -> Option<(Transaction, Prevouts<'_, TxOut>, schnorr::Signature)> {
-        if self.spaceout.space.is_none() {
-            return None;
-        }
+        self.spaceout.space.as_ref()?;
 
         match &self.spaceout.space.as_ref().unwrap().covenant {
             Covenant::Bid {
@@ -371,7 +397,7 @@ impl FullSpaceOut {
                             script_pubkey: self.spaceout.script_pubkey.clone(),
                         },
                     ),
-                    signature.clone(),
+                    *signature,
                 ))
             }
             _ => None,
@@ -379,9 +405,7 @@ impl FullSpaceOut {
     }
 
     pub fn refund_psbt_data(&self) -> Option<(psbt::Input, TxOut)> {
-        if self.spaceout.space.is_none() {
-            return None;
-        }
+        self.spaceout.space.as_ref()?;
 
         match &self.spaceout.space.as_ref().unwrap().covenant {
             Covenant::Bid {
@@ -393,7 +417,7 @@ impl FullSpaceOut {
                 let mut witness = Witness::default();
                 witness.push(
                     taproot::Signature {
-                        signature: signature.clone(),
+                        signature: *signature,
                         sighash_type: TapSighashType::SinglePlusAnyoneCanPay,
                     }
                     .to_vec(),
@@ -427,13 +451,13 @@ impl FullSpaceOut {
         let mut witness = Witness::default();
         witness.push(
             taproot::Signature {
-                signature: signature.clone(),
+                signature: *signature,
                 sighash_type: TapSighashType::SinglePlusAnyoneCanPay,
             }
             .to_vec(),
         );
 
-        let tx = Transaction {
+        Transaction {
             version: BID_PSBT_TX_VERSION,
             lock_time: BID_PSBT_TX_LOCK_TIME,
             input: vec![TxIn {
@@ -449,7 +473,6 @@ impl FullSpaceOut {
                 value: refund_amount,
                 script_pubkey: auctioned_utxo.spaceout.script_pubkey.clone(),
             }],
-        };
-        tx
+        }
     }
 }

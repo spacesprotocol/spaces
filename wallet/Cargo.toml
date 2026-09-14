@@ -1,24 +1,25 @@
 [package]
 name = "spaces_wallet"
+description = "Wallet implementation for the Spaces Protocol."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
 
 [dependencies]
-spaces_protocol = { path = "../protocol", features = ["std"], version = "*" }
-bitcoin = { version = "0.32.2", features = ["base64", "serde"] }
-# bdk version 1.0.0-beta.6 + hard coded patch for double spend fix from PR https://github.com/bitcoindevkit/bdk/pull/1765
-bdk_wallet = { git = "https://github.com/buffrr/bdk.git", rev= "43bca8643dec6fdda99e4a29bf88709729af349e", features = ["keys-bip39", "rusqlite"] }
-secp256k1 = "0.29.0"
-anyhow = "1.0.80"
-bech32 = "0.11.0"
-serde = { version = "^1.0", features = ["derive"] }
-serde_json = "1.0"
-bincode = { version = "2.0.1", features = ["serde"] }
-jsonrpc = "0.18.0"
-ctrlc = "3.4.4"
-hex = "0.4.3"
-log = "0.4.21"
-
+spaces_protocol = { workspace = true, features = ["std"] }
+spaces_nums = { workspace = true, features = ["std"] }
+bitcoin = { version = "0.32.8", features = ["base64", "serde"] }
+bdk_wallet = { workspace = true }
+secp256k1 = { workspace = true }
+anyhow = { workspace = true }
+bech32 = { workspace = true }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { workspace = true }
+borsh = { version = "1.5", features = ["derive"] }
 
 [dev-dependencies]
-tempfile = "3.14.0"
+tempfile = { workspace = true }

@@ -12,16 +12,16 @@ use jsonrpsee::core::Serialize;
 use log::error;
 use rand::{
     distributions::Alphanumeric,
-    {thread_rng, Rng},
+    {Rng, thread_rng},
 };
 use serde::Deserialize;
-use spaces_protocol::{bitcoin::Network, constants::ChainAnchor};
+use spaces_protocol::bitcoin::Network;
 
+use crate::store::chain::{Chain, ROOT_ANCHORS_COUNT};
 use crate::{
     auth::{auth_token_from_cookie, auth_token_from_creds},
     source::{BitcoinRpc, BitcoinRpcAuth},
     spaces::Spaced,
-    store::{LiveStore, Store},
 };
 
 const RPC_OPTIONS: &str = "RPC Server Options";
@@ -72,7 +72,7 @@ pub struct Args {
     /// This option can be specified multiple times (default: 127.0.0.1 and ::1 i.e., localhost)
     #[arg(long, help_heading = Some(RPC_OPTIONS), default_values = ["127.0.0.1", "::1"], env = "SPACED_RPC_BIND")]
     rpc_bind: Vec<String>,
-    /// Listen for JSON-RPC connections on <port>
+    /// Listen for JSON-RPC connections on `<port>`
     #[arg(long, help_heading = Some(RPC_OPTIONS), env = "SPACED_RPC_PORT")]
     rpc_port: Option<u16>,
     /// Index blocks including the full transaction data
@@ -84,6 +84,25 @@ pub struct Args {
     /// The specified Bitcoin RPC is a light client
     #[arg(long, env = "SPACED_BITCOIN_RPC_LIGHT", default_value = "false")]
     bitcoin_rpc_light: bool,
+
+    /// Specify the number of anchors spaced will calculate for /root-anchors endpoint
+    #[arg(long, env = "SPACED_NUM_ANCHORS")]
+    num_anchors: Option<u32>,
+
+    /// Index internal node hashes for spaces & nums tree for
+    /// faster merkle proof generation (with build_chain_proof rpc)
+    #[arg(long, env = "SPACED_INDEX_NODE_HASHES", default_value = "false")]
+    index_node_hashes: bool,
+
+    /// Enable manual pruning of Bitcoin Core blocks after they have been
+    /// processed by spaced. Calls `pruneblockchain` RPC periodically,
+    /// keeping a buffer of blocks from tip to handle reorgs.
+    #[arg(long, env = "SPACED_ENABLE_PRUNING", default_value = "false")]
+    enable_pruning: bool,
+
+    /// Cache size in bytes for the spacedb database
+    #[arg(long, env = "SPACED_CACHE_SIZE")]
+    cache_size: Option<usize>,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug, ValueEnum, Serialize, Deserialize)]
@@ -107,6 +126,7 @@ impl ExtendedNetwork {
         }
     }
 
+    #[allow(clippy::result_unit_err)]
     pub fn from_core_arg(arg: &str) -> Result<Self, ()> {
         match arg.to_lowercase().as_str() {
             "main" => Ok(ExtendedNetwork::Mainnet),
@@ -115,16 +135,6 @@ impl ExtendedNetwork {
             "signet" => Ok(ExtendedNetwork::Signet),
             "regtest" => Ok(ExtendedNetwork::Regtest),
             _ => Err(()),
-        }
-    }
-
-    pub fn genesis(&self) -> ChainAnchor {
-        match self {
-            ExtendedNetwork::Testnet => ChainAnchor::TESTNET(),
-            ExtendedNetwork::Testnet4 => ChainAnchor::TESTNET4(),
-            ExtendedNetwork::Regtest => ChainAnchor::REGTEST(),
-            ExtendedNetwork::Mainnet => ChainAnchor::MAINNET(),
-            _ => panic!("unsupported network"),
         }
     }
 }
@@ -164,11 +174,8 @@ impl Args {
             })
             .collect();
 
-        let auth_token = if args.rpc_user.is_some() {
-            auth_token_from_creds(
-                args.rpc_user.as_ref().unwrap(),
-                args.rpc_password.as_ref().unwrap(),
-            )
+        let auth_token = if let Some(user) = args.rpc_user.as_ref() {
+            auth_token_from_creds(user, args.rpc_password.as_ref().unwrap())
         } else {
             let cookie = format!(
                 "__cookie__:{}",
@@ -190,10 +197,21 @@ impl Args {
         };
 
         let bitcoin_rpc_auth = if let Some(cookie) = args.bitcoin_rpc_cookie {
-            let cookie = std::fs::read_to_string(cookie)?;
+            let cookie = std::fs::read_to_string(&cookie).map_err(|e| {
+                anyhow!(
+                    "Failed to read Bitcoin RPC cookie '{}': {}",
+                    cookie.display(),
+                    e
+                )
+            })?;
             BitcoinRpcAuth::Cookie(cookie)
         } else if let Some(user) = args.bitcoin_rpc_user {
             BitcoinRpcAuth::UserPass(user, args.bitcoin_rpc_password.expect("password"))
+        } else if let Some(cookie) =
+            default_bitcoin_cookie_path(&args.chain).and_then(|p| std::fs::read_to_string(&p).ok())
+        {
+            log::info!("Using Bitcoin Core cookie authentication");
+            BitcoinRpcAuth::Cookie(cookie)
         } else {
             BitcoinRpcAuth::None
         };
@@ -205,45 +223,21 @@ impl Args {
         );
 
         let genesis = Spaced::genesis(args.chain);
+        let ptr_genesis = Spaced::nums_genesis(args.chain);
 
-        let proto_db_path = data_dir.join("protocol.sdb");
-        let initial_sync = !proto_db_path.exists();
-
-        let chain_store = Store::open(proto_db_path)?;
-        let chain = LiveStore {
-            state: chain_store.begin(&genesis)?,
-            store: chain_store,
-        };
+        let chain = Chain::load(
+            args.chain.fallback_network(),
+            genesis,
+            ptr_genesis,
+            &data_dir,
+            args.block_index || args.block_index_full,
+            args.index_node_hashes,
+            args.cache_size,
+        )?;
 
         let anchors_path = match args.skip_anchors {
             true => None,
             false => Some(data_dir.join("root_anchors.json")),
-        };
-        let block_index_enabled = args.block_index || args.block_index_full;
-        let block_index = if block_index_enabled {
-            let block_db_path = data_dir.join("block_index.sdb");
-            if !initial_sync && !block_db_path.exists() {
-                return Err(anyhow::anyhow!(
-                    "Block index must be enabled from the initial sync."
-                ));
-            }
-            let block_store = Store::open(block_db_path)?;
-            let index = LiveStore {
-                state: block_store.begin(&genesis).expect("begin block index"),
-                store: block_store,
-            };
-            {
-                let tip_1 = index.state.tip.read().expect("index");
-                let tip_2 = chain.state.tip.read().expect("tip");
-                if tip_1.height != tip_2.height || tip_1.hash != tip_2.hash {
-                    return Err(anyhow::anyhow!(
-                        "Protocol and block index states don't match."
-                    ));
-                }
-            }
-            Some(index)
-        } else {
-            None
         };
 
         Ok(Spaced {
@@ -253,12 +247,13 @@ impl Args {
             bind: rpc_bind_addresses,
             auth_token,
             chain,
-            block_index,
             block_index_full: args.block_index_full,
             num_workers: args.jobs as usize,
             anchors_path,
             synced: false,
             cbf: args.bitcoin_rpc_light,
+            num_anchors: args.num_anchors.unwrap_or(ROOT_ANCHORS_COUNT),
+            enable_pruning: args.enable_pruning,
         })
     }
 }
@@ -285,6 +280,32 @@ pub fn safe_exit(code: i32) -> ! {
     let _ = std::io::stderr().lock().flush();
 
     std::process::exit(code)
+}
+
+/// Returns the default Bitcoin Core cookie file path for the given network.
+pub fn default_bitcoin_cookie_path(network: &ExtendedNetwork) -> Option<PathBuf> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let base = if cfg!(target_os = "linux") {
+        home?.join(".bitcoin")
+    } else if cfg!(target_os = "macos") {
+        home?.join("Library/Application Support/Bitcoin")
+    } else if cfg!(target_os = "windows") {
+        std::env::var_os("APPDATA")
+            .map(PathBuf::from)?
+            .join("Bitcoin")
+    } else {
+        return None;
+    };
+
+    let path = match network {
+        ExtendedNetwork::Mainnet => base.join(".cookie"),
+        ExtendedNetwork::Testnet => base.join("testnet3").join(".cookie"),
+        ExtendedNetwork::Testnet4 => base.join("testnet4").join(".cookie"),
+        ExtendedNetwork::Signet => base.join("signet").join(".cookie"),
+        ExtendedNetwork::Regtest => base.join("regtest").join(".cookie"),
+    };
+
+    Some(path)
 }
 
 pub fn default_bitcoin_rpc_url(network: &ExtendedNetwork) -> &'static str {

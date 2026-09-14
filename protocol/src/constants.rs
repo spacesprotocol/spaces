@@ -1,8 +1,8 @@
 use bitcoin::{
+    BlockHash, Sequence,
     absolute::{Height, LockTime},
     blockdata::transaction::Version,
     hashes::Hash,
-    BlockHash, Sequence,
 };
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
@@ -18,7 +18,7 @@ pub struct ChainAnchor {
 
 pub const SPACES_SIGNED_MSG_PREFIX: &[u8] = b"\x17Spaces Signed Message:\n";
 
-pub const RESERVED_SPACES: [&'static [u8]; 3] = [b"\x07example", b"\x04test", b"\x05local"];
+pub const RESERVED_SPACES: [&[u8]; 3] = [b"\x07example", b"\x04test", b"\x05local"];
 
 /// The number of blocks between each rollout of new spaces for auction.
 pub const ROLLOUT_BLOCK_INTERVAL: u32 = 144;
@@ -62,10 +62,9 @@ impl ChainAnchor {
     pub const MAINNET: fn() -> Self = || {
         Self::new(
             [
-                0x0c, 0x5a, 0x27, 0x95, 0xe2, 0xb7, 0xd5, 0x06,
-                0xdf, 0x09, 0x6a, 0x33, 0x28, 0x47, 0xba, 0x98,
-                0x9f, 0xa6, 0x37, 0x9d, 0xfd, 0x2d, 0x02, 0x00,
-                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x0c, 0x5a, 0x27, 0x95, 0xe2, 0xb7, 0xd5, 0x06, 0xdf, 0x09, 0x6a, 0x33, 0x28, 0x47,
+                0xba, 0x98, 0x9f, 0xa6, 0x37, 0x9d, 0xfd, 0x2d, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00,
             ],
             871_222,
         )
@@ -75,10 +74,9 @@ impl ChainAnchor {
     pub const TESTNET4: fn() -> Self = || {
         Self::new(
             [
-                0xcb, 0xf2, 0xef, 0x93, 0xe8, 0xd0, 0xca, 0x10,
-                0xfb, 0x09, 0xb0, 0xe2, 0x69, 0x97, 0x7a, 0xf0,
-                0x33, 0x72, 0x99, 0x88, 0x9a, 0x16, 0x26, 0xa1,
-                0x4b, 0xc9, 0xc8, 0xe2, 0x00, 0x00, 0x00, 0x00,
+                0xcb, 0xf2, 0xef, 0x93, 0xe8, 0xd0, 0xca, 0x10, 0xfb, 0x09, 0xb0, 0xe2, 0x69, 0x97,
+                0x7a, 0xf0, 0x33, 0x72, 0x99, 0x88, 0x9a, 0x16, 0x26, 0xa1, 0x4b, 0xc9, 0xc8, 0xe2,
+                0x00, 0x00, 0x00, 0x00,
             ],
             50_000,
         )
@@ -88,10 +86,9 @@ impl ChainAnchor {
     pub const TESTNET: fn() -> Self = || {
         Self::new(
             [
-                0xb8, 0x9d, 0xd5, 0xe4, 0x5e, 0xd7, 0x0a, 0x50,
-                0x73, 0x25, 0x2e, 0x0f, 0x5f, 0xba, 0x4a, 0x9e,
-                0xd2, 0x37, 0x73, 0x9d, 0x3b, 0x5a, 0x19, 0x58,
-                0x1a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0xb8, 0x9d, 0xd5, 0xe4, 0x5e, 0xd7, 0x0a, 0x50, 0x73, 0x25, 0x2e, 0x0f, 0x5f, 0xba,
+                0x4a, 0x9e, 0xd2, 0x37, 0x73, 0x9d, 0x3b, 0x5a, 0x19, 0x58, 0x1a, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00,
             ],
             2_865_460,
         )
@@ -101,59 +98,64 @@ impl ChainAnchor {
     pub const REGTEST: fn() -> Self = || {
         Self::new(
             [
-                0x06, 0x22, 0x6e, 0x46, 0x11, 0x1a, 0x0b, 0x59,
-                0xca, 0xaf, 0x12, 0x60, 0x43, 0xeb, 0x5b, 0xbf,
-                0x28, 0xc3, 0x4f, 0x3a, 0x5e, 0x33, 0x2a, 0x1f,
-                0xc7, 0xb2, 0xb7, 0x3c, 0xf1, 0x88, 0x91, 0x0f,
+                0x06, 0x22, 0x6e, 0x46, 0x11, 0x1a, 0x0b, 0x59, 0xca, 0xaf, 0x12, 0x60, 0x43, 0xeb,
+                0x5b, 0xbf, 0x28, 0xc3, 0x4f, 0x3a, 0x5e, 0x33, 0x2a, 0x1f, 0xc7, 0xb2, 0xb7, 0x3c,
+                0xf1, 0x88, 0x91, 0x0f,
+            ],
+            0,
+        )
+    };
+
+    pub const NUMS_REGTEST: fn() -> Self = || {
+        Self::new(
+            [
+                0x06, 0x22, 0x6e, 0x46, 0x11, 0x1a, 0x0b, 0x59, 0xca, 0xaf, 0x12, 0x60, 0x43, 0xeb,
+                0x5b, 0xbf, 0x28, 0xc3, 0x4f, 0x3a, 0x5e, 0x33, 0x2a, 0x1f, 0xc7, 0xb2, 0xb7, 0x3c,
+                0xf1, 0x88, 0x91, 0x0f,
             ],
             0,
         )
     };
 }
 
-#[cfg(feature = "bincode")]
-pub mod bincode_impl {
+#[cfg(feature = "borsh")]
+pub mod borsh_impl {
     use alloc::vec::Vec;
 
-    use bincode::{
-        config,
-        de::Decoder,
-        enc::Encoder,
-        error::{DecodeError, EncodeError},
-        Decode, Encode,
-    };
-    use bitcoin::{hashes::Hash, BlockHash};
+    use bitcoin::{BlockHash, hashes::Hash};
+    use borsh::{BorshDeserialize, BorshSerialize, io};
 
-    use crate::{alloc::borrow::ToOwned, constants::ChainAnchor};
+    use crate::constants::ChainAnchor;
 
-    impl Encode for ChainAnchor {
-        fn encode<E: Encoder>(&self, encoder: &mut E) -> Result<(), EncodeError> {
-            Encode::encode(&self.hash.to_byte_array(), encoder)?;
-            Encode::encode(&self.height, encoder)
+    impl BorshSerialize for ChainAnchor {
+        fn serialize<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
+            writer.write_all(&self.hash.to_byte_array())?;
+            self.height.serialize(writer)
         }
     }
 
-    impl<Context> Decode<Context> for ChainAnchor {
-        fn decode<D: Decoder<Context=Context>>(decoder: &mut D) -> Result<Self, DecodeError> {
+    impl BorshDeserialize for ChainAnchor {
+        fn deserialize_reader<R: io::Read>(reader: &mut R) -> io::Result<Self> {
+            let mut hash_bytes = [0u8; 32];
+            reader.read_exact(&mut hash_bytes)?;
+            let height: u32 = BorshDeserialize::deserialize_reader(reader)?;
             Ok(Self {
-                hash: BlockHash::from_byte_array(Decode::decode(decoder)?),
-                height: Decode::decode(decoder)?,
+                hash: BlockHash::from_byte_array(hash_bytes),
+                height,
             })
         }
     }
 
     impl TryFrom<&[u8]> for ChainAnchor {
-        type Error = DecodeError;
+        type Error = io::Error;
         fn try_from(value: &[u8]) -> core::result::Result<Self, Self::Error> {
-            let (meta, _): (ChainAnchor, _) = bincode::decode_from_slice(value, config::standard())
-                .map_err(|_| DecodeError::OtherString("could not parse chain anchor".to_owned()))?;
-            Ok(meta)
+            borsh::from_slice(value)
         }
     }
 
     impl ChainAnchor {
         pub fn to_vec(&self) -> Vec<u8> {
-            bincode::encode_to_vec(self, config::standard()).expect("encodes chain anchor")
+            borsh::to_vec(self).expect("encodes chain anchor")
         }
     }
 }

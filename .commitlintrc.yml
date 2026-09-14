@@ -1,0 +1,21 @@
+extends:
+  - '@commitlint/config-conventional'
+
+rules:
+  # Allow slightly longer subjects; we have descriptive messages.
+  header-max-length: [2, always, 100]
+  # Enforce lowercase type (feat, fix, ...) and allow common scopes.
+  type-enum:
+    - 2
+    - always
+    - - build
+      - chore
+      - ci
+      - docs
+      - feat
+      - fix
+      - perf
+      - refactor
+      - revert
+      - style
+      - test

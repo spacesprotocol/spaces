@@ -1,0 +1,36 @@
+[package]
+name = "spaces_checkpoint"
+description = "Checkpoint loader and builder for the Spaces protocol."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "checkpoint-builder"
+path = "src/builder.rs"
+required-features = ["cli"]
+
+[dependencies]
+tracing = "0.1"
+sha2 = "0.10"
+tar = "0.4"
+flate2 = "1"
+ureq = "3"
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = { version = "1", optional = true }
+clap = { version = "4", features = ["derive"], optional = true }
+spacedb = { workspace = true, optional = true }
+spaces_protocol = { workspace = true, features = ["std"], optional = true }
+
+[dev-dependencies]
+tempfile = "3"
+
+[features]
+default = ["cli"]
+cli = ["dep:clap", "dep:anyhow", "dep:spacedb", "dep:spaces_protocol"]

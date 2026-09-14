@@ -1,13 +1,13 @@
 use core::{fmt, str::FromStr};
 
-use bech32::{primitives::decode::SegwitHrpstringError, Hrp};
+use bech32::{Hrp, primitives::decode::SegwitHrpstringError};
 use bitcoin::blockdata::script::witness_version::WitnessVersion;
 use spaces_protocol::{
     bitcoin,
     bitcoin::{
+        ScriptBuf, WitnessProgram,
         address::{Address, ParseError},
         network::Network,
-        ScriptBuf, WitnessProgram,
     },
 };
 

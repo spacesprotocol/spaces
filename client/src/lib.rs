@@ -9,18 +9,20 @@ use std::time::{Duration, Instant};
 use base64::Engine;
 use serde::{Deserialize, Deserializer, Serializer};
 
+pub mod app;
 pub mod auth;
+mod cbf;
 mod checker;
 pub mod client;
 pub mod config;
 pub mod format;
 pub mod rpc;
+#[cfg(feature = "schema")]
+pub mod rpc_schema;
 pub mod source;
+mod spaces;
 pub mod store;
-pub mod spaces;
 pub mod wallets;
-mod cbf;
-pub mod app;
 
 fn std_wait<F>(mut predicate: F, wait: Duration)
 where

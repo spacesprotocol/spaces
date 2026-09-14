@@ -1,17 +1,17 @@
 use alloc::{vec, vec::Vec};
 
-#[cfg(feature = "bincode")]
-use bincode::{Decode, Encode};
 use bitcoin::{Amount, OutPoint, Transaction, Txid};
+#[cfg(feature = "borsh")]
+use borsh::{BorshDeserialize, BorshSerialize};
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    constants::{AUCTION_DURATION, AUCTION_EXTENSION_ON_BID, RENEWAL_INTERVAL, ROLLOUT_BATCH_SIZE},
-    prepare::{AuctionedOutput, TrackableOutput, TxContext, SSTXO},
-    script::{OpenHistory, ScriptError, SpaceScript},
-    slabel::SLabel,
     BidPsbtReason, Bytes, Covenant, FullSpaceOut, RejectReason, RevokeReason, Space, SpaceOut,
+    constants::{AUCTION_DURATION, AUCTION_EXTENSION_ON_BID, RENEWAL_INTERVAL, ROLLOUT_BATCH_SIZE},
+    prepare::{AuctionedOutput, SSTXO, TrackableOutput, TxContext},
+    script::{OpenContext, OpenError},
+    slabel::SLabel,
 };
 
 #[derive(Debug, Clone)]
@@ -19,10 +19,16 @@ pub struct Validator {}
 
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "bincode", derive(Encode, Decode))]
+#[cfg_attr(feature = "borsh", derive(BorshSerialize, BorshDeserialize))]
 /// A `TxChangeSet` captures all resulting state changes.
 pub struct TxChangeSet {
-    #[cfg_attr(feature = "bincode", bincode(with_serde))]
+    #[cfg_attr(
+        feature = "borsh",
+        borsh(
+            serialize_with = "borsh_utils::serialize_txid",
+            deserialize_with = "borsh_utils::deserialize_txid"
+        )
+    )]
     pub txid: Txid,
     /// List of transaction inputs.
     pub spends: Vec<SpaceIn>,
@@ -35,16 +41,16 @@ pub struct TxChangeSet {
 
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "bincode", derive(Encode, Decode))]
+#[cfg_attr(feature = "borsh", derive(BorshSerialize, BorshDeserialize))]
 pub struct SpaceIn {
     pub n: usize,
     #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
-    pub script_error: Option<ScriptError>,
+    pub script_error: Option<OpenError>,
 }
 
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "bincode", derive(Encode, Decode))]
+#[cfg_attr(feature = "borsh", derive(BorshSerialize, BorshDeserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case", tag = "type"))]
 pub enum UpdateKind {
     Revoke(RevokeReason),
@@ -54,7 +60,7 @@ pub enum UpdateKind {
 
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "bincode", derive(Encode, Decode))]
+#[cfg_attr(feature = "borsh", derive(BorshSerialize, BorshDeserialize))]
 pub struct UpdateOut {
     #[cfg_attr(feature = "serde", serde(flatten))]
     pub kind: UpdateKind,
@@ -63,22 +69,28 @@ pub struct UpdateOut {
 
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "bincode", derive(Encode, Decode))]
+#[cfg_attr(feature = "borsh", derive(BorshSerialize, BorshDeserialize))]
 pub struct RolloutDetails {
-    #[cfg_attr(feature = "bincode", bincode(with_serde))]
+    #[cfg_attr(
+        feature = "borsh",
+        borsh(
+            serialize_with = "borsh_utils::serialize_amount",
+            deserialize_with = "borsh_utils::deserialize_amount"
+        )
+    )]
     pub priority: Amount,
 }
 
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "bincode", derive(Encode, Decode))]
+#[cfg_attr(feature = "borsh", derive(BorshSerialize, BorshDeserialize))]
 pub struct RevokeParams {
     pub reason: RevokeReason,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "bincode", derive(Encode, Decode))]
+#[cfg_attr(feature = "borsh", derive(BorshSerialize, BorshDeserialize))]
 pub struct RejectParams {
     pub name: SLabel,
 
@@ -88,11 +100,23 @@ pub struct RejectParams {
 
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "bincode", derive(Encode, Decode))]
+#[cfg_attr(feature = "borsh", derive(BorshSerialize, BorshDeserialize))]
 pub struct EventOutput {
-    #[cfg_attr(feature = "bincode", bincode(with_serde))]
+    #[cfg_attr(
+        feature = "borsh",
+        borsh(
+            serialize_with = "borsh_utils::serialize_outpoint",
+            deserialize_with = "borsh_utils::deserialize_outpoint"
+        )
+    )]
     pub outpoint: OutPoint,
     pub spaceout: SpaceOut,
+}
+
+impl Default for Validator {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Validator {
@@ -113,16 +137,13 @@ impl Validator {
             updates: vec![],
         };
 
-        let mut space_data = Bytes::new(Vec::new());
-        let mut reserve = false;
-
+        // Process spends of existing space outputs
         for input_ctx in ctx.inputs.into_iter() {
             changeset.spends.push(SpaceIn {
                 n: input_ctx.n,
                 script_error: None,
             });
 
-            // Process spends of existing space outputs
             self.process_spend(
                 height,
                 tx,
@@ -130,61 +151,31 @@ impl Validator {
                 input_ctx.n,
                 input_ctx.sstxo,
                 &mut changeset,
+                &ctx.data,
             );
-
-            // Process any space scripts
-            if let Some(script) = input_ctx.script {
-                match script {
-                    Ok(op) => match op {
-                        SpaceScript::Open(open) => {
-                            self.process_open(
-                                input_ctx.n,
-                                height,
-                                open,
-                                &mut ctx.auctioned_output,
-                                &mut changeset,
-                            );
-                        }
-                        SpaceScript::Set(data) => {
-                            space_data = Bytes::new(data);
-                        }
-                        SpaceScript::Reserve => {
-                            reserve = true;
-                        }
-                    },
-                    Err(script_error) => {
-                        let last = changeset.spends.last_mut().unwrap();
-                        last.script_error = Some(script_error);
-                    }
-                }
-            }
         }
 
-        // If one of the input scripts is using reserved op codes
-        // then all space outputs with the transfer covenant must be marked as reserved
-        // This does not have an effect on meta outputs/updates
-        if reserve {
-            for out in changeset.creates.iter_mut() {
-                if let Some(space) = out.space.as_mut() {
-                    if matches!(space.covenant, Covenant::Transfer { .. }) {
-                        space.covenant = Covenant::Reserved
-                    }
+        // process opens
+        if let Some((open_idx, open)) = ctx.proposed_space {
+            match open {
+                Ok(open_ctx) => {
+                    self.process_open(
+                        open_idx,
+                        height,
+                        open_ctx,
+                        &mut ctx.auctioned_output,
+                        &mut changeset,
+                    );
+                }
+                Err(e) => {
+                    let input = changeset
+                        .spends
+                        .iter_mut()
+                        .find(|s| s.n == open_idx)
+                        .expect("input for open should exist");
+                    input.script_error = Some(e);
                 }
             }
-        }
-
-        // Set space data if any
-        if !space_data.is_empty() {
-            changeset.creates.iter_mut().for_each(|output| {
-                if let Some(space) = output.space.as_mut() {
-                    match &mut space.covenant {
-                        Covenant::Transfer { data, .. } => {
-                            *data = Some(space_data.clone());
-                        }
-                        _ => {}
-                    }
-                }
-            });
         }
 
         // Check if any outputs should be tracked
@@ -261,15 +252,13 @@ impl Validator {
         if let Some(auctioned) = meta
             .auctioned_output
             .as_ref()
-            .and_then(|out| Some(out.bid_psbt.outpoint))
-        {
-            if tx
+            .map(|out| out.bid_psbt.outpoint)
+            && tx
                 .input
                 .iter()
                 .any(|input| input.previous_output == auctioned)
-            {
-                meta.auctioned_output.as_mut().unwrap().output = None;
-            }
+        {
+            meta.auctioned_output.as_mut().unwrap().output = None;
         }
     }
 
@@ -277,7 +266,7 @@ impl Validator {
         &self,
         input_index: usize,
         height: u32,
-        open: OpenHistory,
+        open: OpenContext,
         auctiond: &mut Option<AuctionedOutput>,
         changeset: &mut TxChangeSet,
     ) {
@@ -288,10 +277,10 @@ impl Validator {
             .expect("open must have an input index revealing the space in witness");
 
         let name = match open {
-            OpenHistory::ExistingSpace(mut prev) => {
+            OpenContext::ExistingSpace(mut prev) => {
                 let prev_space = prev.spaceout.space.as_mut().unwrap();
                 if !prev_space.is_expired(height) {
-                    let reject = ScriptError::Reject(RejectParams {
+                    let reject = OpenError::Reject(RejectParams {
                         name: prev.spaceout.space.unwrap().name,
                         reason: RejectReason::AlreadyExists,
                     });
@@ -300,21 +289,26 @@ impl Validator {
                 }
 
                 // Revoke the previously expired space
-                changeset.updates.push(UpdateOut {
-                    kind: UpdateKind::Revoke(RevokeReason::Expired),
-                    output: FullSpaceOut {
-                        txid: prev.txid,
-                        spaceout: prev.spaceout.clone(),
-                    },
-                });
+                if !changeset.updates.iter().any(|update| {
+                    update.output.outpoint() == prev.outpoint()
+                        && matches!(update.kind, UpdateKind::Revoke(_))
+                }) {
+                    changeset.updates.push(UpdateOut {
+                        kind: UpdateKind::Revoke(RevokeReason::Expired),
+                        output: FullSpaceOut {
+                            txid: prev.txid,
+                            spaceout: prev.spaceout.clone(),
+                        },
+                    });
+                }
                 prev.spaceout.space.unwrap().name
             }
-            OpenHistory::NewSpace(name) => name,
+            OpenContext::NewSpace(name) => name,
         };
 
         let mut auctiond = match auctiond.take() {
             None => {
-                let reject = ScriptError::Reject(RejectParams {
+                let reject = OpenError::Reject(RejectParams {
                     name,
                     reason: RejectReason::BidPsbt(BidPsbtReason::Required),
                 });
@@ -326,7 +320,7 @@ impl Validator {
         };
 
         if auctiond.output.is_none() {
-            let reject = ScriptError::Reject(RejectParams {
+            let reject = OpenError::Reject(RejectParams {
                 name,
                 reason: RejectReason::BidPsbt(BidPsbtReason::OutputSpent),
             });
@@ -355,7 +349,7 @@ impl Validator {
         };
 
         if !fullspaceout.verify_bid_sig() {
-            let reject = ScriptError::Reject(RejectParams {
+            let reject = OpenError::Reject(RejectParams {
                 name: fullspaceout.spaceout.space.unwrap().name,
                 reason: RejectReason::BidPsbt(BidPsbtReason::BadSignature),
             });
@@ -400,6 +394,7 @@ impl Validator {
 
     /// All spends with a spent spaces transaction output must be
     /// marked as spent as this function only does additional processing for spends of spaces
+    #[allow(clippy::too_many_arguments)]
     fn process_spend(
         &self,
         height: u32,
@@ -408,6 +403,7 @@ impl Validator {
         input_index: usize,
         stxo: SSTXO,
         changeset: &mut TxChangeSet,
+        data: &Option<Bytes>,
     ) {
         let spaceout = &stxo.previous_output;
         let space = match &spaceout.space {
@@ -453,7 +449,7 @@ impl Validator {
                     tx,
                     input_index,
                     stxo.previous_output.clone(),
-                    space.data_owned(),
+                    data.clone().or(space.data_owned()),
                     changeset,
                 );
             }
@@ -466,6 +462,7 @@ impl Validator {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn process_bid_spend(
         &self,
         height: u32,
@@ -477,7 +474,7 @@ impl Validator {
         claim_height: Option<u32>,
         changeset: &mut TxChangeSet,
     ) {
-        let input = tx.input.get(input_index as usize).expect("input");
+        let input = tx.input.get(input_index).expect("input");
         let spaceout = stxo.previous_output;
         let space_ref = spaceout.space.as_ref().unwrap();
         // Handle bid spends
@@ -587,7 +584,7 @@ impl Validator {
         tx: &Transaction,
         input_index: usize,
         mut spaceout: SpaceOut,
-        existing_data: Option<Bytes>,
+        data: Option<Bytes>,
         changeset: &mut TxChangeSet,
     ) {
         let input = tx.input.get(input_index).expect("input");
@@ -607,12 +604,7 @@ impl Validator {
             Some(output) => {
                 // check if there's an existing space output created by this transaction
                 // representing another space somehow (should never be possible anyway?)
-                if changeset
-                    .creates
-                    .iter()
-                    .position(|x| x.n == output_index)
-                    .is_some()
-                {
+                if changeset.creates.iter().any(|x| x.n == output_index) {
                     changeset.updates.push(UpdateOut {
                         output: FullSpaceOut {
                             txid: input.previous_output.txid,
@@ -628,9 +620,10 @@ impl Validator {
                 spaceout.script_pubkey = output.script_pubkey.clone();
 
                 let mut space = spaceout.space.unwrap();
+
                 space.covenant = Covenant::Transfer {
                     expire_height: height + RENEWAL_INTERVAL,
-                    data: existing_data,
+                    data,
                 };
                 spaceout.space = Some(space);
                 changeset.creates.push(spaceout);

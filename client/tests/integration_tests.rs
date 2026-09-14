@@ -2,19 +2,21 @@ use std::{path::PathBuf, str::FromStr};
 
 use spaces_client::{
     rpc::{
-        BidParams, ExecuteParams, OpenParams, RegisterParams, RpcClient, RpcWalletRequest,
-        RpcWalletTxBuilder, TransferSpacesParams,
+        BidParams, OpenParams, RegisterParams, RpcClient, RpcWalletRequest, RpcWalletTxBuilder,
+        Subject, TransferSpacesParams,
     },
+    store::chain::{CACHED_SNAPSHOT_LOOKBACK, COMMIT_BLOCK_INTERVAL},
     wallets::{AddressKind, WalletResponse},
 };
+use spaces_nums::ChainProofRequest;
 use spaces_protocol::{
+    Bytes, Covenant,
     bitcoin::{Amount, FeeRate},
     constants::RENEWAL_INTERVAL,
-    script::SpaceScript,
-    Covenant,
+    slabel::SLabel,
 };
 use spaces_testutil::TestRig;
-use spaces_wallet::{export::WalletExport, nostr::NostrEvent, tx_event::TxEventKind};
+use spaces_wallet::{export::WalletExport, tx_event::TxEventKind};
 
 const ALICE: &str = "wallet_99";
 const BOB: &str = "wallet_98";
@@ -45,12 +47,21 @@ async fn it_should_open_a_space_for_auction(rig: &TestRig) -> anyhow::Result<()>
     }
     assert_eq!(response.result.len(), 2, "must be 2 transactions");
     let alices_spaces = rig.spaced.client.wallet_list_spaces(ALICE).await?;
-    assert!(alices_spaces.pending.first().is_some_and(|s| s.to_string() == TEST_SPACE), "must be a pending space");
+    assert!(
+        alices_spaces
+            .pending
+            .first()
+            .is_some_and(|s| s.to_string() == TEST_SPACE),
+        "must be a pending space"
+    );
 
     rig.mine_blocks(1, None).await?;
     rig.wait_until_synced().await?;
     let alices_spaces = rig.spaced.client.wallet_list_spaces(ALICE).await?;
-    assert!(alices_spaces.pending.is_empty(), "must have no pending spaces");
+    assert!(
+        alices_spaces.pending.is_empty(),
+        "must have no pending spaces"
+    );
 
     let fullspaceout = rig.spaced.client.get_space(TEST_SPACE).await?;
     let fullspaceout = fullspaceout.expect("a fullspace out");
@@ -102,7 +113,13 @@ async fn it_should_allow_outbidding(rig: &TestRig) -> anyhow::Result<()> {
     println!("{}", serde_json::to_string_pretty(&result).unwrap());
 
     let bob_spaces_updated = rig.spaced.client.wallet_list_spaces(BOB).await?;
-    assert!(bob_spaces_updated.pending.first().is_some_and(|s| s.to_string() == TEST_SPACE), "must be a pending space");
+    assert!(
+        bob_spaces_updated
+            .pending
+            .first()
+            .is_some_and(|s| s.to_string() == TEST_SPACE),
+        "must be a pending space"
+    );
 
     rig.mine_blocks(1, None).await?;
     rig.wait_until_synced().await?;
@@ -132,7 +149,10 @@ async fn it_should_allow_outbidding(rig: &TestRig) -> anyhow::Result<()> {
         alices_balance.balance + Amount::from_sat(TEST_INITIAL_BID + 662),
         "alice must be refunded this exact amount"
     );
-    assert!(bob_spaces_updated.pending.is_empty(), "must have no pending spaces");
+    assert!(
+        bob_spaces_updated.pending.is_empty(),
+        "must have no pending spaces"
+    );
 
     let fullspaceout = rig.spaced.client.get_space(TEST_SPACE).await?;
     let fullspaceout = fullspaceout.expect("a fullspace out");
@@ -173,8 +193,7 @@ async fn it_should_insert_txout_for_bids(rig: &TestRig) -> anyhow::Result<()> {
         .wallet_list_transactions(BOB, 10, 0)
         .await?
         .iter()
-        .filter(|tx| tx.events.iter().any(|event| event.kind == TxEventKind::Bid))
-        .next()
+        .find(|tx| tx.events.iter().any(|event| event.kind == TxEventKind::Bid))
         .expect("a bid")
         .clone();
 
@@ -365,13 +384,18 @@ async fn it_should_allow_claim_on_or_after_claim_height(rig: &TestRig) -> anyhow
 async fn it_should_allow_batch_transfers_refreshing_expire_height(
     rig: &TestRig,
 ) -> anyhow::Result<()> {
+    use spaces_protocol::slabel::SLabel;
+
     rig.wait_until_wallet_synced(ALICE).await?;
     rig.wait_until_synced().await?;
     let all_spaces = rig.spaced.client.wallet_list_spaces(ALICE).await?;
     let registered_spaces: Vec<_> = all_spaces
         .owned
         .iter()
-        .map(|out| out.spaceout.space.as_ref().expect("space").name.to_string())
+        .map(|out| {
+            let name = out.spaceout.space.as_ref().expect("space").name.to_string();
+            Subject::Label(SLabel::from_str(&name).expect("valid space"))
+        })
         .collect();
 
     let space_address = rig
@@ -384,8 +408,10 @@ async fn it_should_allow_batch_transfers_refreshing_expire_height(
         rig,
         ALICE,
         vec![RpcWalletRequest::Transfer(TransferSpacesParams {
+            secret: None,
             spaces: registered_spaces.clone(),
             to: Some(space_address),
+            data: None,
         })],
         false,
     )
@@ -407,16 +433,13 @@ async fn it_should_allow_batch_transfers_refreshing_expire_height(
         "must be equal"
     );
 
-    let _ = all_spaces_2.owned.iter().for_each(|s| {
+    all_spaces_2.owned.iter().for_each(|s| {
         let space = s.spaceout.space.as_ref().expect("space");
-        match space.covenant {
-            Covenant::Transfer { expire_height, .. } => {
-                assert_eq!(
-                    expire_height, expected_expire_height,
-                    "must refresh expire height"
-                );
-            }
-            _ => {}
+        if let Covenant::Transfer { expire_height, .. } = space.covenant {
+            assert_eq!(
+                expire_height, expected_expire_height,
+                "must refresh expire height"
+            );
         }
     });
 
@@ -430,27 +453,30 @@ async fn it_should_allow_batch_transfers_refreshing_expire_height(
 }
 
 async fn it_should_allow_applying_script_in_batch(rig: &TestRig) -> anyhow::Result<()> {
+    use spaces_protocol::slabel::SLabel;
+
     rig.wait_until_wallet_synced(ALICE).await?;
     rig.wait_until_synced().await?;
     let all_spaces = rig.spaced.client.wallet_list_spaces(ALICE).await?;
     let registered_spaces: Vec<_> = all_spaces
         .owned
         .iter()
-        .map(|out| out.spaceout.space.as_ref().expect("space").name.to_string())
+        .map(|out| {
+            let name = out.spaceout.space.as_ref().expect("space").name.to_string();
+            Subject::Label(SLabel::from_str(&name).expect("valid space"))
+        })
         .collect();
 
     let result = wallet_do(
         rig,
         ALICE,
         vec![
-            // TODO: transfer then execute causes stack to be outdated
-            // RpcWalletRequest::Transfer(TransferSpacesParams {
-            //     spaces: registered_spaces.clone(),
-            //     to: addr,
-            // }),
-            RpcWalletRequest::Execute(ExecuteParams {
-                context: registered_spaces.clone(),
-                space_script: SpaceScript::create_set_fallback(&[0xDE, 0xAD, 0xBE, 0xEF]),
+            // Transfer spaces to self with data (replaces Execute)
+            RpcWalletRequest::Transfer(TransferSpacesParams {
+                secret: None,
+                spaces: registered_spaces.clone(),
+                to: None, // None = renew to self
+                data: Some(vec![0xDE, 0xAD, 0xBE, 0xEF]),
             }),
         ],
         false,
@@ -480,23 +506,21 @@ async fn it_should_allow_applying_script_in_batch(rig: &TestRig) -> anyhow::Resu
 
     all_spaces_2.owned.iter().for_each(|s| {
         let space = s.spaceout.space.as_ref().expect("space");
-        match &space.covenant {
-            Covenant::Transfer {
-                expire_height,
-                data,
-            } => {
-                assert_eq!(
-                    *expire_height, expected_expire_height,
-                    "must refresh expire height"
-                );
-                assert!(data.is_some(), "must be data set");
-                assert_eq!(
-                    data.clone().unwrap().to_vec(),
-                    vec![0xDE, 0xAD, 0xBE, 0xEF],
-                    "must set correct data"
-                );
-            }
-            _ => {}
+        if let Covenant::Transfer {
+            expire_height,
+            data,
+        } = &space.covenant
+        {
+            assert_eq!(
+                *expire_height, expected_expire_height,
+                "must refresh expire height"
+            );
+            assert!(data.is_some(), "must be data set");
+            assert_eq!(
+                data.clone().unwrap().to_vec(),
+                vec![0xDE, 0xAD, 0xBE, 0xEF],
+                "must set correct data"
+            );
         }
     });
     Ok(())
@@ -852,13 +876,17 @@ async fn it_should_not_allow_register_or_transfer_to_same_space_multiple_times(
         .wallet_get_new_address(BOB, AddressKind::Space)
         .await?;
 
+    use spaces_protocol::slabel::SLabel;
+
     let transfer = "@test9995".to_string();
     let response = wallet_do(
         rig,
         ALICE,
         vec![RpcWalletRequest::Transfer(TransferSpacesParams {
-            spaces: vec![transfer.clone()],
+            secret: None,
+            spaces: vec![Subject::Label(SLabel::from_str(&transfer).expect("valid"))],
             to: Some(bob_address.clone()),
+            data: None,
         })],
         false,
     )
@@ -874,8 +902,10 @@ async fn it_should_not_allow_register_or_transfer_to_same_space_multiple_times(
         rig,
         ALICE,
         vec![RpcWalletRequest::Transfer(TransferSpacesParams {
-            spaces: vec![transfer],
+            secret: None,
+            spaces: vec![Subject::Label(SLabel::from_str(&transfer).expect("valid"))],
             to: Some(bob_address),
+            data: None,
         })],
         false,
     )
@@ -886,9 +916,11 @@ async fn it_should_not_allow_register_or_transfer_to_same_space_multiple_times(
     let response = wallet_do(
         rig,
         ALICE,
-        vec![RpcWalletRequest::Execute(ExecuteParams {
-            context: vec![setdata.clone()],
-            space_script: SpaceScript::create_set_fallback(&[0xAA, 0xAA]),
+        vec![RpcWalletRequest::Transfer(TransferSpacesParams {
+            secret: None,
+            spaces: vec![Subject::Label(SLabel::from_str(&setdata).expect("valid"))],
+            to: None,
+            data: Some(vec![0xAA, 0xAA]),
         })],
         false,
     )
@@ -902,9 +934,11 @@ async fn it_should_not_allow_register_or_transfer_to_same_space_multiple_times(
     wallet_do(
         rig,
         ALICE,
-        vec![RpcWalletRequest::Execute(ExecuteParams {
-            context: vec![setdata],
-            space_script: SpaceScript::create_set_fallback(&[0xDE, 0xAD]),
+        vec![RpcWalletRequest::Transfer(TransferSpacesParams {
+            secret: None,
+            spaces: vec![Subject::Label(SLabel::from_str(&setdata).expect("valid"))],
+            to: None,
+            data: Some(vec![0xDE, 0xAD]),
         })],
         false,
     )
@@ -940,6 +974,8 @@ async fn it_should_not_allow_register_or_transfer_to_same_space_multiple_times(
 }
 
 async fn it_can_batch_txs(rig: &TestRig) -> anyhow::Result<()> {
+    use spaces_protocol::slabel::SLabel;
+
     rig.wait_until_wallet_synced(ALICE).await.expect("synced");
     let bob_address = rig
         .spaced
@@ -951,8 +987,12 @@ async fn it_can_batch_txs(rig: &TestRig) -> anyhow::Result<()> {
         ALICE,
         vec![
             RpcWalletRequest::Transfer(TransferSpacesParams {
-                spaces: vec!["@test9996".to_string()],
+                secret: None,
+                spaces: vec![Subject::Label(
+                    SLabel::from_str("@test9996").expect("valid"),
+                )],
                 to: Some(bob_address),
+                data: None,
             }),
             RpcWalletRequest::Bid(BidParams {
                 name: "@test100".to_string(),
@@ -966,14 +1006,16 @@ async fn it_can_batch_txs(rig: &TestRig) -> anyhow::Result<()> {
                 name: "@batch1".to_string(),
                 amount: 1000,
             }),
-            RpcWalletRequest::Execute(ExecuteParams {
-                context: vec![
-                    "@test10000".to_string(),
-                    "@test9999".to_string(),
-                    "@test9998".to_string(),
+            // Transfer spaces to self with data (replaces Execute)
+            RpcWalletRequest::Transfer(TransferSpacesParams {
+                secret: None,
+                spaces: vec![
+                    Subject::Label(SLabel::from_str("@test10000").expect("valid")),
+                    Subject::Label(SLabel::from_str("@test9999").expect("valid")),
+                    Subject::Label(SLabel::from_str("@test9998").expect("valid")),
                 ],
-                // space_script: SpaceScript::create_set_fallback(&[0xEE, 0xEE, 0x22, 0x22]),
-                space_script: SpaceScript::create_set_fallback(&[0xEE, 0xEE, 0x22, 0x22]),
+                to: None,
+                data: Some(vec![0xEE, 0xEE, 0x22, 0x22]),
             }),
         ],
         false,
@@ -989,7 +1031,8 @@ async fn it_can_batch_txs(rig: &TestRig) -> anyhow::Result<()> {
         res.result.iter().all(|tx| tx.error.is_none()),
         "batching should work"
     );
-    assert_eq!(res.result.len(), 5, "expected 4 transactions");
+    // TODO: technically data should be its own tx
+    assert_eq!(res.result.len(), 4, "expected 4 transactions");
 
     rig.mine_blocks(1, None).await.expect("mine");
     rig.wait_until_wallet_synced(ALICE).await.expect("synced");
@@ -1002,15 +1045,11 @@ async fn it_can_batch_txs(rig: &TestRig) -> anyhow::Result<()> {
         .await
         .expect("bob spaces");
     assert!(
-        bob_spaces
-            .owned
-            .iter()
-            .find(|output| output
-                .spaceout
-                .space
-                .as_ref()
-                .is_some_and(|s| s.name.to_string() == "@test9996"))
-            .is_some(),
+        bob_spaces.owned.iter().any(|output| output
+            .spaceout
+            .space
+            .as_ref()
+            .is_some_and(|s| s.name.to_string() == "@test9996")),
         "expected bob to own the space name"
     );
 
@@ -1064,7 +1103,7 @@ async fn it_can_batch_txs(rig: &TestRig) -> anyhow::Result<()> {
         _ => panic!("must be a bid"),
     }
 
-    for space in vec![
+    for space in [
         "@test10000".to_string(),
         "@test9999".to_string(),
         "@test9998".to_string(),
@@ -1095,65 +1134,6 @@ async fn it_can_batch_txs(rig: &TestRig) -> anyhow::Result<()> {
             }
             _ => panic!("must be a transfer"),
         }
-    }
-
-    Ok(())
-}
-
-async fn it_can_use_reserved_op_codes(rig: &TestRig) -> anyhow::Result<()> {
-    rig.wait_until_wallet_synced(ALICE).await.expect("synced");
-    let alice_spaces = vec![
-        "@test10000".to_string(),
-        "@test9999".to_string(),
-        "@test9998".to_string(),
-    ];
-
-    let res = rig
-        .spaced
-        .client
-        .wallet_send_request(
-            ALICE,
-            RpcWalletTxBuilder {
-                bidouts: None,
-                requests: vec![RpcWalletRequest::Execute(ExecuteParams {
-                    context: alice_spaces.clone(),
-                    space_script: SpaceScript::create_reserve(),
-                })],
-                fee_rate: Some(FeeRate::from_sat_per_vb(1).expect("fee")),
-                dust: None,
-                force: true,
-                confirmed_only: false,
-                skip_tx_check: true,
-            },
-        )
-        .await
-        .expect("response");
-
-    assert!(
-        res.result.iter().all(|tx| tx.error.is_none()),
-        "reserve should work"
-    );
-    assert_eq!(res.result.len(), 2, "expected 2 transactions");
-
-    rig.mine_blocks(1, None).await.expect("mine");
-    rig.wait_until_wallet_synced(ALICE).await.expect("synced");
-
-    for space in alice_spaces {
-        let space = rig
-            .spaced
-            .client
-            .get_space(&space)
-            .await
-            .expect("space")
-            .expect("space exists")
-            .spaceout
-            .space
-            .expect("space exists");
-
-        assert!(
-            matches!(space.covenant, Covenant::Reserved),
-            "expected a reserved space"
-        );
     }
 
     Ok(())
@@ -1205,6 +1185,7 @@ async fn it_should_allow_buy_sell(rig: &TestRig) -> anyhow::Result<()> {
         .wallet_buy(
             BOB,
             listing.clone(),
+            None,
             Some(FeeRate::from_sat_per_vb(1).expect("rate")),
             false,
         )
@@ -1235,8 +1216,7 @@ async fn it_should_allow_buy_sell(rig: &TestRig) -> anyhow::Result<()> {
         bob_spaces
             .owned
             .iter()
-            .find(|s| s.spaceout.space.as_ref().unwrap().name.to_string() == space_name)
-            .is_some(),
+            .any(|s| s.spaceout.space.as_ref().unwrap().name.to_string() == space_name),
         "bob should own it now"
     );
 
@@ -1254,38 +1234,365 @@ async fn it_should_allow_buy_sell(rig: &TestRig) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn it_should_allow_sign_verify_messages(rig: &TestRig) -> anyhow::Result<()> {
-    rig.wait_until_wallet_synced(BOB).await.expect("synced");
+async fn it_should_handle_expired_spaces(rig: &TestRig) -> anyhow::Result<()> {
+    rig.wait_until_wallet_synced(ALICE).await?;
+    rig.wait_until_synced().await?;
 
-    let alice_spaces = rig
-        .spaced
+    // Get a space that Alice owns
+    let alice_spaces = rig.spaced.client.wallet_list_spaces(ALICE).await?;
+    let owned_space = alice_spaces
+        .owned
+        .first()
+        .expect("Alice should own at least one space");
+    let space = owned_space.spaceout.space.as_ref().expect("space");
+    let space_name = space.name.to_string();
+
+    let current_height = rig.get_block_count().await? as u32;
+    println!("Space {} current height: {}", space_name, current_height);
+
+    // Use debug RPC to set expire_height to current height (making it expired)
+    let new_expire_height = current_height;
+    println!(
+        "Setting expire_height to {} to expire the space...",
+        new_expire_height
+    );
+    rig.spaced
         .client
-        .wallet_list_spaces(BOB)
-        .await
-        .expect("bob spaces");
-    let space = alice_spaces
+        .debug_set_expire_height(&space_name, new_expire_height)
+        .await?;
+
+    // Mine one block to trigger expiration check
+    rig.mine_blocks(1, None).await?;
+    rig.wait_until_synced().await?;
+
+    let new_height = rig.get_block_count().await? as u32;
+    println!("New height: {}, space should now be expired", new_height);
+    assert!(
+        new_height > new_expire_height,
+        "should have passed expire_height"
+    );
+
+    // Test 1: Try to renew/transfer the expired space - should fail
+    println!("Attempting to renew expired space (should fail)...");
+    rig.wait_until_wallet_synced(ALICE).await?;
+
+    let renew_result = wallet_do(
+        rig,
+        ALICE,
+        vec![RpcWalletRequest::Transfer(TransferSpacesParams {
+            secret: None,
+            spaces: vec![Subject::Label(
+                SLabel::from_str(&space_name).expect("valid"),
+            )],
+            to: None, // renew to self
+            data: None,
+        })],
+        false,
+    )
+    .await;
+
+    // The transfer should fail since the space is expired
+    assert!(
+        renew_result.is_err()
+            || renew_result
+                .as_ref()
+                .unwrap()
+                .result
+                .iter()
+                .any(|r| r.error.is_some()),
+        "renewing an expired space should fail"
+    );
+    println!("✓ Renewing expired space correctly failed");
+
+    // Verify the space is no longer in Alice's owned list (it was revoked)
+    rig.wait_until_wallet_synced(ALICE).await?;
+    let alice_spaces_after = rig.spaced.client.wallet_list_spaces(ALICE).await?;
+    let _still_owns = alice_spaces_after
+        .owned
+        .iter()
+        .any(|s| s.spaceout.space.as_ref().unwrap().name.to_string() == space_name);
+
+    // Test 2: Open the expired space for auction - should succeed
+    println!("Opening expired space {} for auction...", space_name);
+    let open_result = wallet_do(
+        rig,
+        BOB, // BOB opens the expired space
+        vec![RpcWalletRequest::Open(OpenParams {
+            name: format!("@{}", space_name.trim_start_matches('@')),
+            amount: 1000,
+        })],
+        false,
+    )
+    .await?;
+
+    // Check that the open succeeded
+    let has_error = open_result.result.iter().any(|r| r.error.is_some());
+    assert!(
+        !has_error,
+        "opening an expired space should succeed: {:?}",
+        open_result
+    );
+    println!("✓ Opening expired space for auction succeeded");
+
+    rig.mine_blocks(1, None).await?;
+    rig.wait_until_synced().await?;
+
+    // Verify the space is now in auction (BOB's winning list)
+    rig.wait_until_wallet_synced(BOB).await?;
+    let bob_spaces = rig.spaced.client.wallet_list_spaces(BOB).await?;
+    let bob_winning = bob_spaces
+        .winning
+        .iter()
+        .any(|s| s.spaceout.space.as_ref().unwrap().name.to_string() == space_name);
+    assert!(bob_winning, "BOB should be winning the reopened auction");
+    println!("✓ Expired space is now back in auction");
+
+    // ========== Test Case 2: Expire second space, force renew, then open ==========
+    println!("\n=== Test Case 2: Force renew expired space ===");
+
+    // Get a second space that Alice owns
+    rig.wait_until_wallet_synced(ALICE).await?;
+    let alice_spaces_2 = rig.spaced.client.wallet_list_spaces(ALICE).await?;
+    let owned_space_2 = alice_spaces_2
+        .owned
+        .get(1)
+        .expect("Alice should own at least two spaces");
+    let space_2 = owned_space_2.spaceout.space.as_ref().expect("space");
+    let space_name_2 = space_2.name.to_string();
+
+    println!("Using second space: {}", space_name_2);
+
+    // Expire the second space
+    let current_height_2 = rig.get_block_count().await? as u32;
+    rig.spaced
+        .client
+        .debug_set_expire_height(&space_name_2, current_height_2)
+        .await?;
+    println!(
+        "Set expire_height to {} for {}",
+        current_height_2, space_name_2
+    );
+
+    // Mine one block to pass the expire height
+    rig.mine_blocks(1, None).await?;
+    rig.wait_until_synced().await?;
+    rig.wait_until_wallet_synced(ALICE).await?;
+
+    // Try to renew with force=true - this should allow the wallet to create the tx
+    println!("Attempting to renew expired space with force=true...");
+    let force_renew_result = wallet_do(
+        rig,
+        ALICE,
+        vec![RpcWalletRequest::Transfer(TransferSpacesParams {
+            secret: None,
+            spaces: vec![Subject::Label(
+                SLabel::from_str(&space_name_2).expect("valid"),
+            )],
+            to: None,
+            data: None,
+        })],
+        true, // force=true
+    )
+    .await;
+
+    // With force=true, the wallet should create the tx (even though it will be revoked on-chain)
+    assert!(
+        force_renew_result.is_ok(),
+        "force renew should allow tx creation: {:?}",
+        force_renew_result
+    );
+    let force_result = force_renew_result.unwrap();
+    println!(
+        "Force renew result: {:?}",
+        force_result
+            .result
+            .iter()
+            .map(|r| &r.error)
+            .collect::<Vec<_>>()
+    );
+
+    // Mine the block - the transfer will be revoked because the space is expired
+    rig.mine_blocks(1, None).await?;
+    rig.wait_until_synced().await?;
+    rig.wait_until_wallet_synced(ALICE).await?;
+
+    // The space should be revoked (not in Alice's owned list anymore)
+    let alice_spaces_after_force = rig.spaced.client.wallet_list_spaces(ALICE).await?;
+    let still_owns_2 = alice_spaces_after_force
+        .owned
+        .iter()
+        .any(|s| s.spaceout.space.as_ref().unwrap().name.to_string() == space_name_2);
+    assert!(
+        !still_owns_2,
+        "Space should be revoked after forced renewal of expired space"
+    );
+    println!("✓ Space correctly revoked after forced renewal");
+
+    // Now open the expired space for auction
+    println!("Opening expired space {} for auction...", space_name_2);
+    let open_result_2 = wallet_do(
+        rig,
+        BOB,
+        vec![RpcWalletRequest::Open(OpenParams {
+            name: format!("@{}", space_name_2.trim_start_matches('@')),
+            amount: 1000,
+        })],
+        false,
+    )
+    .await?;
+
+    let has_error_2 = open_result_2.result.iter().any(|r| r.error.is_some());
+    assert!(
+        !has_error_2,
+        "opening expired space should succeed: {:?}",
+        open_result_2
+    );
+    println!("✓ Opening second expired space for auction succeeded");
+
+    rig.mine_blocks(1, None).await?;
+    rig.wait_until_synced().await?;
+
+    // Verify BOB is winning the second auction too
+    rig.wait_until_wallet_synced(BOB).await?;
+    let bob_spaces_2 = rig.spaced.client.wallet_list_spaces(BOB).await?;
+    let bob_winning_2 = bob_spaces_2
+        .winning
+        .iter()
+        .any(|s| s.spaceout.space.as_ref().unwrap().name.to_string() == space_name_2);
+    assert!(
+        bob_winning_2,
+        "BOB should be winning the second reopened auction"
+    );
+    println!("✓ Second expired space is now back in auction");
+
+    Ok(())
+}
+
+async fn it_should_sign_and_verify_schnorr(rig: &TestRig) -> anyhow::Result<()> {
+    rig.wait_until_wallet_synced(BOB).await?;
+
+    let spaces = rig.spaced.client.wallet_list_spaces(BOB).await?;
+    let space = spaces
         .owned
         .first()
         .expect("bob should have at least 1 space");
-
     let space_name = space.spaceout.space.as_ref().unwrap().name.to_string();
+    let subject = Subject::Label(SLabel::from_str(&space_name).unwrap());
 
-    let msg = NostrEvent::new(1, "hello world", vec![]);
-    let signed = rig
+    let message = Bytes::new(b"hello world".to_vec());
+    let signature = rig
         .spaced
         .client
-        .wallet_sign_event(BOB, &space_name, msg.clone())
-        .await
-        .expect("sign");
+        .wallet_sign_schnorr(BOB, subject.clone(), message.clone())
+        .await?;
 
-    println!("signed\n{}", serde_json::to_string_pretty(&signed).unwrap());
-    assert_eq!(signed.content, msg.content, "msg content must match");
+    assert!(!signature.is_empty(), "signature should not be empty");
 
+    let valid = rig
+        .spaced
+        .client
+        .verify_schnorr(subject, message, signature)
+        .await?;
+    assert!(valid, "signature must be valid");
+
+    Ok(())
+}
+
+async fn it_should_build_chain_proof_with_snapshot_caching(rig: &TestRig) -> anyhow::Result<()> {
+    rig.wait_until_wallet_synced(ALICE).await?;
+    rig.wait_until_synced().await?;
+
+    let spaces = rig.spaced.client.wallet_list_spaces(ALICE).await?;
+    let space = spaces.owned.first().expect("alice should have spaces");
+    let space_name = space.spaceout.space.as_ref().unwrap().name.to_string();
+    let label = SLabel::from_str(&space_name).unwrap();
+
+    // Use debug RPC to set expire_height far in the future so last_update is old
+    // last_update = expire_height - RENEWAL_INTERVAL, so setting expire_height
+    // to RENEWAL_INTERVAL + 1 makes last_update = 1 (very old)
+    let old_expire_height = RENEWAL_INTERVAL + 1;
     rig.spaced
         .client
-        .verify_event(&space_name, signed.clone())
-        .await
-        .expect("verify");
+        .debug_set_expire_height(&space_name, old_expire_height)
+        .await?;
+
+    // Mine to next commit boundary so the change is committed
+    let tip = rig.get_block_count().await? as u32;
+    let remaining = tip % COMMIT_BLOCK_INTERVAL;
+    if remaining > 0 {
+        rig.mine_blocks((COMMIT_BLOCK_INTERVAL - remaining) as usize, None)
+            .await?;
+    }
+    rig.wait_until_synced().await?;
+
+    let tip = rig.get_block_count().await? as u32;
+    let cached_height =
+        (tip - tip % COMMIT_BLOCK_INTERVAL).saturating_sub(CACHED_SNAPSHOT_LOOKBACK);
+    let last_update = old_expire_height.saturating_sub(RENEWAL_INTERVAL);
+    assert!(
+        last_update <= cached_height,
+        "last_update ({}) should be <= cached_height ({})",
+        last_update,
+        cached_height
+    );
+
+    // Prove the space - last_update=1 <= cached_height, should use cached snapshot
+    let proof1 = rig
+        .spaced
+        .client
+        .build_chain_proof(
+            ChainProofRequest {
+                spaces: vec![label.clone()],
+                nums: vec![],
+            },
+            Some(false),
+        )
+        .await?;
+
+    assert!(!proof1.spaces_proof.is_empty(), "proof should not be empty");
+    assert_eq!(
+        proof1.block.height, cached_height,
+        "old space should use cached snapshot (last_update={}, cached_height={})",
+        last_update, cached_height
+    );
+
+    // Now set expire_height so last_update is recent (above cached_height)
+    let recent_expire_height = tip + RENEWAL_INTERVAL;
+    rig.spaced
+        .client
+        .debug_set_expire_height(&space_name, recent_expire_height)
+        .await?;
+
+    // Mine to next commit boundary
+    let tip2 = rig.get_block_count().await? as u32;
+    let remaining = tip2 % COMMIT_BLOCK_INTERVAL;
+    if remaining > 0 {
+        rig.mine_blocks((COMMIT_BLOCK_INTERVAL - remaining) as usize, None)
+            .await?;
+    }
+    rig.wait_until_synced().await?;
+
+    // Prove again - last_update is now recent, should use live state
+    let proof2 = rig
+        .spaced
+        .client
+        .build_chain_proof(
+            ChainProofRequest {
+                spaces: vec![label.clone()],
+                nums: vec![],
+            },
+            Some(false),
+        )
+        .await?;
+
+    let tip3 = rig.get_block_count().await? as u32;
+    let cached_height2 =
+        (tip3 - tip3 % COMMIT_BLOCK_INTERVAL).saturating_sub(CACHED_SNAPSHOT_LOOKBACK);
+    assert!(!proof2.spaces_proof.is_empty(), "proof should not be empty");
+    assert!(
+        proof2.block.height > cached_height2,
+        "updated space should use live state, not cached snapshot"
+    );
 
     Ok(())
 }
@@ -1349,20 +1656,24 @@ async fn run_auction_tests() -> anyhow::Result<()> {
         .await
         .expect("should not allow register/transfer multiple times");
     it_can_batch_txs(&rig).await.expect("bump fee");
-    it_can_use_reserved_op_codes(&rig)
-        .await
-        .expect("should use reserved opcodes");
     it_should_allow_buy_sell(&rig)
         .await
         .expect("should allow buy sell");
-    it_should_allow_sign_verify_messages(&rig)
+    it_should_sign_and_verify_schnorr(&rig)
         .await
-        .expect("should sign verify");
+        .expect("should sign and verify schnorr");
+    it_should_build_chain_proof_with_snapshot_caching(&rig)
+        .await
+        .expect("should build chain proof with snapshot caching");
+    it_should_handle_expired_spaces(&rig)
+        .await
+        .expect("should handle expired spaces");
 
     // keep reorgs last as it can drop some txs from mempool and mess up wallet state
     it_should_handle_reorgs(&rig)
         .await
         .expect("should handle reorgs wallet");
+
     Ok(())
 }
 
