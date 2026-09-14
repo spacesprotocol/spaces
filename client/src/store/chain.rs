@@ -201,6 +201,12 @@ impl Chain {
         let nums_db_path = dir.join("nums_v2.sdb");
         let initial_num_sync = !nums_db_path.exists();
 
+        // Older nodes stored spaces state in `protocol.sdb`; the format changed
+        // and the file was renamed, so we resync into a fresh `root.sdb`.
+        if dir.join("protocol.sdb").exists() && !proto_db_path.exists() {
+            info!("Migrating database, resyncing spaces state from genesis");
+        }
+
         let sp_store = SpStore::open(proto_db_path, index_hashes, cache_size)?;
         let sp = SpLiveStore {
             state: sp_store.begin(&genesis)?,
