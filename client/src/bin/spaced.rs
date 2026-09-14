@@ -1,14 +1,10 @@
-use std::{env};
+use std::env;
 
 use env_logger::Env;
 use log::error;
-use spaces_client::{
-    config::{safe_exit},
-};
-use tokio::{
-    sync::{broadcast},
-};
 use spaces_client::app::App;
+use spaces_client::config::safe_exit;
+use tokio::sync::broadcast;
 
 #[tokio::main]
 async fn main() {
@@ -26,7 +22,7 @@ async fn main() {
     match app.run(env::args().collect()).await {
         Ok(_) => {}
         Err(e) => {
-            error!("{}", e.to_string());
+            error!("{}", e);
             safe_exit(1);
         }
     }

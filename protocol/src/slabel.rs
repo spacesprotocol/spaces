@@ -1,4 +1,3 @@
-#[cfg(feature = "serde")]
 use alloc::string::ToString;
 use alloc::{string::String, vec::Vec};
 use core::{
@@ -7,7 +6,7 @@ use core::{
 };
 
 #[cfg(feature = "serde")]
-use serde::{de::Error as ErrorUtil, Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as ErrorUtil};
 
 use crate::{constants::RESERVED_SPACES, errors::Error};
 
@@ -17,42 +16,38 @@ pub const PUNYCODE_PREFIX: &[u8] = b"xn--";
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SLabel([u8; MAX_LABEL_LEN + 1]);
 
-#[cfg(feature = "bincode")]
-pub mod bincode_impl {
-    use bincode::{
-        de::{read::Reader, Decoder},
-        enc::Encoder,
-        error::{DecodeError, EncodeError},
-        impl_borrow_decode, Decode, Encode,
-    };
+#[cfg(feature = "borsh")]
+pub mod borsh_impl {
+    use borsh::{BorshDeserialize, BorshSerialize, io};
 
     use super::*;
 
-    impl Encode for SLabel {
-        fn encode<E: Encoder>(&self, encoder: &mut E) -> Result<(), EncodeError> {
-            // We skip encoding the length byte since bincode adds a length prefix
-            // which we reuse as our length byte when decoding
-            Encode::encode(&self.as_ref()[1..], encoder)
+    impl BorshSerialize for SLabel {
+        fn serialize<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
+            // Serialize the full label including length byte
+            let len = self.0[0] as usize;
+            writer.write_all(&self.0[..=len])
         }
     }
 
-    impl<Context> Decode<Context> for SLabel {
-        fn decode<D: Decoder<Context = Context>>(decoder: &mut D) -> Result<Self, DecodeError> {
-            let reader = decoder.reader();
+    impl BorshDeserialize for SLabel {
+        fn deserialize_reader<R: io::Read>(reader: &mut R) -> io::Result<Self> {
             let mut buf = [0u8; MAX_LABEL_LEN + 1];
 
-            // read bincode's length byte
-            reader.read(&mut buf[..1])?;
+            // Read the length byte first
+            reader.read_exact(&mut buf[..1])?;
             let len = buf[0] as usize;
             if len > MAX_LABEL_LEN {
-                return Err(DecodeError::Other("length exceeds maximum for the label"));
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "length exceeds maximum for the label",
+                ));
             }
-            reader.read(&mut buf[1..=len])?;
+            // Read the label bytes
+            reader.read_exact(&mut buf[1..=len])?;
             Ok(SLabel(buf))
         }
     }
-
-    impl_borrow_decode!(SLabel);
 }
 
 #[cfg(feature = "serde")]
@@ -165,6 +160,41 @@ impl<'a> TryFrom<&'a [u8]> for SLabelRef<'a> {
             return Err(Error::Name(NameErrorKind::EOF));
         }
         let label = &value[..=len];
+
+        // Numeric label: #<block>-<txpos>-<vout>
+        if label[1] == b'#' {
+            let content = &label[2..];
+            // Find first dash (block-txpos boundary)
+            let d1 = content
+                .iter()
+                .position(|&c| c == b'-')
+                .filter(|&p| p > 0)
+                .ok_or(Error::Name(NameErrorKind::InvalidCharacter))?;
+            let rest = &content[d1 + 1..];
+            // Find second dash (txpos-vout boundary)
+            let d2 = rest
+                .iter()
+                .position(|&c| c == b'-')
+                .filter(|&p| p > 0)
+                .ok_or(Error::Name(NameErrorKind::InvalidCharacter))?;
+
+            let block = &content[..d1];
+            let tx_pos = &rest[..d2];
+            let vout = &rest[d2 + 1..];
+
+            if block.is_empty()
+                || tx_pos.is_empty()
+                || vout.is_empty()
+                || !block.iter().all(|c| c.is_ascii_digit())
+                || !tx_pos.iter().all(|c| c.is_ascii_digit())
+                || !vout.iter().all(|c| c.is_ascii_digit())
+            {
+                return Err(Error::Name(NameErrorKind::InvalidCharacter));
+            }
+
+            return Ok(SLabelRef(label));
+        }
+
         let mut verify_range = &label[1..];
         if verify_range.starts_with(PUNYCODE_PREFIX) && len > PUNYCODE_PREFIX.len() {
             verify_range = &verify_range[PUNYCODE_PREFIX.len()..]
@@ -226,30 +256,40 @@ impl TryFrom<&str> for SLabel {
     type Error = Error;
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
-        if !value.starts_with('@') {
-            return Err(Error::Name(NameErrorKind::NotCanonical));
+        if value.starts_with('#') {
+            return Self::from_str_unprefixed(value);
         }
-        let label = &value[1..];
-        Self::from_str_unprefixed(label)
+        if let Some(rest) = value.strip_prefix('@') {
+            return Self::from_str_unprefixed(rest);
+        }
+        Err(Error::Name(NameErrorKind::NotCanonical))
     }
 }
 
 impl Display for SLabel {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         let label_str = self.as_str_unprefixed().map_err(|_| core::fmt::Error)?;
-        write!(f, "@{}", label_str)
+        if self.is_numeric() {
+            write!(f, "{}", label_str)
+        } else {
+            write!(f, "@{}", label_str)
+        }
     }
 }
 
 impl Display for SLabelRef<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}", self)
+        Display::fmt(&self.to_owned(), f)
     }
 }
 
 impl SLabel {
     pub fn as_name_ref(&self) -> SLabelRef<'_> {
         SLabelRef(&self.0)
+    }
+
+    pub fn is_numeric(&self) -> bool {
+        self.0[0] > 0 && self.0[1] == b'#'
     }
 
     pub fn is_reserved(&self) -> bool {
@@ -262,6 +302,10 @@ impl SLabelRef<'_> {
         let mut owned = SLabel([0; MAX_LABEL_LEN + 1]);
         owned.0[..self.0.len()].copy_from_slice(self.0);
         owned
+    }
+
+    pub fn is_numeric(&self) -> bool {
+        self.0[0] > 0 && self.0.get(1) == Some(&b'#')
     }
 
     pub fn is_reserved(&self) -> bool {
@@ -424,21 +468,18 @@ mod tests {
             );
         }
 
-        #[cfg(feature = "bincode")]
+        #[cfg(feature = "borsh")]
         {
-            use bincode::config;
+            use borsh::{from_slice, to_vec};
             let label = SLabel::try_from("@example").unwrap();
-            let serialized =
-                bincode::encode_to_vec(label.clone(), config::standard()).expect("encoded");
+            let serialized = to_vec(&label).expect("encoded");
 
             assert_eq!(
                 serialized.len(),
                 label.as_ref().len(),
                 "Serialization should produce correct length"
             );
-            let (deserialized, _): (SLabel, _) =
-                bincode::decode_from_slice(serialized.as_slice(), config::standard())
-                    .expect("deserialize");
+            let deserialized: SLabel = from_slice(&serialized).expect("deserialize");
             assert_eq!(
                 deserialized, label,
                 "Deserialization should produce the original label"
@@ -473,5 +514,110 @@ mod tests {
         assert!(SLabel::try_from("@xn-").is_err());
         assert!(SLabel::try_from("@xn--").is_err());
         assert!(SLabel::try_from("@xxn--test").is_err());
+    }
+
+    #[test]
+    fn test_numeric_valid() {
+        let label = SLabel::try_from("#800000-3-1").unwrap();
+        assert_eq!(label.to_string(), "#800000-3-1");
+        assert!(label.is_numeric());
+
+        let label = SLabel::try_from("#0-0-0").unwrap();
+        assert_eq!(label.to_string(), "#0-0-0");
+        assert!(label.is_numeric());
+
+        let label = SLabel::try_from("#1-1-0").unwrap();
+        assert_eq!(label.to_string(), "#1-1-0");
+
+        // Large values
+        let label = SLabel::try_from("#4294967295-65535-65535").unwrap();
+        assert_eq!(label.to_string(), "#4294967295-65535-65535");
+    }
+
+    #[test]
+    fn test_numeric_invalid() {
+        // Just "#" with nothing after
+        assert!(SLabel::try_from("#").is_err(), "bare # should be invalid");
+
+        // Missing separators
+        assert!(SLabel::try_from("#123").is_err(), "missing dashes");
+
+        // Only two parts (missing vout)
+        assert!(SLabel::try_from("#123-4").is_err(), "missing vout");
+
+        // No digits before first dash
+        assert!(
+            SLabel::try_from("#-3-1").is_err(),
+            "no digits before first dash"
+        );
+
+        // No digits between dashes
+        assert!(
+            SLabel::try_from("#3--1").is_err(),
+            "no digits between dashes"
+        );
+
+        // No digits after second dash
+        assert!(
+            SLabel::try_from("#3-4-").is_err(),
+            "no digits after second dash"
+        );
+
+        // Non-digit characters
+        assert!(SLabel::try_from("#abc-3-1").is_err(), "letters in block");
+        assert!(SLabel::try_from("#3-abc-1").is_err(), "letters in txpos");
+        assert!(SLabel::try_from("#3-4-abc").is_err(), "letters in vout");
+
+        // Too many dashes
+        assert!(SLabel::try_from("#3-4-5-6").is_err(), "four parts");
+
+        // Spaces
+        assert!(SLabel::try_from("# 3-4-1").is_err(), "space in numeric");
+
+        // Dash only content
+        assert!(SLabel::try_from("#-").is_err(), "just dash after #");
+    }
+
+    #[test]
+    fn test_numeric_is_numeric() {
+        let named = SLabel::try_from("@example").unwrap();
+        assert!(!named.is_numeric());
+
+        let numeric = SLabel::try_from("#100-5-0").unwrap();
+        assert!(numeric.is_numeric());
+    }
+
+    #[test]
+    fn test_numeric_display_no_at_prefix() {
+        let label = SLabel::try_from("#100-5-0").unwrap();
+        // Should display as "#100-5-0" NOT "@#100-5-0"
+        assert_eq!(format!("{}", label), "#100-5-0");
+    }
+
+    #[test]
+    fn test_numeric_fromstr_roundtrip() {
+        let original = "#999-42-7";
+        let label = SLabel::from_str(original).unwrap();
+        assert_eq!(label.to_string(), original);
+    }
+
+    #[test]
+    fn test_numeric_raw_bytes() {
+        let label = SLabel::try_from("#1-2-3").unwrap();
+        // Content stored is "#1-2-3" (6 bytes), length byte = 6
+        let raw = label.as_ref();
+        assert_eq!(raw[0], 6); // length
+        assert_eq!(&raw[1..], b"#1-2-3");
+    }
+
+    #[test]
+    fn test_numeric_slabelref() {
+        // Build raw bytes: length + "#1-2-3"
+        let bytes = b"\x06#1-2-3";
+        let label_ref = SLabelRef::try_from(bytes.as_slice()).unwrap();
+        assert!(label_ref.is_numeric());
+        let owned = label_ref.to_owned();
+        assert!(owned.is_numeric());
+        assert_eq!(owned.to_string(), "#1-2-3");
     }
 }

@@ -1,17 +1,18 @@
 use alloc::{vec, vec::Vec};
 
+use crate::script::{OpenContext, find_op_set_data, load_open_context};
+use crate::{
+    Bytes, SpaceOut,
+    errors::Result,
+    hasher::{KeyHasher, SpaceKey},
+    script::OpenResult,
+};
+use bitcoin::taproot::LeafVersion;
 use bitcoin::{
+    Amount, OutPoint, Transaction, TxOut,
     absolute::LockTime,
     opcodes::all::OP_RETURN,
     secp256k1::{schnorr, schnorr::Signature},
-    Amount, OutPoint, Transaction, TxOut,
-};
-
-use crate::{
-    errors::Result,
-    hasher::{KeyHasher, SpaceKey},
-    script::{ScriptResult, SpaceScript},
-    SpaceOut,
 };
 
 const COMPRESSED_PSBT_SIZE: usize = 65;
@@ -25,15 +26,18 @@ pub struct BidPsbt {
 pub struct TxContext {
     pub inputs: Vec<InputContext>,
     pub auctioned_output: Option<AuctionedOutput>,
+    pub proposed_space: Option<(usize, OpenResult<OpenContext>)>,
+    pub data: Option<Bytes>,
 }
 
+#[derive(Clone)]
 pub struct InputContext {
     pub n: usize,
     pub sstxo: SSTXO,
-    pub script: Option<ScriptResult<SpaceScript>>,
 }
 
 /// Spent Spaces Transaction Output
+#[derive(Clone)]
 pub struct SSTXO {
     pub previous_output: SpaceOut,
 }
@@ -46,7 +50,7 @@ pub struct AuctionedOutput {
     pub bid_psbt: BidPsbt,
 }
 
-pub trait DataSource {
+pub trait SpacesSource {
     fn get_space_outpoint(&mut self, space_hash: &SpaceKey) -> Result<Option<OutPoint>>;
 
     fn get_spaceout(&mut self, outpoint: &OutPoint) -> Result<Option<SpaceOut>>;
@@ -54,7 +58,7 @@ pub trait DataSource {
 
 impl TxContext {
     #[inline(always)]
-    pub fn spending_spaces<T: DataSource>(src: &mut T, tx: &Transaction) -> Result<bool> {
+    pub fn spending_spaces<T: SpacesSource>(src: &mut T, tx: &Transaction) -> Result<bool> {
         for input in tx.input.iter() {
             if src.get_spaceout(&input.previous_output)?.is_some() {
                 return Ok(true);
@@ -69,11 +73,12 @@ impl TxContext {
     ///
     /// Returns `Some(PreparedTransaction)` if the transaction is relevant to the Spaces protocol.
     /// Returns `None` if the transaction is not relevant.
-    pub fn from_tx<T: DataSource, H: KeyHasher>(
+    pub fn from_tx<T: SpacesSource, H: KeyHasher>(
         src: &mut T,
         tx: &Transaction,
     ) -> Result<Option<TxContext>> {
-        if !Self::spending_spaces(src, &tx)? {
+        let mut proposed_space = None;
+        if !Self::spending_spaces(src, tx)? {
             if is_magic_lock_time(&tx.lock_time)
                 && tx.output.iter().any(|out| out.is_magic_output())
             {
@@ -82,13 +87,15 @@ impl TxContext {
                     // even if such an output exists, it can be ignored
                     // as there's no spends of existing space outputs
                     auctioned_output: None,
+                    proposed_space,
+                    data: None,
                 }));
             }
             return Ok(None);
         }
 
         let mut inputs = Vec::with_capacity(tx.input.len());
-        let auctioned_output = match Self::get_bid_psbt(&tx) {
+        let auctioned_output = match Self::get_bid_psbt(tx) {
             None => None,
             Some(out) => Some(AuctionedOutput {
                 output: src.get_spaceout(&out.outpoint)?,
@@ -104,22 +111,28 @@ impl TxContext {
             let sstxo = SSTXO {
                 previous_output: spaceout,
             };
-            let mut spacein = InputContext {
-                n,
-                sstxo,
-                script: None,
-            };
+            let spacein = InputContext { n, sstxo };
 
-            // Run any space scripts
-            if let Some(script) = input.witness.tapscript() {
-                spacein.script = SpaceScript::eval::<T, H>(src, script)?;
+            // Check for a name revealed in the witness
+            if auctioned_output.is_some()
+                && proposed_space.is_none()
+                && let Some(leaf_script) = input
+                    .witness
+                    .taproot_leaf_script()
+                    .filter(|ls| ls.version == LeafVersion::TapScript)
+            {
+                proposed_space =
+                    load_open_context::<T, H>(src, leaf_script.script)?.map(|o| (n, o));
             }
+
             inputs.push(spacein)
         }
 
         Ok(Some(TxContext {
             inputs,
             auctioned_output,
+            proposed_space,
+            data: find_op_set_data(&tx.output),
         }))
     }
 
@@ -130,10 +143,7 @@ impl TxContext {
             return None;
         }
 
-        let cpsbt = match Self::cpsbt_from_script(tx.output[0].script_pubkey.as_bytes()) {
-            None => return None,
-            Some(c) => c,
-        };
+        let cpsbt = Self::cpsbt_from_script(tx.output[0].script_pubkey.as_bytes())?;
 
         let bid = BidPsbt {
             outpoint: OutPoint {
@@ -156,7 +166,7 @@ impl TxContext {
             return None;
         }
 
-        let script_ref: &[u8] = script.as_ref();
+        let script_ref: &[u8] = script;
         let cpsbt: &[u8] = &script_ref[2..];
 
         let cpsbt = CPsbt {

@@ -1,22 +1,23 @@
 use alloc::vec::Vec;
 
-#[cfg(feature = "bincode")]
-use bincode::{Decode, Encode};
+use bitcoin::opcodes::all::{OP_PUSHNUM_1, OP_RETURN};
 use bitcoin::{
+    Script, ScriptBuf, TxOut,
     opcodes::all::OP_DROP,
     script,
     script::{Instruction, PushBytesBuf},
-    Script,
 };
+#[cfg(feature = "borsh")]
+use borsh::{BorshDeserialize, BorshSerialize};
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    Bytes, FullSpaceOut,
     hasher::{KeyHasher, SpaceKey},
-    prepare::DataSource,
+    prepare::SpacesSource,
     slabel::{SLabel, SLabelRef},
     validate::RejectParams,
-    FullSpaceOut,
 };
 
 /// Ways that a script might fail. Not everything is split up as
@@ -28,28 +29,20 @@ use crate::{
     derive(Serialize, Deserialize),
     serde(tag = "type", rename_all = "snake_case")
 )]
-#[cfg_attr(feature = "bincode", derive(Encode, Decode))]
+#[cfg_attr(feature = "borsh", derive(BorshSerialize, BorshDeserialize))]
 #[non_exhaustive]
-pub enum ScriptError {
+pub enum OpenError {
     MalformedName,
     ReservedName,
     Reject(RejectParams),
 }
 
-pub type ScriptResult<T> = Result<T, ScriptError>;
+pub type OpenResult<T> = Result<T, OpenError>;
 
-pub const OP_OPEN: u8 = 1;
-pub const OP_SETFALLBACK: u8 = 2;
-pub const OP_RESERVE_1: u8 = 252;
-pub const OP_RESERVE_2: u8 = 253;
-pub const OP_RESERVE_3: u8 = 254;
-pub const OP_RESERVE_4: u8 = 255;
-
-pub const MAGIC: &[u8] = &[0xde, 0xde, 0xde, 0xde];
-pub const MAGIC_LEN: usize = MAGIC.len();
+pub const OPEN_MAGIC: &[u8] = &[0xde, 0xde, 0xde, 0xde, 0x01];
 
 #[derive(Clone, Debug)]
-pub enum OpenHistory {
+pub enum OpenContext {
     /// If OP_OPEN is attempting to initiate an auction for an existing Space,
     /// a reference for the previous space is included
     ExistingSpace(FullSpaceOut),
@@ -58,144 +51,110 @@ pub enum OpenHistory {
     NewSpace(SLabel),
 }
 
-#[derive(Clone, Debug)]
-pub enum SpaceScript {
-    Open(OpenHistory),
-    Set(Vec<u8>),
-    Reserve,
+/// To set data associated with a space, we use:
+/// `OP_RETURN OP_PUSHNUM_1 <op push bytes> <data>`
+pub fn find_op_set_data(tx_outputs: &[TxOut]) -> Option<Bytes> {
+    tx_outputs.iter().find_map(|s| {
+        let mut instructions = s.script_pubkey.instructions().skip(1);
+        match (instructions.next()?.ok()?, instructions.next()?.ok()?) {
+            (Instruction::Op(OP_PUSHNUM_1), Instruction::PushBytes(bytes)) => {
+                Some(Bytes::new(bytes.as_bytes().to_vec()))
+            }
+            _ => None,
+        }
+    })
 }
 
-impl SpaceScript {
-    pub fn create_open(name: SLabel) -> Vec<u8> {
-        let name = name.as_ref();
-        let mut space_script = Vec::with_capacity(MAGIC_LEN + 1 + name.len());
-        space_script.extend(MAGIC);
-        space_script.push(OP_OPEN);
-        space_script.extend(name);
-        space_script
+/// Create data OP_RETURN script for spaces/PTRs
+/// Format: `OP_RETURN OP_PUSHNUM_1 <data>`
+pub fn create_data_script(data: &[u8]) -> ScriptBuf {
+    let mut buf = PushBytesBuf::new();
+    buf.extend_from_slice(data).expect("valid");
+
+    ScriptBuf::builder()
+        .push_opcode(OP_RETURN)
+        .push_opcode(OP_PUSHNUM_1)
+        .push_slice(buf)
+        .into_script()
+}
+
+pub fn create_open_data(name: SLabel) -> Vec<u8> {
+    let name = name.as_ref();
+    let mut data = Vec::with_capacity(OPEN_MAGIC.len() + name.len());
+    data.extend(OPEN_MAGIC);
+    data.extend(name);
+    data
+}
+
+pub fn nop_script(space_script: Vec<u8>) -> script::Builder {
+    script::Builder::new()
+        .push_slice(
+            PushBytesBuf::try_from(space_script)
+                .expect("push bytes")
+                .as_push_bytes(),
+        )
+        .push_opcode(OP_DROP)
+}
+
+pub fn load_open_context<T: SpacesSource, H: KeyHasher>(
+    src: &mut T,
+    script: &Script,
+) -> crate::errors::Result<Option<OpenResult<OpenContext>>> {
+    let name = match find_open(script) {
+        Some(Ok(name)) => name,
+        Some(Err(e)) => return Ok(Some(Err(e))),
+        None => return Ok(None),
+    };
+    if name.is_reserved() {
+        return Ok(Some(Err(OpenError::ReservedName)));
+    }
+    if name.is_numeric() {
+        return Ok(Some(Err(OpenError::MalformedName)));
     }
 
-    pub fn create_set_fallback(data: &[u8]) -> Vec<u8> {
-        let mut space_script = Vec::with_capacity(MAGIC_LEN + 1 + data.len());
-        space_script.extend(MAGIC);
-        space_script.push(OP_SETFALLBACK);
-        space_script.extend(data);
-        space_script
-    }
-
-    pub fn create_reserve() -> Vec<u8> {
-        let mut space_script = Vec::with_capacity(MAGIC_LEN + 1);
-        space_script.extend(MAGIC);
-        space_script.push(OP_RESERVE_1);
-        space_script
-    }
-
-    pub fn nop_script(space_script: Vec<u8>) -> script::Builder {
-        script::Builder::new()
-            .push_slice(
-                PushBytesBuf::try_from(space_script)
-                    .expect("push bytes")
-                    .as_push_bytes(),
-            )
-            .push_opcode(OP_DROP)
-    }
-
-    pub fn eval<T: DataSource, H: KeyHasher>(
-        src: &mut T,
-        script: &Script,
-    ) -> crate::errors::Result<Option<ScriptResult<Self>>> {
-        let space_script = Self::find_space_script(script);
-        if space_script.is_none() {
-            return Ok(None);
+    let ctx = {
+        let spacehash = SpaceKey::from(H::hash(name.as_ref()));
+        let existing = src.get_space_outpoint(&spacehash)?;
+        match existing {
+            None => OpenContext::NewSpace(name.to_owned()),
+            Some(outpoint) => OpenContext::ExistingSpace(FullSpaceOut {
+                txid: outpoint.txid,
+                spaceout: src.get_spaceout(&outpoint)?.expect("spaceout exists"),
+            }),
         }
-        let space_script = space_script.unwrap();
-        let op = space_script[0];
-        let op_data = &space_script[1..];
+    };
+    Ok(Some(Ok(ctx)))
+}
 
-        match op {
-            OP_OPEN => {
-                let open_result = Self::op_open::<T, H>(src, op_data)?;
-                if open_result.is_err() {
-                    return Ok(Some(Err(open_result.unwrap_err())));
-                }
-                Ok(Some(Ok(SpaceScript::Open(open_result.unwrap()))))
-            }
-            OP_SETFALLBACK => Ok(Some(Ok(SpaceScript::Set(op_data.to_vec())))),
-            OP_RESERVE_1..=u8::MAX => Ok(Some(Ok(SpaceScript::Reserve))),
-            _ => {
-                // NOOP
-                Ok(None)
-            }
-        }
-    }
-
-    fn op_open<T: DataSource, H: KeyHasher>(
-        src: &mut T,
-        op_data: &[u8],
-    ) -> crate::errors::Result<ScriptResult<OpenHistory>> {
-        let name = SLabelRef::try_from(op_data);
-        if name.is_err() {
-            return Ok(Err(ScriptError::MalformedName));
-        }
-        let name = name.unwrap();
-
-        if name.is_reserved() {
-            return Ok(Err(ScriptError::ReservedName));
-        }
-
-        let kind = {
-            let spacehash = SpaceKey::from(H::hash(name.as_ref()));
-            let existing = src.get_space_outpoint(&spacehash)?;
-            match existing {
-                None => OpenHistory::NewSpace(name.to_owned()),
-                Some(outpoint) => {
-                    // Handle data inconsistency: if spaceout doesn't exist, treat as new space
-                    // This can happen if the space was revoked but the space->outpoint mapping
-                    // wasn't cleaned up properly
-                    match src.get_spaceout(&outpoint)? {
-                        Some(spaceout) => OpenHistory::ExistingSpace(FullSpaceOut {
-                            txid: outpoint.txid,
-                            spaceout,
-                        }),
-                        None => OpenHistory::NewSpace(name.to_owned()),
-                    }
-                }
-            }
-        };
-        let open = Ok(kind);
-        Ok(open)
-    }
-
+fn find_open(script: &Script) -> Option<OpenResult<SLabelRef<'_>>> {
     // Find the first OP_PUSH bytes in a bitcoin script prefixed with our magic
-    #[inline(always)]
-    fn find_space_script(script: &Script) -> Option<&[u8]> {
-        // Find the first OP_PUSH bytes in a bitcoin script prefixed with our magic
-        let mut space_script = None;
-        for op in script.instructions() {
-            if op.is_err() {
-                return None;
-            }
-            match op.unwrap() {
-                Instruction::Op(_) => continue,
-                Instruction::PushBytes(push_bytes) => {
-                    let mut bytes = push_bytes.as_bytes();
-                    // Starts with our prefix + at least 1 additional op code byte
-                    if bytes.len() < MAGIC_LEN + 1 || !bytes.starts_with(MAGIC) {
-                        continue;
-                    }
-                    bytes = &bytes[MAGIC_LEN..];
-                    space_script = Some(bytes);
-                    break;
+    let mut open_bytes = None;
+    for op in script.instructions() {
+        if op.is_err() {
+            return None;
+        }
+        match op.unwrap() {
+            Instruction::Op(_) => continue,
+            Instruction::PushBytes(push_bytes) => {
+                let mut bytes = push_bytes.as_bytes();
+                // Starts with our prefix + at least 1 additional byte
+                if bytes.len() <= OPEN_MAGIC.len() || !bytes.starts_with(OPEN_MAGIC) {
+                    continue;
                 }
+                bytes = &bytes[OPEN_MAGIC.len()..];
+                let name = SLabelRef::try_from(bytes).map_err(|_| OpenError::MalformedName);
+                open_bytes = Some(name);
+                break;
             }
         }
-        space_script
     }
+
+    open_bytes
 }
 
-impl core::fmt::Display for ScriptError {
+impl core::fmt::Display for OpenError {
     fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
-        use ScriptError::*;
+        use OpenError::*;
 
         match *self {
             MalformedName => f.write_str("malformed name"),
@@ -211,15 +170,15 @@ mod tests {
     use core::str::FromStr;
 
     use bitcoin::{
-        hashes::Hash as OtherHash, opcodes, script::PushBytesBuf, OutPoint, ScriptBuf, Txid,
+        OutPoint, ScriptBuf, Txid, hashes::Hash as OtherHash, opcodes, script::PushBytesBuf,
     };
 
     use crate::{
-        hasher::{Hash, KeyHasher, SpaceKey},
-        prepare::DataSource,
-        script::{OpenHistory, ScriptError, SpaceScript, MAGIC, MAGIC_LEN, OP_OPEN},
-        slabel::SLabel,
         Covenant, FullSpaceOut, Space, SpaceOut,
+        hasher::{Hash, KeyHasher, SpaceKey},
+        prepare::SpacesSource,
+        script::{OPEN_MAGIC, OpenContext, OpenError, create_open_data, load_open_context},
+        slabel::SLabel,
     };
 
     pub struct DummySource {
@@ -268,7 +227,7 @@ mod tests {
             );
         }
     }
-    impl DataSource for DummySource {
+    impl SpacesSource for DummySource {
         fn get_space_outpoint(
             &mut self,
             space_hash: &SpaceKey,
@@ -298,18 +257,18 @@ mod tests {
         let mut builder = ScriptBuf::new();
 
         // Doesn't matter just throwing some dummy script
-        builder.push_slice(&[0u8; 32]);
+        builder.push_slice([0u8; 32]);
         builder.push_opcode(opcodes::all::OP_CHECKSIG);
 
         // Should ignore magic without an opcode
         builder.push_slice(
-            PushBytesBuf::try_from(MAGIC.to_vec())
+            PushBytesBuf::try_from(OPEN_MAGIC.to_vec())
                 .expect("push bytes")
                 .as_push_bytes(),
         );
 
         // Valid script with correct magic
-        let pancake_space = SpaceScript::create_open(SLabel::from_str("@pancakes").unwrap());
+        let pancake_space = create_open_data(SLabel::from_str("@pancakes").unwrap());
         builder.push_slice(
             PushBytesBuf::try_from(pancake_space)
                 .expect("push bytes")
@@ -318,7 +277,7 @@ mod tests {
         builder.push_opcode(opcodes::all::OP_DROP);
 
         // Another script, ignored since it picks the first one it sees
-        let example_space = SpaceScript::create_open(SLabel::from_str("@example").unwrap());
+        let example_space = create_open_data(SLabel::from_str("@example").unwrap());
         builder.push_slice(
             PushBytesBuf::try_from(example_space)
                 .expect("push bytes")
@@ -326,22 +285,19 @@ mod tests {
         );
         builder.push_opcode(opcodes::all::OP_DROP);
 
-        let res = SpaceScript::eval::<_, DummyHasher>(&mut src, &builder)
-            .expect("execute")
-            .expect("result")
-            .expect("script");
+        let ctx = load_open_context::<_, DummyHasher>(&mut src, &builder)
+            .expect("no error")
+            .expect("found open")
+            .expect("valid open");
 
-        match res {
-            SpaceScript::Open(ctx) => match ctx {
-                OpenHistory::NewSpace(space) => assert_eq!(space.to_string(), "@pancakes"),
-                _ => panic!("unexpected space type"),
-            },
-            _ => panic!("unexpected op type"),
+        match ctx {
+            OpenContext::NewSpace(space) => assert_eq!(space.to_string(), "@pancakes"),
+            _ => panic!("unexpected space type"),
         }
 
         // Test with existing space
         let mut builder2 = ScriptBuf::new();
-        let test_space = SpaceScript::create_open(SLabel::from_str("@test12").unwrap());
+        let test_space = create_open_data(SLabel::from_str("@test12").unwrap());
         builder2.push_slice(
             PushBytesBuf::try_from(test_space)
                 .expect("push bytes")
@@ -349,22 +305,19 @@ mod tests {
         );
         builder2.push_opcode(opcodes::all::OP_DROP);
 
-        let res = SpaceScript::eval::<_, DummyHasher>(&mut src, &builder2)
-            .expect("execute")
-            .expect("result")
-            .expect("script");
+        let ctx = load_open_context::<_, DummyHasher>(&mut src, &builder2)
+            .expect("no error")
+            .expect("found open")
+            .expect("valid open");
 
-        match res {
-            SpaceScript::Open(ctx) => match ctx {
-                OpenHistory::ExistingSpace(e) => {
-                    assert_eq!(
-                        e.spaceout.space.as_ref().unwrap().name.to_string(),
-                        "@test12"
-                    )
-                }
-                _ => panic!("unexpected space type"),
-            },
-            _ => panic!("unexpected op type"),
+        match ctx {
+            OpenContext::ExistingSpace(e) => {
+                assert_eq!(
+                    e.spaceout.space.as_ref().unwrap().name.to_string(),
+                    "@test12"
+                )
+            }
+            _ => panic!("unexpected space type"),
         }
     }
 
@@ -372,11 +325,10 @@ mod tests {
     fn test_open_malformed_name() {
         let mut src = DummySource::new();
 
-        // Now try an OP_OPEN with malformed name
+        // Create an OPEN script with malformed name
         let bad_name = [200u8; 60];
-        let mut space_script = Vec::with_capacity(MAGIC_LEN + 1 + bad_name.len());
-        space_script.extend(MAGIC);
-        space_script.push(OP_OPEN);
+        let mut space_script = Vec::with_capacity(OPEN_MAGIC.len() + bad_name.len());
+        space_script.extend(OPEN_MAGIC);
         space_script.extend(bad_name);
 
         let mut builder3 = ScriptBuf::new();
@@ -386,32 +338,12 @@ mod tests {
                 .as_push_bytes(),
         );
 
-        let res = SpaceScript::eval::<_, DummyHasher>(&mut src, &builder3).expect("execute");
+        let res = load_open_context::<_, DummyHasher>(&mut src, &builder3)
+            .expect("no error")
+            .expect("found open");
 
-        assert_eq!(res.unwrap().err(), Some(ScriptError::MalformedName));
+        assert_eq!(res.err(), Some(OpenError::MalformedName));
     }
 
-    #[test]
-    fn test_reserve() {
-        let mut src = DummySource::new();
-
-        let mut builder = ScriptBuf::new();
-        let reserve_script = SpaceScript::create_reserve();
-        builder.push_slice(
-            PushBytesBuf::try_from(reserve_script)
-                .expect("push bytes")
-                .as_push_bytes(),
-        );
-        builder.push_opcode(opcodes::all::OP_DROP);
-
-        let res = SpaceScript::eval::<_, DummyHasher>(&mut src, &builder)
-            .expect("execute")
-            .expect("result")
-            .expect("script");
-
-        match res {
-            SpaceScript::Reserve => {}
-            _ => panic!("unexpected op type"),
-        }
-    }
+    // test_reserve removed - reserve functionality has been removed
 }

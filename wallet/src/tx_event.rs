@@ -3,8 +3,8 @@ use std::{fmt, fmt::Display, str::FromStr};
 use bdk_wallet::{
     chain, rusqlite,
     rusqlite::{
-        types::{FromSql, FromSqlError, FromSqlResult, ToSqlOutput, ValueRef},
         ToSql,
+        types::{FromSql, FromSqlError, FromSqlResult, ToSqlOutput, ValueRef},
     },
 };
 use bitcoin::{Amount, OutPoint, ScriptBuf, Transaction, TxOut, Txid};
@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 use spaces_protocol::{Covenant, FullSpaceOut};
 
 use crate::{
-    rusqlite_impl::{migrate_schema, Impl},
     SpaceScriptSigningInfo, SpacesWallet,
+    rusqlite_impl::{Impl, migrate_schema},
 };
 
 #[derive(Clone, Debug)]
@@ -77,6 +77,34 @@ pub struct ExecuteEventDetails {
     pub n: usize,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CreateNumEventDetails {
+    pub genesis_spk: ScriptBuf,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TransferNumEventDetails {
+    pub num_id: String,
+    pub to: ScriptBuf,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UnbindNumEventDetails {
+    pub num_id: String,
+    /// The spk at which the num was destroyed; doubles as the revival key.
+    pub death_spk: ScriptBuf,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DelegateEventDetails {
+    pub script_pubkey: ScriptBuf,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CommitRootEventDetails {
+    pub root: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TxEventKind {
@@ -91,6 +119,12 @@ pub enum TxEventKind {
     Send,
     FeeBump,
     Buy,
+    CreateNum,
+    TransferNum,
+    UnbindNum,
+    Delegate,
+    CommitRoot,
+    RollbackRoot,
 }
 
 impl TxEvent {
@@ -150,7 +184,7 @@ impl TxEvent {
         ))?;
 
         let rows = stmt.query_map(
-            rusqlite::params_from_iter(txids.into_iter().map(|t| Impl(t))),
+            rusqlite::params_from_iter(txids.into_iter().map(Impl)),
             |row| {
                 let txid: Impl<Txid> = row.get(0)?;
                 let previous_spaceout: Option<Impl<OutPoint>> = row.get(1)?;
@@ -158,10 +192,8 @@ impl TxEvent {
             },
         )?;
         let mut results = Vec::new();
-        for row in rows {
-            if let Ok((txid, outpoint)) = row {
-                results.push((txid.0, outpoint));
-            }
+        for (txid, outpoint) in rows.flatten() {
+            results.push((txid.0, outpoint));
         }
         Ok(results)
     }
@@ -176,7 +208,7 @@ impl TxEvent {
             Self::TX_EVENTS_TABLE_NAME,
         ))?;
         let results: Vec<Self> = Self::from_sqlite_statement(stmt, [Impl(txid)])?;
-        Ok(results.get(0).cloned())
+        Ok(results.first().cloned())
     }
 
     pub fn get_signing_info(
@@ -204,6 +236,19 @@ impl TxEvent {
             }
         }
         Ok(None)
+    }
+
+    /// Retrieve all CreateNum events
+    pub fn get_create_num_events(db_tx: &rusqlite::Transaction) -> rusqlite::Result<Vec<TxEvent>> {
+        let query = format!(
+            "SELECT type, space, previous_spaceout, details
+             FROM {table}
+             WHERE type = 'create-num'
+             ORDER BY id DESC",
+            table = Self::TX_EVENTS_TABLE_NAME,
+        );
+        let stmt = db_tx.prepare(&query)?;
+        Self::from_sqlite_statement(stmt, [])
     }
 
     /// Retrieve all spaces the wallet has done any operation with
@@ -408,10 +453,7 @@ impl TxRecord {
             space: Some(space),
             previous_spaceout: None,
             details: Some(
-                serde_json::to_value(OpenEventDetails {
-                    initial_bid: initial_bid,
-                })
-                .expect("json value"),
+                serde_json::to_value(OpenEventDetails { initial_bid }).expect("json value"),
             ),
         });
     }
@@ -428,6 +470,72 @@ impl TxRecord {
                 })
                 .expect("json value"),
             ),
+        });
+    }
+
+    pub fn add_create_num(&mut self, genesis_spk: ScriptBuf) {
+        self.events.push(TxEvent {
+            kind: TxEventKind::CreateNum,
+            space: None,
+            previous_spaceout: None,
+            details: Some(
+                serde_json::to_value(CreateNumEventDetails { genesis_spk }).expect("json value"),
+            ),
+        });
+    }
+
+    pub fn add_transfer_num(&mut self, num: String, num_id: String, to: ScriptBuf) {
+        self.events.push(TxEvent {
+            kind: TxEventKind::TransferNum,
+            space: Some(num),
+            previous_spaceout: None,
+            details: Some(
+                serde_json::to_value(TransferNumEventDetails { num_id, to }).expect("json value"),
+            ),
+        });
+    }
+
+    pub fn add_unbind_num(&mut self, num: String, num_id: String, death_spk: ScriptBuf) {
+        self.events.push(TxEvent {
+            kind: TxEventKind::UnbindNum,
+            space: Some(num),
+            previous_spaceout: None,
+            details: Some(
+                serde_json::to_value(UnbindNumEventDetails { num_id, death_spk })
+                    .expect("json value"),
+            ),
+        });
+    }
+
+    pub fn add_delegate(&mut self, num: String, to: ScriptBuf) {
+        self.events.push(TxEvent {
+            kind: TxEventKind::Delegate,
+            space: Some(num),
+            previous_spaceout: None,
+            details: Some(
+                serde_json::to_value(DelegateEventDetails { script_pubkey: to })
+                    .expect("json value"),
+            ),
+        });
+    }
+
+    pub fn add_commit_root(&mut self, num: String, root: String) {
+        self.events.push(TxEvent {
+            kind: TxEventKind::CommitRoot,
+            space: Some(num),
+            previous_spaceout: None,
+            details: Some(
+                serde_json::to_value(CommitRootEventDetails { root }).expect("json value"),
+            ),
+        });
+    }
+
+    pub fn add_rollback_root(&mut self, num: String) {
+        self.events.push(TxEvent {
+            kind: TxEventKind::RollbackRoot,
+            space: Some(num),
+            previous_spaceout: None,
+            details: None,
         });
     }
 
@@ -455,11 +563,11 @@ impl TxRecord {
         self.events.push(TxEvent {
             kind: TxEventKind::Bid,
             space: Some(space.name.to_string()),
-            previous_spaceout: previous_spaceout,
+            previous_spaceout,
             details: Some(
                 serde_json::to_value(BidEventDetails {
                     current_bid: amount,
-                    previous_bid: previous_bid,
+                    previous_bid,
                 })
                 .expect("json value"),
             ),
@@ -467,9 +575,76 @@ impl TxRecord {
     }
 }
 
+impl Display for TxEventKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            TxEventKind::Commit => "commit",
+            TxEventKind::Bidout => "bidout",
+            TxEventKind::Open => "open",
+            TxEventKind::Bid => "bid",
+            TxEventKind::Register => "register",
+            TxEventKind::Transfer => "transfer",
+            TxEventKind::Send => "send",
+            TxEventKind::Script => "script",
+            TxEventKind::FeeBump => "fee-bump",
+            TxEventKind::Buy => "buy",
+            TxEventKind::Renew => "renew",
+            TxEventKind::CreateNum => "create-num",
+            TxEventKind::TransferNum => "transfer-num",
+            TxEventKind::UnbindNum => "unbind-num",
+            TxEventKind::Delegate => "delegate",
+            TxEventKind::CommitRoot => "commit-root",
+            TxEventKind::RollbackRoot => "rollback-root",
+        })
+    }
+}
+
+impl FromStr for TxEventKind {
+    type Err = &'static str;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "commit" => Ok(TxEventKind::Commit),
+            "bidout" => Ok(TxEventKind::Bidout),
+            "open" => Ok(TxEventKind::Open),
+            "bid" => Ok(TxEventKind::Bid),
+            "register" => Ok(TxEventKind::Register),
+            "transfer" => Ok(TxEventKind::Transfer),
+            "send" => Ok(TxEventKind::Send),
+            "script" => Ok(TxEventKind::Script),
+            "fee-bump" => Ok(TxEventKind::FeeBump),
+            "buy" => Ok(TxEventKind::Buy),
+            "renew" => Ok(TxEventKind::Renew),
+            "create-num" => Ok(TxEventKind::CreateNum),
+            "transfer-num" => Ok(TxEventKind::TransferNum),
+            "unbind-num" => Ok(TxEventKind::UnbindNum),
+            "delegate" => Ok(TxEventKind::Delegate),
+            "commit-root" => Ok(TxEventKind::CommitRoot),
+            "rollback-root" => Ok(TxEventKind::RollbackRoot),
+            _ => Err("invalid event kind"),
+        }
+    }
+}
+
+impl FromSql for TxEventKind {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        value
+            .as_str()
+            .map_err(|_| FromSqlError::InvalidType)?
+            .parse()
+            .map_err(|_| FromSqlError::InvalidType)
+    }
+}
+
+impl ToSql for TxEventKind {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        Ok(ToSqlOutput::from(self.to_string()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use bitcoin::{hashes::Hash, Txid};
+    use bitcoin::{Txid, hashes::Hash};
     use serde_json::json;
     use tempfile::tempdir;
 
@@ -523,60 +698,5 @@ mod tests {
         assert!(matches!(bids[0].kind, TxEventKind::Bid));
 
         Ok(())
-    }
-}
-
-impl Display for TxEventKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            TxEventKind::Commit => "commit",
-            TxEventKind::Bidout => "bidout",
-            TxEventKind::Open => "open",
-            TxEventKind::Bid => "bid",
-            TxEventKind::Register => "register",
-            TxEventKind::Transfer => "transfer",
-            TxEventKind::Send => "send",
-            TxEventKind::Script => "script",
-            TxEventKind::FeeBump => "fee-bump",
-            TxEventKind::Buy => "buy",
-            TxEventKind::Renew => "renew",
-        })
-    }
-}
-
-impl FromStr for TxEventKind {
-    type Err = &'static str;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "commit" => Ok(TxEventKind::Commit),
-            "bidout" => Ok(TxEventKind::Bidout),
-            "open" => Ok(TxEventKind::Open),
-            "bid" => Ok(TxEventKind::Bid),
-            "register" => Ok(TxEventKind::Register),
-            "transfer" => Ok(TxEventKind::Transfer),
-            "send" => Ok(TxEventKind::Send),
-            "script" => Ok(TxEventKind::Script),
-            "fee-bump" => Ok(TxEventKind::FeeBump),
-            "buy" => Ok(TxEventKind::Buy),
-            "renew" => Ok(TxEventKind::Renew),
-            _ => Err("invalid event kind"),
-        }
-    }
-}
-
-impl FromSql for TxEventKind {
-    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
-        value
-            .as_str()
-            .map_err(|_| FromSqlError::InvalidType)?
-            .parse()
-            .map_err(|_| FromSqlError::InvalidType)
-    }
-}
-
-impl ToSql for TxEventKind {
-    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
-        Ok(ToSqlOutput::from(self.to_string()))
     }
 }

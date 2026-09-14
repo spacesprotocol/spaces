@@ -1,5 +1,5 @@
 use base64::Engine;
-use hyper::{http::HeaderValue, Body, HeaderMap, Request, Response, StatusCode};
+use hyper::{Body, HeaderMap, Request, Response, StatusCode, http::HeaderValue};
 use jsonrpsee::{
     core::ClientError,
     http_client::{HttpClient, HttpClientBuilder},
@@ -51,7 +51,7 @@ impl<S> BasicAuth<S> {
             .get("authorization")
             .and_then(|h| h.to_str().ok())
             .and_then(|s| s.strip_prefix("Basic "))
-            .map_or(false, |token| token == self.token.as_ref())
+            .is_some_and(|token| token == self.token.as_ref())
     }
 
     fn unauthorized_response() -> Response<Body> {
@@ -110,5 +110,8 @@ pub fn http_client_with_auth(url: &str, auth_token: &str) -> Result<HttpClient, 
         "Authorization",
         HeaderValue::from_str(&format!("Basic {auth_token}")).unwrap(),
     );
-    HttpClientBuilder::default().set_headers(headers).build(url)
+    HttpClientBuilder::default()
+        .set_headers(headers)
+        .request_timeout(std::time::Duration::from_secs(600))
+        .build(url)
 }

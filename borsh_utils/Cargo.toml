@@ -1,0 +1,14 @@
+[package]
+name = "borsh_utils"
+description = "Borsh serialization helpers for Bitcoin primitives used by the Spaces protocol."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+bitcoin = { version = "0.32.8", features = ["serde"], default-features = false }
+borsh = { version = "1.5", default-features = false, features = ["derive"] }

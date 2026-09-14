@@ -1,6 +1,6 @@
-#[cfg(feature = "bincode")]
-use bincode::{Decode, Encode};
 use bitcoin::{Amount, OutPoint};
+#[cfg(feature = "borsh")]
+use borsh::{BorshDeserialize, BorshSerialize};
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
@@ -14,17 +14,17 @@ pub trait KeyHasher {
 
 #[derive(Copy, Clone, Debug, Ord, PartialOrd, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "bincode", derive(Encode, Decode))]
+#[cfg_attr(feature = "borsh", derive(BorshSerialize, BorshDeserialize))]
 pub struct SpaceKey(Hash);
 
 #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "bincode", derive(Encode, Decode))]
+#[cfg_attr(feature = "borsh", derive(BorshSerialize, BorshDeserialize))]
 pub struct BidKey(Hash);
 
 #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "bincode", derive(Encode, Decode))]
+#[cfg_attr(feature = "borsh", derive(BorshSerialize, BorshDeserialize))]
 pub struct BaseHash(pub Hash);
 
 impl BaseHash {
@@ -37,7 +37,7 @@ impl BaseHash {
 
 #[derive(Copy, Clone)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "bincode", derive(Encode, Decode))]
+#[cfg_attr(feature = "borsh", derive(BorshSerialize, BorshDeserialize))]
 pub struct OutpointKey(Hash);
 
 pub trait KeyHash {}
@@ -58,7 +58,7 @@ impl SpaceKey {
     #[inline(always)]
     pub fn from_raw(value: Hash) -> crate::errors::Result<Self> {
         if Self::is_valid(&value) {
-            return Ok(Self { 0: value });
+            return Ok(Self(value));
         }
         Err(crate::errors::Error::IO("bad space hash".to_string()))
     }
@@ -76,7 +76,7 @@ impl SpaceKey {
 
     #[inline(always)]
     pub fn as_slice(&self) -> &[u8] {
-        return &self.0;
+        &self.0
     }
 }
 

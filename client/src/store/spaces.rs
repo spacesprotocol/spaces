@@ -1,34 +1,31 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
-    fs,
-    fs::OpenOptions,
-    io,
-    io::ErrorKind,
-    mem,
+    fs, io, mem,
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
 };
 
-use anyhow::{anyhow, Context, Result};
-use bincode::{config, Decode, Encode};
+use crate::store::{EncodableOutpoint, ReadTx, Sha256, SpaceDb, WriteMemory, WriteTx, open_db};
+use anyhow::{Context, Result, anyhow};
+use borsh::{BorshDeserialize, BorshSerialize};
 use jsonrpsee::core::Serialize;
 use serde::Deserialize;
 use spacedb::{
+    Hash, Sha256Hasher,
     db::{Database, SnapshotIterator},
-    fs::FileBackend,
-    subtree::SubTree,
-    tx::{KeyIterator, ProofType, ReadTransaction, WriteTransaction},
-    Configuration, Hash, NodeHasher, Sha256Hasher,
+    tx::KeyIterator,
 };
+use spaces_nums::RootAnchor;
 use spaces_protocol::{
+    Covenant, FullSpaceOut, SpaceOut,
     bitcoin::{BlockHash, OutPoint},
     constants::{ChainAnchor, ROLLOUT_BATCH_SIZE},
     hasher::{BidKey, KeyHash, OutpointKey, SpaceKey},
-    prepare::DataSource,
-    Covenant, FullSpaceOut, SpaceOut,
+    prepare::SpacesSource,
 };
 
-use crate::rpc::RootAnchor;
+#[derive(Clone)]
+pub struct SpStore(SpaceDb);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RolloutEntry {
@@ -36,24 +33,14 @@ pub struct RolloutEntry {
     pub value: u32,
 }
 
-type SpaceDb = Database<Sha256Hasher>;
-type ReadTx = ReadTransaction<Sha256Hasher>;
-pub type WriteTx<'db> = WriteTransaction<'db, Sha256Hasher>;
-type WriteMemory = BTreeMap<Hash, Option<Vec<u8>>>;
-
 #[derive(Clone)]
-pub struct Store(SpaceDb);
-
-pub struct Sha256;
-
-#[derive(Clone)]
-pub struct LiveStore {
-    pub store: Store,
-    pub state: LiveSnapshot,
+pub struct SpLiveStore {
+    pub store: SpStore,
+    pub state: SpLiveSnapshot,
 }
 
 #[derive(Clone)]
-pub struct LiveSnapshot {
+pub struct SpLiveSnapshot {
     db: SpaceDb,
     pub tip: Arc<RwLock<ChainAnchor>>,
     staged: Arc<RwLock<Staged>>,
@@ -67,9 +54,9 @@ pub struct Staged {
     memory: WriteMemory,
 }
 
-impl Store {
-    pub fn open(path: PathBuf) -> Result<Self> {
-        let db = Self::open_db(path)?;
+impl SpStore {
+    pub fn open(path: PathBuf, auto_hash_index: bool, cache_size: Option<usize>) -> Result<Self> {
+        let db = open_db(path, auto_hash_index, cache_size)?;
         Ok(Self(db))
     }
 
@@ -78,19 +65,8 @@ impl Store {
         Ok(Self(db))
     }
 
-    fn open_db(path_buf: PathBuf) -> anyhow::Result<Database<Sha256Hasher>> {
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .open(path_buf)?;
-
-        let config = Configuration::new().with_cache_size(1000000 /* 1MB */);
-        Ok(Database::new(Box::new(FileBackend::new(file)?), config)?)
-    }
-
     pub fn iter(&self) -> SnapshotIterator<'_, Sha256Hasher> {
-        return self.0.iter();
+        self.0.iter()
     }
 
     pub fn write(&self) -> Result<WriteTx<'_>> {
@@ -116,9 +92,10 @@ impl Store {
             if let Some(existing) = prev_map.get(&(anchor.hash, anchor.height)) {
                 anchors.push(existing.clone());
             } else {
-                let root = snap.compute_root()?;
+                let spaces_root = snap.compute_root()?;
                 anchors.push(RootAnchor {
-                    root,
+                    spaces_root,
+                    nums_root: None,
                     block: anchor,
                 });
             }
@@ -129,16 +106,16 @@ impl Store {
         Ok(anchors)
     }
 
-    pub fn begin(&self, genesis_block: &ChainAnchor) -> Result<LiveSnapshot> {
+    pub fn begin(&self, genesis_block: &ChainAnchor) -> Result<SpLiveSnapshot> {
         let snapshot = self.0.begin_read()?;
-        let anchor: ChainAnchor = if snapshot.metadata().len() == 0 {
-            genesis_block.clone()
+        let anchor: ChainAnchor = if snapshot.metadata().is_empty() {
+            *genesis_block
         } else {
             snapshot.metadata().try_into()?
         };
 
         let version = anchor.hash;
-        let live = LiveSnapshot {
+        let live = SpLiveSnapshot {
             db: self.0.clone(),
             tip: Arc::new(RwLock::new(anchor)),
             staged: Arc::new(RwLock::new(Staged {
@@ -152,11 +129,11 @@ impl Store {
     }
 }
 
-pub trait ChainStore {
+pub trait SpStoreUtils {
     fn rollout_iter(&self) -> Result<(RolloutIterator, ReadTx)>;
 }
 
-impl ChainStore for Store {
+impl SpStoreUtils for SpStore {
     fn rollout_iter(&self) -> Result<(RolloutIterator, ReadTx)> {
         let snapshot = self.0.begin_read()?;
         Ok((
@@ -169,22 +146,7 @@ impl ChainStore for Store {
     }
 }
 
-#[derive(Encode, Decode)]
-pub struct EncodableOutpoint(#[bincode(with_serde)] pub OutPoint);
-
-impl From<OutPoint> for EncodableOutpoint {
-    fn from(value: OutPoint) -> Self {
-        Self(value)
-    }
-}
-
-impl From<EncodableOutpoint> for OutPoint {
-    fn from(value: EncodableOutpoint) -> Self {
-        value.0
-    }
-}
-
-pub trait ChainState {
+pub trait SpacesState {
     fn insert_spaceout(&self, key: OutpointKey, spaceout: SpaceOut);
     fn insert_space(&self, key: SpaceKey, outpoint: EncodableOutpoint);
 
@@ -196,7 +158,7 @@ pub trait ChainState {
     ) -> anyhow::Result<Option<FullSpaceOut>>;
 }
 
-impl ChainState for LiveSnapshot {
+impl SpacesState for SpLiveSnapshot {
     fn insert_spaceout(&self, key: OutpointKey, spaceout: SpaceOut) {
         self.insert(key, spaceout)
     }
@@ -218,28 +180,19 @@ impl ChainState for LiveSnapshot {
         if let Some(outpoint) = outpoint {
             let spaceout = self.get_spaceout(&outpoint)?;
 
-            // Handle data inconsistency gracefully: if outpoint exists but spaceout doesn't,
-            // this indicates the space was revoked but the space->outpoint mapping wasn't cleaned up.
-            // Clean up the inconsistent mapping and return None instead of panicking.
-            if let Some(spaceout) = spaceout {
-                return Ok(Some(FullSpaceOut {
-                    txid: outpoint.txid,
-                    spaceout,
-                }));
-            } else {
-                // Clean up the inconsistent space->outpoint mapping
-                self.remove(*space_hash);
-                return Ok(None);
-            }
+            return Ok(Some(FullSpaceOut {
+                txid: outpoint.txid,
+                spaceout: spaceout.expect("should exist if outpoint exists"),
+            }));
         }
         Ok(None)
     }
 }
 
-impl LiveSnapshot {
+impl SpLiveSnapshot {
     #[inline]
     pub fn is_dirty(&self) -> bool {
-        self.staged.read().expect("read").memory.len() > 0
+        !self.staged.read().expect("read").memory.is_empty()
     }
 
     pub fn restore(&self, checkpoint: ChainAnchor) {
@@ -255,27 +208,16 @@ impl LiveSnapshot {
         };
     }
 
-    pub fn prove_with_snapshot(
-        &self,
-        keys: &[Hash],
-        snapshot_block_height: u32,
-    ) -> Result<SubTree<Sha256Hasher>> {
-        let snapshot = self.db.iter().filter_map(|s| s.ok()).find(|s| {
-            let anchor: ChainAnchor = match s.metadata().try_into() {
-                Ok(a) => a,
-                _ => return false,
-            };
-            anchor.height == snapshot_block_height
-        });
-        if let Some(mut snapshot) = snapshot {
-            return snapshot
-                .prove(keys, ProofType::Standard)
-                .or_else(|err| Err(anyhow!("Could not prove: {}", err)));
-        }
-        Err(anyhow!(
-            "Older snapshot targeting block {} could not be found",
-            snapshot_block_height
-        ))
+    pub fn read_at(&self, block_height: u32) -> anyhow::Result<ReadTx> {
+        self.db
+            .iter()
+            .filter_map(|s| s.ok())
+            .find(|s| {
+                s.metadata()
+                    .try_into()
+                    .is_ok_and(|a: ChainAnchor| a.height == block_height)
+            })
+            .ok_or_else(|| anyhow!("Snapshot at block {} not found", block_height))
     }
 
     pub fn inner(&mut self) -> anyhow::Result<&mut ReadTx> {
@@ -289,21 +231,19 @@ impl LiveSnapshot {
         Ok(&mut self.snapshot.1)
     }
 
-    pub fn insert<K: KeyHash + Into<Hash>, T: Encode>(&self, key: K, value: T) {
-        let value = bincode::encode_to_vec(value, config::standard()).expect("encodes value");
+    pub fn insert<K: KeyHash + Into<Hash>, T: BorshSerialize>(&self, key: K, value: T) {
+        let value = borsh::to_vec(&value).expect("encodes value");
         self.insert_raw(key.into(), value);
     }
 
-    pub fn get<K: KeyHash + Into<Hash>, T: Decode<()>>(
+    pub fn get<K: KeyHash + Into<Hash>, T: BorshDeserialize>(
         &mut self,
         key: K,
     ) -> spacedb::Result<Option<T>> {
         match self.get_raw(&key.into())? {
             Some(value) => {
-                let (decoded, _): (T, _) = bincode::decode_from_slice(&value, config::standard())
-                    .map_err(|e| {
-                    spacedb::Error::IO(io::Error::new(ErrorKind::Other, e.to_string()))
-                })?;
+                let decoded: T = borsh::from_slice(&value)
+                    .map_err(|e| spacedb::Error::IO(io::Error::other(e.to_string())))?;
                 Ok(Some(decoded))
             }
             None => Ok(None),
@@ -335,9 +275,12 @@ impl LiveSnapshot {
     fn update_snapshot(&mut self, version: BlockHash) -> Result<()> {
         if self.snapshot.0 != version {
             self.snapshot.1 = self.db.begin_read().context("could not read snapshot")?;
-            let anchor: ChainAnchor = self.snapshot.1.metadata().try_into().map_err(|_| {
-                std::io::Error::new(std::io::ErrorKind::Other, "could not parse metdata")
-            })?;
+            let anchor: ChainAnchor = self
+                .snapshot
+                .1
+                .metadata()
+                .try_into()
+                .map_err(|_| std::io::Error::other("could not parse metdata"))?;
 
             assert_eq!(version, anchor.hash, "inconsistent db state");
             self.snapshot.0 = version;
@@ -358,9 +301,8 @@ impl LiveSnapshot {
         let version = rlock.snapshot_version;
         drop(rlock);
 
-        self.update_snapshot(version).map_err(|error| {
-            spacedb::Error::IO(std::io::Error::new(std::io::ErrorKind::Other, error))
-        })?;
+        self.update_snapshot(version)
+            .map_err(|error| spacedb::Error::IO(std::io::Error::other(error)))?;
         self.snapshot.1.get(key)
     }
 
@@ -376,11 +318,7 @@ impl LiveSnapshot {
 
         for (key, value) in changes.memory {
             match value {
-                None => {
-                    _ = {
-                        tx = tx.delete(key)?;
-                    }
-                }
+                None => tx = tx.delete(key)?,
                 Some(value) => tx = tx.insert(key, value)?,
             }
         }
@@ -406,16 +344,16 @@ impl LiveSnapshot {
         let mut spaceouts = Vec::with_capacity(rollouts.len());
         for (priority, spacehash) in rollouts {
             let outpoint = self.get_space_outpoint(&spacehash)?;
-            if let Some(outpoint) = outpoint {
-                if let Some(spaceout) = self.get_spaceout(&outpoint)? {
-                    spaceouts.push((
-                        priority,
-                        FullSpaceOut {
-                            txid: outpoint.txid,
-                            spaceout,
-                        },
-                    ));
-                }
+            if let Some(outpoint) = outpoint
+                && let Some(spaceout) = self.get_spaceout(&outpoint)?
+            {
+                spaceouts.push((
+                    priority,
+                    FullSpaceOut {
+                        txid: outpoint.txid,
+                        spaceout,
+                    },
+                ));
             }
         }
 
@@ -461,7 +399,7 @@ impl LiveSnapshot {
                     None
                 }
             })
-            .map(|x| Ok(x))
+            .map(Ok)
             .collect();
 
         drop(rlock);
@@ -486,18 +424,18 @@ impl LiveSnapshot {
             })
             .map(|result| result.map(|(bidhash, spacehash)| (bidhash.priority(), spacehash)))
             .skip(skip)
-            .take(limit.map_or(usize::MAX, |l| l))
+            .take(limit.unwrap_or(usize::MAX))
             .collect()
     }
 }
 
-impl DataSource for LiveSnapshot {
+impl SpacesSource for SpLiveSnapshot {
     fn get_space_outpoint(
         &mut self,
         space_hash: &SpaceKey,
     ) -> spaces_protocol::errors::Result<Option<OutPoint>> {
         let result: Option<EncodableOutpoint> = self.get(*space_hash).map_err(|err| {
-            spaces_protocol::errors::Error::IO(format!("getspaceoutpoint: {}", err.to_string()))
+            spaces_protocol::errors::Error::IO(format!("getspaceoutpoint: {}", err))
         })?;
         Ok(result.map(|out| out.into()))
     }
@@ -507,16 +445,10 @@ impl DataSource for LiveSnapshot {
         outpoint: &OutPoint,
     ) -> spaces_protocol::errors::Result<Option<SpaceOut>> {
         let h = OutpointKey::from_outpoint::<Sha256>(*outpoint);
-        let result = self.get(h).map_err(|err| {
-            spaces_protocol::errors::Error::IO(format!("getspaceout: {}", err.to_string()))
-        })?;
+        let result = self
+            .get(h)
+            .map_err(|err| spaces_protocol::errors::Error::IO(format!("getspaceout: {}", err)))?;
         Ok(result)
-    }
-}
-
-impl spaces_protocol::hasher::KeyHasher for Sha256 {
-    fn hash(data: &[u8]) -> spaces_protocol::hasher::Hash {
-        Sha256Hasher::hash(data)
     }
 }
 
@@ -554,7 +486,7 @@ struct KeyRolloutIterator {
 impl Iterator for KeyRolloutIterator {
     type Item = anyhow::Result<(BidKey, SpaceKey)>;
     fn next(&mut self) -> Option<Self::Item> {
-        while let Some(result) = self.iter.next() {
+        for result in self.iter.by_ref() {
             match result {
                 Ok((key, value)) if BidKey::is_valid(&key) => {
                     let spacehash = SpaceKey::from_slice_unchecked(value.as_slice());

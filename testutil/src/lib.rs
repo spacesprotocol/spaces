@@ -13,10 +13,10 @@ use ::spaces_client::{
     client::spaces_protocol::{
         bitcoin,
         bitcoin::{
-            absolute, address::NetworkChecked, block, block::Header, hashes::Hash,
-            key::rand::random, transaction, Address, Amount, Block, BlockHash, CompactTarget,
-            OutPoint, ScriptBuf, ScriptHash, Sequence, Transaction, TxIn, TxMerkleNode, TxOut,
-            Txid,
+            Address, Amount, Block, BlockHash, CompactTarget, OutPoint, ScriptBuf, ScriptHash,
+            Sequence, Transaction, TxIn, TxMerkleNode, TxOut, Txid, absolute,
+            address::NetworkChecked, block, block::Header, hashes::Hash, key::rand::random,
+            transaction,
         },
     },
     jsonrpsee::tokio,
@@ -24,14 +24,14 @@ use ::spaces_client::{
 };
 use anyhow::Result;
 use bitcoind::{
-    anyhow,
-    anyhow::{anyhow, Context},
+    BitcoinD, anyhow,
+    anyhow::{Context, anyhow},
     bitcoincore_rpc::{
+        RpcApi,
         bitcoincore_rpc_json::{GetBlockTemplateModes, GetBlockTemplateRules},
-        json, RpcApi,
+        json,
     },
-    tempfile::{tempdir, TempDir},
-    BitcoinD,
+    tempfile::{TempDir, tempdir},
 };
 
 use crate::spaced::SpaceD;
@@ -48,34 +48,67 @@ pub fn bitcoin_regtest_data_path() -> Result<String> {
 pub struct TestRig {
     pub bitcoind: Arc<BitcoinD>,
     pub spaced: SpaceD,
-    pub test_data: Option<TempDir>,
+    /// Path to test data directory (if using regtest preset)
+    pub test_data_path: Option<PathBuf>,
+    /// TempDir handle - keeps the temp directory alive until TestRig is dropped
+    /// None when using a fixed path that shouldn't be cleaned up
+    _test_data_tempdir: Option<TempDir>,
 }
 
 impl TestRig {
-    pub async fn new_with_regtest_preset() -> Result<TestRig> {
+    pub async fn new_with_regtest_preset_with_dir(test_data: TempDir) -> Result<TestRig> {
+        let path = test_data.path().to_path_buf();
         let original_test_data =
             bitcoin_regtest_data_path().context("could not get unpacked regtest testdata")?;
-        let test_data = tempdir()?;
-        copy_dir_all(original_test_data, test_data.path())?;
+        copy_dir_all(&original_test_data, &path)?;
 
         let mut conf = bitcoind::Conf::default();
         conf.args = vec![
             "-regtest",
             "-rpcworkqueue=100",
             "-fallbackfee=0.0001",
-            "-rpcauth=user:70dbb4f60ccc95e154da97a43b7a9d06$00c10a3849edf2f10173e80d0bdadbde793ad9a80e6e6f9f71f978fb5c797343"
+            "-rpcauth=user:70dbb4f60ccc95e154da97a43b7a9d06$00c10a3849edf2f10173e80d0bdadbde793ad9a80e6e6f9f71f978fb5c797343",
         ];
 
-        conf.staticdir = Some(test_data.path().join("bitcoind"));
+        conf.staticdir = Some(path.join("bitcoind"));
 
-        TestRig::new_with_bitcoin_conf(conf, Some(test_data)).await
+        TestRig::new_with_bitcoin_conf(conf, Some(path), Some(test_data)).await
+    }
+
+    /// Create a TestRig with a fixed path that won't be cleaned up on drop.
+    /// The path must already exist.
+    pub async fn new_with_regtest_preset_with_path(path: PathBuf) -> Result<TestRig> {
+        let original_test_data =
+            bitcoin_regtest_data_path().context("could not get unpacked regtest testdata")?;
+
+        // Only copy if the bitcoind directory doesn't exist yet
+        if !path.join("bitcoind").exists() {
+            copy_dir_all(&original_test_data, &path)?;
+        }
+
+        let mut conf = bitcoind::Conf::default();
+        conf.args = vec![
+            "-regtest",
+            "-txindex=1",
+            "-rpcworkqueue=100",
+            "-fallbackfee=0.0001",
+            "-rpcauth=user:70dbb4f60ccc95e154da97a43b7a9d06$00c10a3849edf2f10173e80d0bdadbde793ad9a80e6e6f9f71f978fb5c797343",
+        ];
+
+        conf.staticdir = Some(path.join("bitcoind"));
+
+        TestRig::new_with_bitcoin_conf(conf, Some(path), None).await
+    }
+
+    pub async fn new_with_regtest_preset() -> Result<TestRig> {
+        let test_data = tempdir()?;
+        Self::new_with_regtest_preset_with_dir(test_data).await
     }
 
     pub async fn testdata_wallets_path(&self) -> PathBuf {
-        self.test_data
+        self.test_data_path
             .as_ref()
             .expect("created with regtest preset")
-            .path()
             .join("wallets")
     }
 
@@ -87,15 +120,16 @@ impl TestRig {
         conf.args = vec![
             "-regtest",
             "-fallbackfee=0.0001",
-            "-rpcauth=user:70dbb4f60ccc95e154da97a43b7a9d06$00c10a3849edf2f10173e80d0bdadbde793ad9a80e6e6f9f71f978fb5c797343"
+            "-rpcauth=user:70dbb4f60ccc95e154da97a43b7a9d06$00c10a3849edf2f10173e80d0bdadbde793ad9a80e6e6f9f71f978fb5c797343",
         ];
 
-        Self::new_with_bitcoin_conf(conf, None).await
+        Self::new_with_bitcoin_conf(conf, None, None).await
     }
 
     pub async fn new_with_bitcoin_conf(
         conf: bitcoind::Conf<'static>,
-        test_data: Option<TempDir>,
+        test_data_path: Option<PathBuf>,
+        test_data_tempdir: Option<TempDir>,
     ) -> Result<Self> {
         let view_stdout = conf.view_stdout;
         let bitcoind =
@@ -104,6 +138,13 @@ impl TestRig {
                 .expect("handle")?;
 
         let rpc_url = bitcoind.rpc_url();
+        // If we have a fixed test_data_path (no tempdir), use a subdirectory for spaced data
+        let spaced_data_dir = if test_data_tempdir.is_none() {
+            test_data_path.as_ref().map(|p| p.join("spaced"))
+        } else {
+            None
+        };
+
         let spaced_conf = spaced::Conf {
             args: vec![
                 "--chain",
@@ -117,13 +158,15 @@ impl TestRig {
                 "--block-index-full",
             ],
             view_stdout,
+            data_dir: spaced_data_dir,
         };
 
         let spaced = SpaceD::new(spaced_conf).await?;
         Ok(TestRig {
             bitcoind: Arc::new(bitcoind),
             spaced,
-            test_data,
+            test_data_path,
+            _test_data_tempdir: test_data_tempdir,
         })
     }
 
@@ -181,7 +224,7 @@ impl TestRig {
     /// `address`.
     ///
     /// An async verison of bdk's testenv mine_blocks:
-    /// https://github.com/bitcoindevkit/bdk/blob/master/crates/testenv/src/lib.rs
+    /// <https://github.com/bitcoindevkit/bdk/blob/master/crates/testenv/src/lib.rs>
     pub async fn mine_blocks(
         &self,
         count: usize,
@@ -207,7 +250,7 @@ impl TestRig {
     /// Mine a block that is guaranteed to be empty even with transactions in the mempool.
     ///
     /// An async version of bdk's testenv mine_empty_block:
-    /// https://github.com/bitcoindevkit/bdk/blob/master/crates/testenv/src/lib.rs
+    /// <https://github.com/bitcoindevkit/bdk/blob/master/crates/testenv/src/lib.rs>
     pub async fn mine_empty_block(&self) -> anyhow::Result<(usize, BlockHash)> {
         let c = self.bitcoind.clone();
         let bt = tokio::task::spawn_blocking(move || {
@@ -279,7 +322,7 @@ impl TestRig {
     /// Invalidate a number of blocks of a given size `count`.
     ///
     /// An async version of bdk's testenv invalidate_blocks:
-    /// https://github.com/bitcoindevkit/bdk/blob/master/crates/testenv/src/lib.rs
+    /// <https://github.com/bitcoindevkit/bdk/blob/master/crates/testenv/src/lib.rs>
     pub async fn invalidate_blocks(&self, count: usize) -> anyhow::Result<()> {
         let mut hash = self.get_best_block_hash().await?;
 
@@ -332,7 +375,7 @@ impl TestRig {
 
     pub async fn get_raw_transaction(&self, txid: &Txid) -> Result<Transaction> {
         let c = self.bitcoind.clone();
-        let txid = txid.clone();
+        let txid = *txid;
         Ok(
             tokio::task::spawn_blocking(move || c.client.get_raw_transaction(&txid, None))
                 .await
@@ -351,7 +394,7 @@ impl TestRig {
 
     pub async fn get_block(&self, hash: &BlockHash) -> Result<Block> {
         let c = self.bitcoind.clone();
-        let hash = hash.clone();
+        let hash = *hash;
         Ok(
             tokio::task::spawn_blocking(move || c.client.get_block(&hash))
                 .await
@@ -360,10 +403,10 @@ impl TestRig {
     }
 
     /// Reorg a number of blocks of a given size `count`.
-    /// Refer to [`SpaceD::mine_empty_block`] for more information.
+    /// Refer to [`Self::mine_empty_block`] for more information.
     ///
     /// An async version of bdk's testenv reorg:
-    /// https://github.com/bitcoindevkit/bdk/blob/master/crates/testenv/src/lib.rs
+    /// <https://github.com/bitcoindevkit/bdk/blob/master/crates/testenv/src/lib.rs>
     pub async fn reorg(&self, count: usize) -> anyhow::Result<Vec<BlockHash>> {
         let start_height = self.get_block_count().await?;
         self.invalidate_blocks(count).await?;
@@ -380,7 +423,7 @@ impl TestRig {
     /// Reorg with a number of empty blocks of a given size `count`.
     ///
     /// An async version of bdk's testenv reorg_empty_blocks:
-    /// https://github.com/bitcoindevkit/bdk/blob/master/crates/testenv/src/lib.rs
+    /// <https://github.com/bitcoindevkit/bdk/blob/master/crates/testenv/src/lib.rs>
     pub async fn reorg_empty_blocks(&self, count: usize) -> Result<Vec<(usize, BlockHash)>> {
         let start_height = self.get_block_count().await?;
         self.invalidate_blocks(count).await?;
@@ -400,7 +443,7 @@ impl TestRig {
     /// Send a tx of a given `amount` to a given `address`.
     ///
     /// An async version of bdk's testenv send:
-    /// https://github.com/bitcoindevkit/bdk/blob/master/crates/testenv/src/lib.rs
+    /// <https://github.com/bitcoindevkit/bdk/blob/master/crates/testenv/src/lib.rs>
     pub async fn send(&self, address: &Address<NetworkChecked>, amount: Amount) -> Result<Txid> {
         let c = self.bitcoind.clone();
         let addr = address.clone();
