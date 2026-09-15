@@ -35,15 +35,101 @@ jobs:
     name: Release-plz publish
     runs-on: ubuntu-latest
     if: ${{ github.repository_owner == 'spacesprotocol' }}
+    outputs:
+      releases_created: ${{ steps.release-plz.outputs.releases_created }}
+      releases: ${{ steps.release-plz.outputs.releases }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - name: Run release-plz
+        id: release-plz
         uses: release-plz/action@v0.5
         with:
           command: release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  # Build + attach binaries to the spaces_client release in the SAME run.
+  # release-plz tags with GITHUB_TOKEN, whose pushes do not trigger other
+  # workflows (so a tag-triggered release.yml never fires) — doing it here keeps
+  # the binaries wired to every automated release without needing a PAT.
+  build-binaries:
+    name: Build release binaries
+    needs: release-plz-release
+    if: ${{ github.repository_owner == 'spacesprotocol' && needs.release-plz-release.outputs.releases_created == 'true' }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+    steps:
+      - name: Find spaces_client release
+        id: rel
+        env:
+          RELEASES: ${{ needs.release-plz-release.outputs.releases }}
+        run: |
+          # Extract the version and construct the tag from release-plz.toml's
+          # git_tag_name template (spaces_client-v{version}) so this doesn't
+          # depend on the exact output field name for the tag.
+          version=$(printf '%s' "$RELEASES" | jq -r '.[] | select(.package_name=="spaces_client") | .version')
+          if [ -z "$version" ] || [ "$version" = "null" ]; then
+            echo "spaces_client not released this run; skipping binaries."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "tag=spaces_client-v$version" >> "$GITHUB_OUTPUT"
+            echo "version=$version" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout release tag
+        if: steps.rel.outputs.skip == 'false'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.rel.outputs.tag }}
+
+      - name: Set up Rust
+        if: steps.rel.outputs.skip == 'false'
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: ${{ matrix.target }}
+
+      - name: Install cross-compilation tools
+        if: steps.rel.outputs.skip == 'false' && matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Build release binary
+        if: steps.rel.outputs.skip == 'false'
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: cargo build --release --target ${{ matrix.target }} -p spaces_client
+
+      - name: Create release archive
+        if: steps.rel.outputs.skip == 'false'
+        run: |
+          OS=$(echo ${{ matrix.target }} | grep -q 'linux' && echo 'linux' || echo 'darwin')
+          ARCH=$(echo ${{ matrix.target }} | grep -q 'aarch64' && echo 'arm64' || echo 'x86_64')
+          NAME="spaces-v${{ steps.rel.outputs.version }}-${OS}-${ARCH}"
+          mkdir -p "$NAME"
+          cp target/${{ matrix.target }}/release/spaced "$NAME"/spaced
+          cp target/${{ matrix.target }}/release/space-cli "$NAME"/space-cli
+          tar -czf "$NAME.tar.gz" "$NAME"
+          echo "ASSET=$NAME.tar.gz" >> "$GITHUB_ENV"
+
+      - name: Upload binaries to release
+        if: steps.rel.outputs.skip == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.rel.outputs.tag }}
+          files: ${{ env.ASSET }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

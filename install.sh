@@ -188,27 +188,33 @@ if [ -z "$tag" ]; then
   fi
 fi
 
-# Standardize tag format
-tag_without_v="${tag#v}"  # Remove 'v' prefix if present
-check_tag="v$tag_without_v"  # Add 'v' prefix for consistency
+# Normalize version and release tag. Releases are tagged 'spaces_client-vX.Y.Z';
+# accept '0.4.0', 'v0.4.0', or the full 'spaces_client-v0.4.0' as --tag input.
+case "$tag" in
+  *-v*) version="${tag##*-v}" ;;  # spaces_client-v0.4.0 -> 0.4.0
+  v*)   version="${tag#v}" ;;      # v0.4.0 -> 0.4.0
+  *)    version="$tag" ;;          # 0.4.0 -> 0.4.0
+esac
+[ -z "$version" ] && err "could not determine version to install"
+release_tag="spaces_client-v$version"
 
-# Verify the tag exists
-[ "$verbose" = true ] && say "verifying tag $check_tag exists..."
-api_response=$(download "https://api.github.com/repos/spacesprotocol/spaces/releases/tags/$check_tag" - || echo "failed")
+# Verify the release exists
+[ "$verbose" = true ] && say "verifying release $release_tag exists..."
+api_response=$(download "https://api.github.com/repos/spacesprotocol/spaces/releases/tags/$release_tag" - || echo "failed")
 if [ "$api_response" = "failed" ] || echo "$api_response" | grep -q "Not Found"; then
-  err "release tag '$check_tag' not found"
+  err "release '$release_tag' not found"
 fi
 
-[ -z "$tag_without_v" ] && err "could not determine version to install"
-
-[ "$verbose" = true ] && say "installing spaces version $check_tag"
+[ "$verbose" = true ] && say "installing spaces v$version"
 
 # Create temporary directory
 td=$(mktemp -d || mktemp -d -t tmp)
 trap 'rm -rf "$td"' EXIT
 
-# Construct download URL
-download_url="https://github.com/spacesprotocol/spaces/releases/download/$check_tag/spaces-$check_tag-${os}-${arch}.tar.gz"
+# Construct download URL. The release is tagged 'spaces_client-vX.Y.Z' but the
+# archive asset is named 'spaces-vX.Y.Z-<os>-<arch>.tar.gz'.
+asset="spaces-v${version}-${os}-${arch}.tar.gz"
+download_url="https://github.com/spacesprotocol/spaces/releases/download/$release_tag/$asset"
 
 [ "$verbose" = true ] && say "downloading from: $download_url"
 
@@ -245,7 +251,7 @@ done
 reload_status=$(add_to_path "$dest")
 
 # Final instructions
-say "Successfully installed spaces $check_tag to $dest"
+say "Successfully installed spaces v$version to $dest"
 
 # Reload shell if needed
 if [ "$reload_status" = "reload" ]; then
