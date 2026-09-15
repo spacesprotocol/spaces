@@ -344,6 +344,78 @@ pub struct RootAnchor {
     pub block: ChainAnchor,
 }
 
+/// Number of consecutive root anchors folded into a single trust id.
+///
+/// Clients scan trust ids over a fixed sliding window; this must match the
+/// window downstream consumers (fabric, libveritas) expect.
+pub const TRUST_ID_WINDOW: usize = 60;
+
+/// Compute a deterministic id for a single root anchor.
+///
+/// This is the per-anchor commitment that trust ids are folded from. The byte
+/// layout is consensus with downstream verifiers and must not change.
+pub fn compute_root_id(anchor: &RootAnchor) -> Hash {
+    use bitcoin::hashes::{Hash as _, HashEngine, sha256};
+    let mut engine = sha256::Hash::engine();
+    engine.input(&anchor.block.hash[..]);
+    engine.input(&anchor.block.height.to_le_bytes());
+    engine.input(&anchor.spaces_root);
+    engine.input(&anchor.nums_root.unwrap_or([0u8; 32]));
+    sha256::Hash::from_engine(engine).to_byte_array()
+}
+
+/// Compute the trust id for a window of anchors, folded in the given order.
+///
+/// Order is load-bearing: anchors must be passed newest-first (the same order
+/// [`compute_trust_ids`] and the node's root-anchor list use), otherwise the
+/// id will not match what clients expect.
+pub fn compute_trust_id(window: &[RootAnchor]) -> Hash {
+    use bitcoin::hashes::{Hash as _, HashEngine, sha256};
+    let mut engine = sha256::Hash::engine();
+    for anchor in window {
+        engine.input(&compute_root_id(anchor));
+    }
+    sha256::Hash::from_engine(engine).to_byte_array()
+}
+
+/// A trust id together with the tip (newest) block of the anchor window it
+/// commits to, so clients know which height each id corresponds to.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct TrustId {
+    #[cfg_attr(
+        feature = "serde",
+        serde(
+            serialize_with = "serialize_hash_serde",
+            deserialize_with = "deserialize_hash_serde"
+        )
+    )]
+    pub id: Hash,
+    /// Tip (newest anchor) of the window this trust id commits to.
+    pub block: ChainAnchor,
+}
+
+/// Compute all trust ids over sliding windows of [`TRUST_ID_WINDOW`] anchors.
+///
+/// `anchors` are newest-first, so each window's tip is its first entry. When
+/// there are fewer than a full window, a single trust id is produced over all
+/// of them (matching downstream windowing).
+pub fn compute_trust_ids(anchors: &[RootAnchor]) -> Vec<TrustId> {
+    let make = |window: &[RootAnchor]| TrustId {
+        id: compute_trust_id(window),
+        block: window[0].block,
+    };
+    if anchors.len() < TRUST_ID_WINDOW {
+        if anchors.is_empty() {
+            Vec::new()
+        } else {
+            vec![make(anchors)]
+        }
+    } else {
+        anchors.windows(TRUST_ID_WINDOW).map(make).collect()
+    }
+}
+
 /// Keys needed to fetch chain proofs for certificate verification.
 ///
 /// Built from certificates, this tells a spaced client which merkle
@@ -1214,4 +1286,72 @@ mod hash_key_serde {
 
     impl_hash_key_serde!(CommitmentTipKey);
     impl_hash_key_serde!(CommitmentKey);
+}
+
+#[cfg(all(test, feature = "serde"))]
+mod trust_id_tests {
+    use super::{RootAnchor, TRUST_ID_WINDOW, compute_trust_id, compute_trust_ids};
+
+    // A real 60-anchor window captured from a live relay, together with the
+    // trust id downstream consumers (fabric-resolver / libveritas) computed for
+    // it. Order is newest-first. This pins our computation to the exact bytes
+    // clients scan for; any drift in the hash layout breaks compatibility.
+    const ANCHORS: &str = include_str!("testdata/anchors_newest_first.json");
+    const EXPECTED_TRUST_ID: &str =
+        "7f20135af5fea06ac6a38303ea887428a614186979a41abde64e03ea6780375e";
+
+    fn load() -> Vec<RootAnchor> {
+        #[derive(serde::Deserialize)]
+        struct Fixture {
+            entries: Vec<RootAnchor>,
+        }
+        serde_json::from_str::<Fixture>(ANCHORS).unwrap().entries
+    }
+
+    #[test]
+    fn matches_downstream_vector() {
+        let anchors = load();
+        assert_eq!(anchors.len(), TRUST_ID_WINDOW);
+        assert_eq!(hex::encode(compute_trust_id(&anchors)), EXPECTED_TRUST_ID);
+    }
+
+    #[test]
+    fn full_window_yields_single_id_with_tip_height() {
+        let anchors = load();
+        let ids = compute_trust_ids(&anchors);
+        assert_eq!(ids.len(), 1);
+        assert_eq!(hex::encode(ids[0].id), EXPECTED_TRUST_ID);
+        // Tip is the newest anchor (first, newest-first order).
+        assert_eq!(ids[0].block.height, 6480);
+        assert_eq!(ids[0].block, anchors[0].block);
+    }
+
+    #[test]
+    fn sliding_window_counts_and_order() {
+        let mut anchors = load();
+        // One extra anchor -> two overlapping windows, each a distinct id, each
+        // tagged with its own window tip.
+        anchors.push(anchors[0].clone());
+        let ids = compute_trust_ids(&anchors);
+        assert_eq!(ids.len(), 2);
+        assert_eq!(hex::encode(ids[0].id), EXPECTED_TRUST_ID);
+        assert_eq!(ids[0].block.height, 6480);
+        assert_eq!(ids[1].block.height, 6444);
+        assert_ne!(ids[0].id, ids[1].id);
+    }
+
+    #[test]
+    fn short_input_folds_all() {
+        let anchors = load();
+        let few = &anchors[..3];
+        let ids = compute_trust_ids(few);
+        assert_eq!(ids.len(), 1);
+        assert_eq!(ids[0].id, compute_trust_id(few));
+        assert_eq!(ids[0].block, few[0].block);
+    }
+
+    #[test]
+    fn empty_input_no_ids() {
+        assert!(compute_trust_ids(&[]).is_empty());
+    }
 }

@@ -767,6 +767,15 @@ pub fn build_schema() -> Vec<MethodSchema> {
             extra_examples: vec![],
         },
         MethodSchema {
+            name: "gettrustids",
+            description: "Get trust ids computed from root anchors (sliding windows of 60), \
+                          each with its window's tip block. Also served at GET /trust-ids.json",
+            params: vec![],
+            result_type: "Vec<TrustId>",
+            result_schema: None,
+            extra_examples: vec![],
+        },
+        MethodSchema {
             name: "walletlisttransactions",
             description: "List wallet transactions with pagination",
             params: vec![
