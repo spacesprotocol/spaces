@@ -15,7 +15,7 @@ Spaces are sovereign Bitcoin identities. They leverage the existing infrastructu
 
 Paste the following into your terminal to install the latest version of Spaces:
 ```bash
-curl --proto '=https' --tlsv1.2 -sSf https://install.spacesprotocol.org | sh
+curl --proto '=https' --tlsv1.2 -sSf https://get.spacesprotocol.org | sh
 ```
 
 ## Documentation
@@ -28,7 +28,7 @@ Visit [docs](https://spacesprotocol.org/) to learn how to get started.
 To build it from source:
 
 ```sh
-git clone https://github.com/spacesprotocol/spaced && cd spaced
+git clone https://github.com/spacesprotocol/spaces && cd spaces
 cargo install --path client --locked
 ```
 
@@ -46,37 +46,30 @@ spaced --version
 space-cli --version
 ```
 
-## Development setup on testnet4
+## Running
 
-### Setup
-
-First, download Bitcoin Core and set it up to connect to `testnet4` using these steps:
+`spaced` connects to a Bitcoin Core node over RPC. Start Bitcoin Core with RPC
+credentials configured, then run:
 
 ```sh
-mkdir $HOME/bitcoin-testnet4
-
-# Create a configuration file with RPC credentials
-echo "rpcuser=testnet4" > $HOME/bitcoin-testnet4/bitcoin.conf
-echo "rpcpassword=testnet4" >> $HOME/bitcoin-testnet4/bitcoin.conf
-
-# Start Bitcoin Core specifying testnet4 network
-bitcoind -testnet4 -datadir=$HOME/bitcoin-testnet4
+spaced --bitcoin-rpc-user <user> --bitcoin-rpc-password <password>
 ```
 
-Next, run spaced with the following:
-```sh
-spaced --chain testnet4 --bitcoin-rpc-user testnet4 --bitcoin-rpc-password testnet4
-```
+It defaults to `mainnet`; pass `--chain <network>` to use another network. See the
+[docs](https://spacesprotocol.org/) for full setup.
 
 ## Project Structure
 
 
-| Package  | Requires std    | Description                                                                                     |
-|----------|-----------------|-------------------------------------------------------------------------------------------------|
-| client   | Yes             | Bitcoin consensus client and wallet service                                                     |
-| wallet   | Yes (no-std WIP) | Wallet library for building spaces transactions                                                 |
-| protocol | No              | Protocol consensus library                                                                      |
-| veritas  | No              | Stateless verifier library for mobile and other resource constrained devices with wasm support. | 
+| Package     | Description                                                            |
+|-------------|-----------------------------------------------------------------------|
+| client      | Spaces client (`spaced`) and CLI (`space-cli`)                        |
+| wallet      | Wallet library for building spaces transactions                       |
+| protocol    | Core protocol types and consensus rules                               |
+| nums        | Numeric identifier extension                                          |
+| sip7        | Signed Inscribed Packets (SIP-7): signed resource-record payloads     |
+| borsh_utils | Borsh serialization helpers for Bitcoin primitives                    |
+| checkpoint  | Checkpoint loader and builder                                         |
 
 
 
