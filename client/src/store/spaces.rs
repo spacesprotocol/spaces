@@ -74,8 +74,13 @@ impl SpStore {
     }
 
     pub fn update_anchors(&self, file_path: &Path, count: u32) -> Result<Vec<RootAnchor>> {
+        // A derived cache: an unreadable or older-format file (e.g. left by a
+        // pre-nums node across an upgrade) is rebuilt rather than fatal.
         let previous: Vec<RootAnchor> = match fs::read(file_path) {
-            Ok(bytes) => serde_json::from_slice(&bytes)?,
+            Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+                log::warn!("Rebuilding root anchors: previous cache is unreadable ({e})");
+                Vec::new()
+            }),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
             Err(e) => return Err(e.into()),
         };

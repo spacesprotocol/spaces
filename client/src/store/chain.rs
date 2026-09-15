@@ -7,7 +7,7 @@ use crate::store::spaces::{
 };
 use crate::store::{EncodableOutpoint, ReadTx, Sha256};
 use anyhow::{Context, anyhow};
-use log::info;
+use log::{info, warn};
 use spacedb::Hash;
 use spaces_nums::num_id::NumId;
 use spaces_nums::snumeric::SNumeric;
@@ -558,9 +558,15 @@ impl Chain {
 
         info!("Updating root anchors ...");
 
-        // Load previous anchors from file
+        // Load previous anchors from file. The anchors cache is a derived
+        // artifact; an unreadable or older-format file (e.g. left by a pre-nums
+        // node across an upgrade) is rebuilt rather than fatal — the write below
+        // replaces it in the current format.
         let previous: Vec<RootAnchor> = match fs::read(anchors_path) {
-            Ok(bytes) => serde_json::from_slice(&bytes)?,
+            Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+                warn!("Rebuilding root anchors: previous cache is unreadable ({e})");
+                Vec::new()
+            }),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
             Err(e) => return Err(e.into()),
         };

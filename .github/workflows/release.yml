@@ -1,9 +1,15 @@
 name: Build binaries and upload to release
 
+# Manual backfill: automated releases build binaries in release-plz.yml (a
+# release-plz tag pushed with GITHUB_TOKEN cannot trigger this workflow). Use
+# this to (re)build binaries for an existing release tag, e.g. spaces_client-v0.4.0.
 on:
-  push:
-    tags:
-      - 'spaces_client-v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to build binaries for (e.g. spaces_client-v0.4.0)'
+        required: true
+        type: string
 
 jobs:
   release:
@@ -21,13 +27,17 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
 
       - name: Extract version from tag
         id: get_tag
         run: |
           # tag format: spaces_client-v0.1.0 → VERSION=0.1.0, TAG=<original>
-          echo "TAG=${GITHUB_REF##*/}" >> $GITHUB_ENV
-          echo "VERSION=${GITHUB_REF##*-v}" >> $GITHUB_ENV
+          echo "TAG=${{ inputs.tag }}" >> $GITHUB_ENV
+          echo "VERSION=${TAG##*-v}" >> $GITHUB_ENV
+        env:
+          TAG: ${{ inputs.tag }}
 
       - name: Set up Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
