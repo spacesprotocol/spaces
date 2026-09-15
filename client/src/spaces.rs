@@ -134,10 +134,15 @@ impl Spaced {
                 Ok(event) => match event {
                     BlockEvent::Tip(_) => {
                         self.synced = true;
+                        // Rebuild the anchors cache on reaching tip if it is
+                        // missing or unreadable (e.g. an older-format file left
+                        // across an upgrade), rather than waiting for the next
+                        // commit-interval update. Once rebuilt it parses fine,
+                        // so this is a no-op on subsequent tips.
                         if self
                             .anchors_path
                             .as_ref()
-                            .is_some_and(|file| !file.exists())
+                            .is_some_and(|file| anchors_need_rebuild(file))
                         {
                             self.update_anchors()?;
                         }
@@ -211,5 +216,15 @@ impl Spaced {
             ExtendedNetwork::Regtest => ChainAnchor::NUMS_REGTEST(),
             _ => panic!("unsupported network"),
         }
+    }
+}
+
+/// True if the root anchors cache at `path` is missing or cannot be read as
+/// current-format anchors (e.g. a pre-nums file left across an upgrade), and so
+/// should be rebuilt on reaching tip rather than at the next commit interval.
+fn anchors_need_rebuild(path: &std::path::Path) -> bool {
+    match std::fs::read(path) {
+        Ok(bytes) => serde_json::from_slice::<Vec<spaces_nums::RootAnchor>>(&bytes).is_err(),
+        Err(_) => true,
     }
 }
