@@ -753,6 +753,14 @@ pub fn build_schema() -> Vec<MethodSchema> {
                     "Prefer the most recent snapshot",
                     json!(true),
                 ),
+                opt_param(
+                    "committed_fallback",
+                    "bool",
+                    "If true, resolve against the last committed snapshot and \
+                     return that state instead of erroring when a record was \
+                     updated after the last commit (default false)",
+                    json!(true),
+                ),
             ],
             result_type: "ChainProofResult",
             result_schema: Some(serde_json::to_value(schema_for!(ChainProofResult)).unwrap()),

@@ -1546,6 +1546,7 @@ async fn it_should_build_chain_proof_with_snapshot_caching(rig: &TestRig) -> any
                 nums: vec![],
             },
             Some(false),
+            None,
         )
         .await?;
 
@@ -1582,6 +1583,7 @@ async fn it_should_build_chain_proof_with_snapshot_caching(rig: &TestRig) -> any
                 nums: vec![],
             },
             Some(false),
+            None,
         )
         .await?;
 

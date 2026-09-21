@@ -1,7 +1,8 @@
 use crate::auth::BasicAuthLayer;
 use crate::store::Sha256;
 use crate::store::chain::{CACHED_SNAPSHOT_LOOKBACK, COMMIT_BLOCK_INTERVAL, Chain};
-use crate::store::spaces::RolloutEntry;
+use crate::store::ptrs::{NumChainState, NumLiveSnapshot};
+use crate::store::spaces::{RolloutEntry, SpLiveSnapshot, SpacesState};
 use crate::wallets::WalletInfoWithProgress;
 use crate::{
     calc_progress,
@@ -206,6 +207,7 @@ pub enum ChainStateCommand {
     BuildChainProof {
         request: ChainProofRequest,
         prefer_recent: bool,
+        committed_fallback: bool,
         resp: Responder<anyhow::Result<ChainProofResult>>,
     },
     GetRootAnchors {
@@ -415,6 +417,7 @@ pub trait Rpc {
         &self,
         request: ChainProofRequest,
         prefer_recent: Option<bool>,
+        committed_fallback: Option<bool>,
     ) -> Result<ChainProofResult, ErrorObjectOwned>;
 
     #[method(name = "getrootanchors")]
@@ -1431,9 +1434,14 @@ impl RpcServer for RpcServerImpl {
         &self,
         request: ChainProofRequest,
         prefer_recent: Option<bool>,
+        committed_fallback: Option<bool>,
     ) -> Result<ChainProofResult, ErrorObjectOwned> {
         self.store
-            .build_chain_proof(request, prefer_recent.unwrap_or(false))
+            .build_chain_proof(
+                request,
+                prefer_recent.unwrap_or(false),
+                committed_fallback.unwrap_or(false),
+            )
             .await
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
     }
@@ -1925,12 +1933,14 @@ impl AsyncChainState {
             ChainStateCommand::BuildChainProof {
                 request,
                 prefer_recent,
+                committed_fallback,
                 resp,
             } => {
                 _ = resp.send(Self::handle_build_chain_proof(
                     state,
                     request,
                     prefer_recent,
+                    committed_fallback,
                 ));
             }
             ChainStateCommand::GetRootAnchors { resp } => {
@@ -2033,11 +2043,19 @@ impl AsyncChainState {
         tip_aligned.checked_sub(CACHED_SNAPSHOT_LOOKBACK)
     }
 
-    fn handle_build_chain_proof(
+    /// Resolve a proof request into the tree keys to prove, plus the height of
+    /// the most recent update seen across the requested records.
+    ///
+    /// When `committed` is `Some`, spaces/nums are resolved against those
+    /// committed (empty-staged) snapshots so the keys match committed state;
+    /// otherwise they resolve against the live (possibly-uncommitted) state.
+    /// Numeric → id resolution always goes through `state` (the SQLite index),
+    /// which is commit-independent.
+    fn collect_proof_keys(
         state: &mut Chain,
+        mut committed: Option<(&mut SpLiveSnapshot, &mut NumLiveSnapshot)>,
         mut request: ChainProofRequest,
-        prefer_recent: bool,
-    ) -> anyhow::Result<ChainProofResult> {
+    ) -> anyhow::Result<(HashSet<Hash>, HashSet<Hash>, u32)> {
         let mut most_recent_update = 0u32;
         let mut space_tree_keys: HashSet<Hash> = HashSet::new();
         let mut num_tree_keys: HashSet<Hash> = HashSet::new();
@@ -2049,7 +2067,11 @@ impl AsyncChainState {
             }
 
             let space_key = SpaceKey::from(Sha256::hash(space.as_ref()));
-            let Some(fso) = state.get_space_info(&space_key)? else {
+            let fso = match committed.as_mut() {
+                Some((sp, _)) => sp.get_space_info(&space_key)?,
+                None => state.get_space_info(&space_key)?,
+            };
+            let Some(fso) = fso else {
                 // non-existence proof
                 space_tree_keys.insert(space_key.into());
                 continue;
@@ -2070,74 +2092,81 @@ impl AsyncChainState {
         }
 
         for key in request.nums {
-            match key {
-                NumKeyKind::Num(numeric) => {
-                    let id = state.get_num_id(&numeric)?;
-                    if let Some(id) = id {
-                        let fpt = state
-                            .get_num_info(&id)?
-                            .expect("num id must exist if numeric exists");
-                        num_tree_keys
-                            .insert(NumOutpointKey::from_outpoint::<Sha256>(fpt.outpoint()).into());
-                        most_recent_update =
-                            std::cmp::max(most_recent_update, fpt.numout.num.last_update);
-
-                        // insert delegate information
-                        let operator_id = NumId::from_spk::<Sha256>(fpt.numout.script_pubkey);
-                        let operator = state.get_num_info(&operator_id)?;
-                        if let Some(operator) = operator {
-                            num_tree_keys.insert(
-                                NumOutpointKey::from_outpoint::<Sha256>(operator.outpoint()).into(),
-                            );
-
-                            most_recent_update =
-                                std::cmp::max(most_recent_update, operator.numout.num.last_update);
-                        } else {
-                            num_tree_keys.insert(operator_id.into());
-                        }
-                    }
-                }
-                NumKeyKind::Id(id) => {
-                    if let Some(fpt) = state.get_num_info(&id)? {
-                        num_tree_keys
-                            .insert(NumOutpointKey::from_outpoint::<Sha256>(fpt.outpoint()).into());
-                        most_recent_update =
-                            std::cmp::max(most_recent_update, fpt.numout.num.last_update);
-
-                        // insert delegate information
-                        let operator_id = NumId::from_spk::<Sha256>(fpt.numout.script_pubkey);
-                        let operator = state.get_num_info(&operator_id)?;
-                        if let Some(operator) = operator {
-                            num_tree_keys.insert(
-                                NumOutpointKey::from_outpoint::<Sha256>(operator.outpoint()).into(),
-                            );
-                            most_recent_update =
-                                std::cmp::max(most_recent_update, operator.numout.num.last_update);
-                        } else {
-                            num_tree_keys.insert(operator_id.into());
-                        }
-                    } else {
-                        // non-existence proof
-                        num_tree_keys.insert(id.into());
-                    }
-                }
+            // Resolve each requested num/numeric to a NumId (numeric lookup via
+            // the index on `state`); stable keys are proven directly.
+            let id = match key {
+                NumKeyKind::Num(numeric) => match state.get_num_id(&numeric)? {
+                    Some(id) => id,
+                    None => continue,
+                },
+                NumKeyKind::Id(id) => id,
                 NumKeyKind::Rebind(k) => {
                     // Inclusion proves a parked rebind; exclusion proves
                     // nothing is revivable at the spk.
                     num_tree_keys.insert(k.into());
+                    continue;
                 }
                 NumKeyKind::Commitment(k) => {
                     num_tree_keys.insert(k.into());
+                    continue;
                 }
                 NumKeyKind::CommitmentTip(k) => {
                     num_tree_keys.insert(k.into());
+                    continue;
                 }
+            };
+
+            let fpt = match committed.as_mut() {
+                Some((_, num)) => num.get_num_info(&id)?,
+                None => state.get_num_info(&id)?,
+            };
+            let Some(fpt) = fpt else {
+                // non-existence proof (also covers a num not yet committed)
+                num_tree_keys.insert(id.into());
+                continue;
+            };
+            num_tree_keys.insert(NumOutpointKey::from_outpoint::<Sha256>(fpt.outpoint()).into());
+            most_recent_update = std::cmp::max(most_recent_update, fpt.numout.num.last_update);
+
+            // insert delegate/operator information
+            let operator_id = NumId::from_spk::<Sha256>(fpt.numout.script_pubkey);
+            let operator = match committed.as_mut() {
+                Some((_, num)) => num.get_num_info(&operator_id)?,
+                None => state.get_num_info(&operator_id)?,
+            };
+            if let Some(operator) = operator {
+                num_tree_keys
+                    .insert(NumOutpointKey::from_outpoint::<Sha256>(operator.outpoint()).into());
+                most_recent_update =
+                    std::cmp::max(most_recent_update, operator.numout.num.last_update);
+            } else {
+                num_tree_keys.insert(operator_id.into());
             }
         }
 
+        Ok((space_tree_keys, num_tree_keys, most_recent_update))
+    }
+
+    fn handle_build_chain_proof(
+        state: &mut Chain,
+        request: ChainProofRequest,
+        prefer_recent: bool,
+        committed_fallback: bool,
+    ) -> anyhow::Result<ChainProofResult> {
+        // With committed_fallback, resolve keys against the last committed
+        // snapshot so a record updated after the last commit resolves to its
+        // committed state instead of erroring. Otherwise resolve live and
+        // require the latest update to be committed (strict).
+        let (space_tree_keys, num_tree_keys, most_recent_update) = if committed_fallback {
+            let (mut csp, mut cnum) = state.committed_snapshots()?;
+            Self::collect_proof_keys(state, Some((&mut csp, &mut cnum)), request)?
+        } else {
+            Self::collect_proof_keys(state, None, request)?
+        };
+
         let tip = state.tip();
         let last_committed = tip.height - (tip.height % COMMIT_BLOCK_INTERVAL);
-        if most_recent_update > last_committed {
+        if !committed_fallback && most_recent_update > last_committed {
             let next_commit = last_committed + COMMIT_BLOCK_INTERVAL;
             let blocks_remaining = next_commit - tip.height;
             return Err(anyhow!(
@@ -2280,12 +2309,14 @@ impl AsyncChainState {
         &self,
         request: ChainProofRequest,
         prefer_recent: bool,
+        committed_fallback: bool,
     ) -> anyhow::Result<ChainProofResult> {
         let (resp, resp_rx) = oneshot::channel();
         self.sender
             .send(ChainStateCommand::BuildChainProof {
                 request,
                 prefer_recent,
+                committed_fallback,
                 resp,
             })
             .await?;
