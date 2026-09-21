@@ -1,9 +1,9 @@
 use crate::client::{BlockMeta, NumBlockMeta};
 use crate::rpc::{BlockMetaWithHash, NumBlockMetaWithHash};
 use crate::store::index::SqliteIndex;
-use crate::store::ptrs::{NumChainState, NumLiveStore, NumStore};
+use crate::store::ptrs::{NumChainState, NumLiveSnapshot, NumLiveStore, NumStore};
 use crate::store::spaces::{
-    RolloutEntry, RolloutIterator, SpLiveStore, SpStore, SpStoreUtils, SpacesState,
+    RolloutEntry, RolloutIterator, SpLiveSnapshot, SpLiveStore, SpStore, SpStoreUtils, SpacesState,
 };
 use crate::store::{EncodableOutpoint, ReadTx, Sha256};
 use anyhow::{Context, anyhow};
@@ -156,6 +156,21 @@ impl Chain {
 
     pub fn get_num_info(&mut self, key: &NumId) -> anyhow::Result<Option<FullNumOut>> {
         self.db.num.state.get_num_info(key)
+    }
+
+    /// The live spaces/nums snapshots (staged ∪ committed) for resolving the
+    /// current, possibly-uncommitted state.
+    pub fn live_snapshots_mut(&mut self) -> (&mut SpLiveSnapshot, &mut NumLiveSnapshot) {
+        (&mut self.db.sp.state, &mut self.db.num.state)
+    }
+
+    /// Read-only snapshots pinned to the latest committed root (empty staged),
+    /// for resolving only committed (anchored) state.
+    pub fn committed_snapshots(&self) -> anyhow::Result<(SpLiveSnapshot, NumLiveSnapshot)> {
+        Ok((
+            self.db.sp.store.read_committed()?,
+            self.db.num.store.read_committed()?,
+        ))
     }
 
     pub fn snapshot_at(&mut self, target_height: u32) -> anyhow::Result<&mut CachedSnapshot> {

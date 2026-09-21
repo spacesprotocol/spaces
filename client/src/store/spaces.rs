@@ -132,6 +132,27 @@ impl SpStore {
 
         Ok(live)
     }
+
+    /// A read-only snapshot pinned to the latest committed root, with an empty
+    /// staged layer — so lookups see only committed (anchored) state. Errors if
+    /// nothing has been committed yet.
+    pub fn read_committed(&self) -> Result<SpLiveSnapshot> {
+        let snapshot = self.0.begin_read()?;
+        if snapshot.metadata().is_empty() {
+            return Err(anyhow!("no committed spaces state"));
+        }
+        let anchor: ChainAnchor = snapshot.metadata().try_into()?;
+        let version = anchor.hash;
+        Ok(SpLiveSnapshot {
+            db: self.0.clone(),
+            tip: Arc::new(RwLock::new(anchor)),
+            staged: Arc::new(RwLock::new(Staged {
+                snapshot_version: version,
+                memory: BTreeMap::new(),
+            })),
+            snapshot: (version, snapshot),
+        })
+    }
 }
 
 pub trait SpStoreUtils {
