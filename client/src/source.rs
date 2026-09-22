@@ -1,3 +1,4 @@
+use crate::auth::auth_token_from_cookie;
 use crate::client::BlockFilterRpc;
 use crate::{client::BlockSource, std_wait};
 use base64::Engine;
@@ -420,7 +421,7 @@ impl BitcoinRpcAuth {
             BitcoinRpcAuth::UserPass(user, pass) => {
                 Some(base64::prelude::BASE64_STANDARD.encode(format!("{user}:{pass}")))
             }
-            BitcoinRpcAuth::Cookie(cookie) => Some(cookie.clone()),
+            BitcoinRpcAuth::Cookie(cookie) => Some(auth_token_from_cookie(cookie.trim())),
             BitcoinRpcAuth::None => None,
         }
     }
