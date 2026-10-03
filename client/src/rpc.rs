@@ -1,79 +1,78 @@
-use crate::auth::BasicAuthLayer;
-use crate::store::Sha256;
-use crate::store::chain::{CACHED_SNAPSHOT_LOOKBACK, COMMIT_BLOCK_INTERVAL, Chain};
-use crate::store::ptrs::{NumChainState, NumLiveSnapshot};
-use crate::store::spaces::{RolloutEntry, SpLiveSnapshot, SpacesState};
-use crate::wallets::WalletInfoWithProgress;
-use crate::{
-    calc_progress,
-    checker::TxChecker,
-    client::{BlockMeta, BlockchainInfo, NumBlockMeta, TxEntry},
-    config::ExtendedNetwork,
-    deserialize_base64, serialize_base64,
-    source::BitcoinRpc,
-    wallets::{
-        AddressKind, ListNumsResponse, ListSpacesResponse, RpcWallet, TxInfo, TxResponse,
-        WalletCommand, WalletResponse,
-    },
+use std::{
+    collections::BTreeMap, fs, fs::File, io::Write, net::SocketAddr, path::PathBuf, str::FromStr,
+    sync::Arc,
 };
-use anyhow::{Context, anyhow};
+use std::collections::HashSet;
+use anyhow::{anyhow, Context};
 use bdk::{
-    KeychainKind,
     bitcoin::{Amount, BlockHash, FeeRate, Network, Txid},
     chain::BlockId,
     keys::{
-        DerivableKey, ExtendedKey, GeneratableKey, GeneratedKey,
         bip39::{Language, Mnemonic, WordCount},
+        DerivableKey, ExtendedKey, GeneratableKey, GeneratedKey,
     },
     miniscript::Tap,
+    KeychainKind,
 };
 use jsonrpsee::{
     core::async_trait,
     proc_macros::rpc,
-    server::{Server, middleware::http::ProxyGetRequestLayer},
+    server::{middleware::http::ProxyGetRequestLayer, Server},
     types::ErrorObjectOwned,
 };
-use log::info;
+use log::{info, warn};
 use serde::{Deserialize, Serialize};
 use spacedb::tx::ProofType;
-use spaces_nums::num_id::NumId;
-use spaces_nums::snumeric::SNumeric;
-use spaces_nums::{
-    ChainProofRequest, Commitment, CommitmentKey, CommitmentTipKey, DelegatorKey, FullNumOut,
-    NumKeyKind, NumOut, NumOutpointKey, NumSource, RebindData, RebindKey, RootAnchor, TrustId,
-};
-use spaces_protocol::bitcoin::ScriptBuf;
-use spaces_protocol::hasher::Hash;
 use spaces_protocol::{
-    Bytes, Covenant, FullSpaceOut, SpaceOut, bitcoin,
+    bitcoin,
     bitcoin::{
+        bip32::Xpriv,
         Network::{Regtest, Testnet},
         OutPoint,
-        bip32::Xpriv,
     },
     constants::ChainAnchor,
     hasher::{KeyHasher, OutpointKey, SpaceKey},
     prepare::SpacesSource,
     slabel::SLabel,
     validate::TxChangeSet,
+    Bytes, Covenant, FullSpaceOut, SpaceOut,
+};
+use spaces_wallet::{
+    bdk_wallet as bdk, bdk_wallet::template::Bip86, bitcoin::hashes::Hash as BitcoinHash,
+    bitcoin::secp256k1::schnorr,
+    export::WalletExport, nostr::{NostrEvent, NsecExport}, Balance, DoubleUtxo, Listing, SpacesWallet,
+    WalletConfig, WalletDescriptors, WalletOutput,
 };
 pub use spaces_wallet::Subject;
-use spaces_wallet::bitcoin::hashes::sha256;
-use spaces_wallet::{
-    Balance, DoubleUtxo, Listing, SpacesWallet, WalletConfig, WalletDescriptors, WalletOutput,
-    bdk_wallet as bdk, bdk_wallet::template::Bip86, bitcoin::hashes::Hash as BitcoinHash,
-    bitcoin::secp256k1::schnorr, export::WalletExport,
-};
-use std::collections::HashSet;
-use std::{
-    collections::BTreeMap, fs, fs::File, io::Write, net::SocketAddr, path::PathBuf, str::FromStr,
-    sync::Arc,
-};
 use tokio::{
     select,
-    sync::{RwLock, broadcast, mpsc, oneshot},
+    sync::{broadcast, mpsc, oneshot, RwLock},
     task::JoinSet,
 };
+use spaces_protocol::bitcoin::ScriptBuf;
+use spaces_protocol::hasher::Hash;
+use spaces_nums::{NumSource, FullNumOut, NumOut, Commitment, CommitmentTipKey, CommitmentKey, DelegatorKey, NumOutpointKey, RootAnchor, ChainProofRequest, NumKeyKind, RebindData, RebindKey, TrustId};
+use spaces_nums::snumeric::SNumeric;
+use spaces_nums::num_id::NumId;
+use spaces_wallet::bitcoin::hashes::sha256;
+use crate::auth::BasicAuthLayer;
+use crate::wallets::WalletInfoWithProgress;
+use crate::{
+    calc_progress,
+    checker::TxChecker,
+    client::{BlockMeta, NumBlockMeta, TxEntry, BlockchainInfo},
+    config::ExtendedNetwork,
+    deserialize_base64, serialize_base64,
+    source::BitcoinRpc,
+    wallets::{
+        sip7_records_for_num_data, AddressKind, ListNumsResponse, ListSpacesResponse, NumEntry,
+        RpcWallet, TxInfo, TxResponse, WalletCommand, WalletResponse,
+    },
+};
+use crate::store::chain::{Chain, COMMIT_BLOCK_INTERVAL, CACHED_SNAPSHOT_LOOKBACK};
+use crate::store::Sha256;
+use crate::store::ptrs::{NumChainState, NumLiveSnapshot};
+use crate::store::spaces::{RolloutEntry, SpLiveSnapshot, SpacesState};
 
 pub(crate) type Responder<T> = oneshot::Sender<T>;
 
@@ -88,6 +87,7 @@ pub struct ServerInfo {
     pub ready: bool,
     pub progress: f32,
 }
+
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -137,6 +137,12 @@ pub enum ChainStateCommand {
         hash: SpaceKey,
         resp: Responder<anyhow::Result<Option<FullSpaceOut>>>,
     },
+    GetAllSpaces {
+        resp: Responder<anyhow::Result<Vec<FullSpaceOut>>>,
+    },
+    GetAllNums {
+        resp: Responder<anyhow::Result<ListNumsResponse>>,
+    },
     GetSpaceout {
         outpoint: OutPoint,
         resp: Responder<anyhow::Result<Option<SpaceOut>>>,
@@ -174,9 +180,22 @@ pub enum ChainStateCommand {
         outpoint: OutPoint,
         resp: Responder<anyhow::Result<Option<NumOut>>>,
     },
+    /// Chain-wide live nums whose output `script_pubkey` matches (hex decoded by RPC layer).
+    ListNumsBySpk {
+        script_pubkey: ScriptBuf,
+        resp: Responder<anyhow::Result<ListNumsResponse>>,
+    },
     GetTxMeta {
         txid: Txid,
         resp: Responder<anyhow::Result<Option<TxEntry>>>,
+    },
+    FindFallbackByHandle {
+        needle: String,
+        resp: Responder<anyhow::Result<Option<Vec<u8>>>>,
+    },
+    SearchFallbackByPattern {
+        pattern: String,
+        resp: Responder<anyhow::Result<BTreeMap<String, Vec<u8>>>>,
     },
     GetBlockMeta {
         height_or_hash: HeightOrHash,
@@ -204,6 +223,11 @@ pub enum ChainStateCommand {
         signature: Vec<u8>,
         resp: Responder<anyhow::Result<()>>,
     },
+    VerifyEvent {
+        subject: Subject,
+        event: NostrEvent,
+        resp: Responder<anyhow::Result<NostrEvent>>,
+    },
     BuildChainProof {
         request: ChainProofRequest,
         prefer_recent: bool,
@@ -225,6 +249,7 @@ pub struct AsyncChainState {
     sender: mpsc::Sender<ChainStateCommand>,
 }
 
+
 #[rpc(server, client)]
 pub trait Rpc {
     #[method(name = "getserverinfo")]
@@ -236,6 +261,13 @@ pub trait Rpc {
         space_or_hash: &str,
     ) -> Result<Option<FullSpaceOut>, ErrorObjectOwned>;
 
+    #[method(name = "getallspaces")]
+    async fn get_all_spaces(&self) -> Result<Vec<FullSpaceOut>, ErrorObjectOwned>;
+
+    /// List all live nums on the indexed chain. Same JSON shape as `walletlistnums`; no wallet, no filter.
+    #[method(name = "getallnums")]
+    async fn get_all_nums(&self) -> Result<ListNumsResponse, ErrorObjectOwned>;
+
     #[method(name = "getspaceowner")]
     async fn get_space_owner(
         &self,
@@ -246,23 +278,31 @@ pub trait Rpc {
     async fn get_spaceout(&self, outpoint: OutPoint) -> Result<Option<SpaceOut>, ErrorObjectOwned>;
 
     #[method(name = "getnum")]
-    async fn get_num(&self, subject: Subject) -> Result<Option<FullNumOut>, ErrorObjectOwned>;
+    async fn get_num(
+        &self,
+        subject: Subject,
+    ) -> Result<Option<GetNumResponse>, ErrorObjectOwned>;
 
     #[method(name = "getnumowner")]
-    async fn get_num_owner(&self, subject: Subject) -> Result<Option<OutPoint>, ErrorObjectOwned>;
+    async fn get_num_owner(
+        &self,
+        subject: Subject,
+    ) -> Result<Option<OutPoint>, ErrorObjectOwned>;
 
     #[method(name = "getnumout")]
     async fn get_numout(&self, outpoint: OutPoint) -> Result<Option<NumOut>, ErrorObjectOwned>;
 
+    /// List live num outputs on the indexed chain whose `script_pubkey` equals the given hex script.
+    /// Same JSON shape as `walletlistnums`; does not load a wallet or use `kind`.
+    #[method(name = "listnumsbyspk")]
+    async fn list_nums_by_spk(&self, spk_hex: String) -> Result<ListNumsResponse, ErrorObjectOwned>;
+
     #[method(name = "getcommitment")]
-    async fn get_commitment(
-        &self,
-        subject: Subject,
-        root: Option<sha256::Hash>,
-    ) -> Result<Option<Commitment>, ErrorObjectOwned>;
+    async fn get_commitment(&self, subject: Subject, root: Option<sha256::Hash>) -> Result<Option<Commitment>, ErrorObjectOwned>;
 
     #[method(name = "getdelegation")]
     async fn get_delegation(&self, subject: Subject) -> Result<Option<NumId>, ErrorObjectOwned>;
+
 
     #[method(name = "getdelegator")]
     async fn get_delegator(&self, subject: Subject) -> Result<Option<SLabel>, ErrorObjectOwned>;
@@ -302,6 +342,21 @@ pub trait Rpc {
     #[method(name = "gettxmeta")]
     async fn get_tx_meta(&self, txid: Txid) -> Result<Option<TxEntry>, ErrorObjectOwned>;
 
+    #[method(name = "registertxcallback")]
+    async fn register_tx_callback(&self, client_id: String, callback_url: String) -> Result<(), ErrorObjectOwned>;
+
+    #[method(name = "unregistertxcallback")]
+    async fn unregister_tx_callback(&self, client_id: String) -> Result<bool, ErrorObjectOwned>;
+
+    #[method(name = "updatetxwatches")]
+    async fn update_tx_watches(&self, client_id: String, txids: Vec<Txid>) -> Result<bool, ErrorObjectOwned>;
+
+    #[method(name = "gettxcallback")]
+    async fn get_tx_callback(&self, client_id: String) -> Result<Option<crate::callbacks::CallbackClient>, ErrorObjectOwned>;
+
+    #[method(name = "listtxcallbacks")]
+    async fn list_tx_callbacks(&self) -> Result<Vec<crate::callbacks::CallbackClient>, ErrorObjectOwned>;
+
     #[method(name = "listwallets")]
     async fn list_wallets(&self) -> Result<Vec<String>, ErrorObjectOwned>;
 
@@ -310,6 +365,7 @@ pub trait Rpc {
 
     #[method(name = "walletimport")]
     async fn wallet_import(&self, wallet: WalletExport) -> Result<(), ErrorObjectOwned>;
+
 
     #[method(name = "walletcanoperate")]
     async fn wallet_can_operate(
@@ -326,6 +382,35 @@ pub trait Rpc {
         message: Bytes,
     ) -> Result<Bytes, ErrorObjectOwned>;
 
+    #[method(name = "walletsignevent")]
+    async fn wallet_sign_event(
+        &self,
+        wallet: &str,
+        subject: Subject,
+        event: NostrEvent,
+    ) -> Result<NostrEvent, ErrorObjectOwned>;
+
+    #[method(name = "walletgetnsec")]
+    async fn wallet_get_nsec(
+        &self,
+        wallet: &str,
+        subject: Subject,
+    ) -> Result<NsecExport, ErrorObjectOwned>;
+
+    #[method(name = "walletgetprivtweak")]
+    async fn wallet_get_priv_tweak(
+        &self,
+        wallet: &str,
+        subject: Subject,
+    ) -> Result<String, ErrorObjectOwned>;
+
+    #[method(name = "verifyevent")]
+    async fn verify_event(
+        &self,
+        subject: Subject,
+        event: NostrEvent,
+    ) -> Result<NostrEvent, ErrorObjectOwned>;
+
     #[method(name = "verifyschnorr")]
     async fn verify_schnorr(
         &self,
@@ -336,7 +421,7 @@ pub trait Rpc {
 
     #[method(name = "walletgetinfo")]
     async fn wallet_get_info(&self, name: &str)
-    -> Result<WalletInfoWithProgress, ErrorObjectOwned>;
+                             -> Result<WalletInfoWithProgress, ErrorObjectOwned>;
 
     #[method(name = "walletexport")]
     async fn wallet_export(&self, name: &str) -> Result<WalletExport, ErrorObjectOwned>;
@@ -352,6 +437,15 @@ pub trait Rpc {
         &self,
         wallet: &str,
         request: RpcWalletTxBuilder,
+    ) -> Result<WalletResponse, ErrorObjectOwned>;
+
+    /// Create a num with a required binding script_pubkey (hex) and fee rate (sat/vB). Same result JSON as `walletsendrequest` for createnum.
+    #[method(name = "walletcreatenum")]
+    async fn wallet_create_num(
+        &self,
+        wallet: &str,
+        fee_rate_sat_vb: u64,
+        spk_hex: String,
     ) -> Result<WalletResponse, ErrorObjectOwned>;
 
     #[method(name = "walletgetnewaddress")]
@@ -471,7 +565,14 @@ pub trait Rpc {
     async fn get_fallback(
         &self,
         subject: Subject,
-    ) -> Result<Option<FallbackResponse>, ErrorObjectOwned>;
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    #[method(name = "estimatefee")]
+    async fn estimate_fee(
+        &self,
+        conf_target: u32,
+        estimate_mode: Option<String>,
+    ) -> Result<FeeEstimateResponse, ErrorObjectOwned>;
 
     /// Debug method to set a space's expire height (regtest only)
     #[method(name = "debugsetexpireheight")]
@@ -507,6 +608,13 @@ pub trait Rpc {
     ) -> Result<String, ErrorObjectOwned>;
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct FeeEstimateResponse {
+    pub feerate_sat_vb: u64,
+    pub blocks: u64,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct DebugRawOutput {
@@ -527,6 +635,32 @@ pub struct FallbackResponse {
     pub records: Option<sip7::RecordSet>,
 }
 
+/// `getnum` result: the live num output plus parsed SIP-7 records when `data` is valid SIP-7.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct GetNumResponse {
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
+    pub txid: Txid,
+    #[serde(flatten)]
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
+    pub numout: NumOut,
+    /// Parsed SIP-7 records, if `num.data` is valid SIP-7 (same as `getfallback` `records`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(with = "Option<String>"))]
+    pub records: Option<sip7::RecordSet>,
+}
+
+impl From<FullNumOut> for GetNumResponse {
+    fn from(info: FullNumOut) -> Self {
+        let records = sip7_records_for_num_data(&info.numout.num.data);
+        Self {
+            txid: info.txid,
+            numout: info.numout,
+            records,
+        }
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RpcWalletTxBuilder {
@@ -540,6 +674,9 @@ pub struct RpcWalletTxBuilder {
     pub force: bool,
     pub confirmed_only: bool,
     pub skip_tx_check: bool,
+    /// Build and sign but do not broadcast. Raw tx hex is returned in each result's `raw` field.
+    #[serde(default)]
+    pub dry_run: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -588,12 +725,15 @@ pub struct TransferSpacesParams {
     pub secret: Option<String>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct CreateNumParams {
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schema", schemars(with = "Option<String>"))]
     pub bind_spk: Option<ScriptBuf>,
+    /// SIP-7 record-set bytes for the num's on-chain fallback data (same format as `setfallback`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -682,7 +822,9 @@ pub struct RpcServerImpl {
     wallet_manager: WalletManager,
     store: AsyncChainState,
     client: reqwest::Client,
+    callback_registry: crate::callbacks::CallbackRegistry,
 }
+
 
 /// Combined proof result for a chain proof request containing subtrees from both
 /// spaces and ptrs trees at the same snapshot height.
@@ -758,11 +900,7 @@ impl WalletManager {
         Ok(export)
     }
 
-    pub async fn create_wallet(
-        &self,
-        client: &reqwest::Client,
-        name: &str,
-    ) -> anyhow::Result<String> {
+    pub async fn create_wallet(&self, client: &reqwest::Client, name: &str) -> anyhow::Result<String> {
         let mnemonic: GeneratedKey<_, Tap> =
             Mnemonic::generate((WordCount::Words12, Language::English))
                 .map_err(|_| anyhow!("Mnemonic generation error"))?;
@@ -925,13 +1063,13 @@ impl WalletManager {
     async fn get_wallet_start_block(&self, client: &reqwest::Client) -> anyhow::Result<BlockId> {
         let count: i32 = self
             .rpc
-            .send_json(client, &self.rpc.get_block_count())
+            .send_json(&client, &self.rpc.get_block_count())
             .await?;
         let height = std::cmp::max(count - 1, 0) as u32;
 
         let hash = self
             .rpc
-            .send_json(client, &self.rpc.get_block_hash(height))
+            .send_json(&client, &self.rpc.get_block_hash(height))
             .await?;
 
         Ok(BlockId { height, hash })
@@ -953,11 +1091,24 @@ impl WalletManager {
 
 impl RpcServerImpl {
     pub fn new(store: AsyncChainState, wallet_manager: WalletManager) -> Self {
+        Self::new_with_callbacks(store, wallet_manager, crate::callbacks::CallbackRegistry::new())
+    }
+
+    pub fn new_with_callbacks(
+        store: AsyncChainState,
+        wallet_manager: WalletManager,
+        callback_registry: crate::callbacks::CallbackRegistry,
+    ) -> Self {
         RpcServerImpl {
             wallet_manager,
             store,
             client: reqwest::Client::new(),
+            callback_registry,
         }
+    }
+
+    pub fn callback_registry(&self) -> &crate::callbacks::CallbackRegistry {
+        &self.callback_registry
     }
 
     async fn wallet(&self, wallet: &str) -> Result<RpcWallet, ErrorObjectOwned> {
@@ -1003,19 +1154,16 @@ impl RpcServerImpl {
 
             let mut module = self.clone().into_rpc();
             let methods: Vec<String> = module.method_names().map(|s| s.to_string()).collect();
-            module
-                .register_method(
-                    "rpc.discover",
-                    move |_, _| serde_json::json!({ "methods": methods }),
-                )
-                .expect("register rpc.discover");
+            module.register_method("rpc.discover", move |_, _| {
+                serde_json::json!({ "methods": methods })
+            }).expect("register rpc.discover");
 
             #[cfg(feature = "schema")]
             {
                 let spec = crate::rpc_schema::full_spec();
-                module
-                    .register_method("rpc.schema", move |_, _| spec.clone())
-                    .expect("register rpc.schema");
+                module.register_method("rpc.schema", move |_, _| {
+                    spec.clone()
+                }).expect("register rpc.schema");
             }
 
             let handle = listener.start(module);
@@ -1071,6 +1219,20 @@ impl RpcServer for RpcServerImpl {
         Ok(info)
     }
 
+    async fn get_all_spaces(&self) -> Result<Vec<FullSpaceOut>, ErrorObjectOwned> {
+        self.store
+            .get_all_spaces()
+            .await
+            .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
+    }
+
+    async fn get_all_nums(&self) -> Result<ListNumsResponse, ErrorObjectOwned> {
+        self.store
+            .get_all_nums()
+            .await
+            .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
+    }
+
     async fn get_space_owner(
         &self,
         space_or_hash: &str,
@@ -1094,13 +1256,13 @@ impl RpcServer for RpcServerImpl {
         Ok(spaceout)
     }
 
-    async fn get_num(&self, subject: Subject) -> Result<Option<FullNumOut>, ErrorObjectOwned> {
+    async fn get_num(&self, subject: Subject) -> Result<Option<GetNumResponse>, ErrorObjectOwned> {
         let info = self
             .store
             .get_ptr(subject)
             .await
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))?;
-        Ok(info)
+        Ok(info.map(GetNumResponse::from))
     }
 
     async fn get_num_owner(&self, subject: Subject) -> Result<Option<OutPoint>, ErrorObjectOwned> {
@@ -1121,11 +1283,21 @@ impl RpcServer for RpcServerImpl {
         Ok(spaceout)
     }
 
-    async fn get_commitment(
-        &self,
-        subject: Subject,
-        root: Option<sha256::Hash>,
-    ) -> Result<Option<Commitment>, ErrorObjectOwned> {
+    async fn list_nums_by_spk(&self, spk_hex: String) -> Result<ListNumsResponse, ErrorObjectOwned> {
+        let bytes = hex::decode(spk_hex.trim()).map_err(|e| {
+            ErrorObjectOwned::owned(
+                -1,
+                format!("invalid spk hex: {}", e),
+                None::<String>,
+            )
+        })?;
+        self.store
+            .list_nums_by_spk(bytes)
+            .await
+            .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
+    }
+
+    async fn get_commitment(&self, subject: Subject, root: Option<sha256::Hash>) -> Result<Option<Commitment>, ErrorObjectOwned> {
         let c = self
             .store
             .get_commitment(subject, root.map(|r| *r.as_ref()))
@@ -1260,7 +1432,7 @@ impl RpcServer for RpcServerImpl {
         subject: Subject,
         message: Bytes,
     ) -> Result<Bytes, ErrorObjectOwned> {
-        self.wallet(wallet)
+        self.wallet(&wallet)
             .await?
             .send_sign_schnorr(subject, message.to_vec())
             .await
@@ -1273,9 +1445,46 @@ impl RpcServer for RpcServerImpl {
         wallet: &str,
         subject: Subject,
     ) -> Result<bool, ErrorObjectOwned> {
-        self.wallet(wallet)
+        self.wallet(&wallet)
             .await?
             .send_can_operate(subject)
+            .await
+            .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
+    }
+
+    async fn wallet_sign_event(
+        &self,
+        wallet: &str,
+        subject: Subject,
+        event: NostrEvent,
+    ) -> Result<NostrEvent, ErrorObjectOwned> {
+        self.wallet(&wallet)
+            .await?
+            .send_sign_event(subject, event)
+            .await
+            .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
+    }
+
+    async fn wallet_get_nsec(
+        &self,
+        wallet: &str,
+        subject: Subject,
+    ) -> Result<NsecExport, ErrorObjectOwned> {
+        self.wallet(&wallet)
+            .await?
+            .send_get_nsec(subject)
+            .await
+            .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
+    }
+
+    async fn wallet_get_priv_tweak(
+        &self,
+        wallet: &str,
+        subject: Subject,
+    ) -> Result<String, ErrorObjectOwned> {
+        self.wallet(&wallet)
+            .await?
+            .send_get_priv_tweak(subject)
             .await
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
     }
@@ -1293,11 +1502,64 @@ impl RpcServer for RpcServerImpl {
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
     }
 
+    async fn verify_event(
+        &self,
+        subject: Subject,
+        event: NostrEvent,
+    ) -> Result<NostrEvent, ErrorObjectOwned> {
+        self.store
+            .verify_event(subject, event)
+            .await
+            .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
+    }
+
+    async fn register_tx_callback(
+        &self,
+        client_id: String,
+        callback_url: String,
+    ) -> Result<(), ErrorObjectOwned> {
+        self.callback_registry
+            .register_client(client_id, callback_url)
+            .await
+            .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
+    }
+
+    async fn unregister_tx_callback(&self, client_id: String) -> Result<bool, ErrorObjectOwned> {
+        self.callback_registry
+            .unregister_client(&client_id)
+            .await
+            .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
+    }
+
+    async fn update_tx_watches(
+        &self,
+        client_id: String,
+        txids: Vec<Txid>,
+    ) -> Result<bool, ErrorObjectOwned> {
+        self.callback_registry
+            .update_watched_txids(&client_id, txids)
+            .await
+            .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
+    }
+
+    async fn get_tx_callback(
+        &self,
+        client_id: String,
+    ) -> Result<Option<crate::callbacks::CallbackClient>, ErrorObjectOwned> {
+        Ok(self.callback_registry.get_client(&client_id).await)
+    }
+
+    async fn list_tx_callbacks(
+        &self,
+    ) -> Result<Vec<crate::callbacks::CallbackClient>, ErrorObjectOwned> {
+        Ok(self.callback_registry.list_clients().await)
+    }
+
     async fn wallet_get_info(
         &self,
         wallet: &str,
     ) -> Result<WalletInfoWithProgress, ErrorObjectOwned> {
-        self.wallet(wallet)
+        self.wallet(&wallet)
             .await?
             .send_get_info()
             .await
@@ -1336,7 +1598,7 @@ impl RpcServer for RpcServerImpl {
         request: RpcWalletTxBuilder,
     ) -> Result<WalletResponse, ErrorObjectOwned> {
         let result = self
-            .wallet(wallet)
+            .wallet(&wallet)
             .await?
             .send_batch_tx(request)
             .await
@@ -1344,12 +1606,56 @@ impl RpcServer for RpcServerImpl {
         Ok(result)
     }
 
+    async fn wallet_create_num(
+        &self,
+        wallet: &str,
+        fee_rate_sat_vb: u64,
+        spk_hex: String,
+    ) -> Result<WalletResponse, ErrorObjectOwned> {
+        let fee_rate = FeeRate::from_sat_per_vb(fee_rate_sat_vb).ok_or_else(|| {
+            ErrorObjectOwned::owned(
+                -1,
+                "invalid fee_rate_sat_vb (fee rate out of range)".to_string(),
+                None::<String>,
+            )
+        })?;
+        let spk_bytes = hex::decode(spk_hex.trim()).map_err(|e| {
+            ErrorObjectOwned::owned(
+                -1,
+                format!("invalid spk hex: {}", e),
+                None::<String>,
+            )
+        })?;
+        if spk_bytes.is_empty() {
+            return Err(ErrorObjectOwned::owned(
+                -1,
+                "spk hex decodes to an empty script".to_string(),
+                None::<String>,
+            ));
+        }
+        let bind_spk = ScriptBuf::from(spk_bytes);
+        let request = RpcWalletTxBuilder {
+            bidouts: None,
+            requests: vec![RpcWalletRequest::CreateNum(CreateNumParams {
+                bind_spk: Some(bind_spk),
+                ..Default::default()
+            })],
+            fee_rate: Some(fee_rate),
+            dust: None,
+            force: false,
+            confirmed_only: false,
+            skip_tx_check: false,
+            dry_run: false,
+        };
+        self.wallet_send_request(wallet, request).await
+    }
+
     async fn wallet_get_new_address(
         &self,
         wallet: &str,
         kind: AddressKind,
     ) -> Result<String, ErrorObjectOwned> {
-        self.wallet(wallet)
+        self.wallet(&wallet)
             .await?
             .send_get_new_address(kind)
             .await
@@ -1361,7 +1667,7 @@ impl RpcServer for RpcServerImpl {
         wallet: &str,
         kind: AddressKind,
     ) -> Result<String, ErrorObjectOwned> {
-        self.wallet(wallet)
+        self.wallet(&wallet)
             .await?
             .send_increment_address(kind)
             .await
@@ -1375,7 +1681,7 @@ impl RpcServer for RpcServerImpl {
         fee_rate: FeeRate,
         skip_tx_check: bool,
     ) -> Result<Vec<TxResponse>, ErrorObjectOwned> {
-        self.wallet(wallet)
+        self.wallet(&wallet)
             .await?
             .send_fee_bump(txid, fee_rate, skip_tx_check)
             .await
@@ -1390,7 +1696,7 @@ impl RpcServer for RpcServerImpl {
         fee_rate: Option<FeeRate>,
         skip_tx_check: bool,
     ) -> Result<TxResponse, ErrorObjectOwned> {
-        self.wallet(wallet)
+        self.wallet(&wallet)
             .await?
             .send_buy(listing, recipient, fee_rate, skip_tx_check)
             .await
@@ -1403,7 +1709,7 @@ impl RpcServer for RpcServerImpl {
         space: String,
         amount: u64,
     ) -> Result<Listing, ErrorObjectOwned> {
-        self.wallet(wallet)
+        self.wallet(&wallet)
             .await?
             .send_sell(space, amount)
             .await
@@ -1468,7 +1774,7 @@ impl RpcServer for RpcServerImpl {
         count: usize,
         skip: usize,
     ) -> Result<Vec<TxInfo>, ErrorObjectOwned> {
-        self.wallet(wallet)
+        self.wallet(&wallet)
             .await?
             .send_list_transactions(count, skip)
             .await
@@ -1481,7 +1787,7 @@ impl RpcServer for RpcServerImpl {
         outpoint: OutPoint,
         fee_rate: FeeRate,
     ) -> Result<TxResponse, ErrorObjectOwned> {
-        self.wallet(wallet)
+        self.wallet(&wallet)
             .await?
             .send_force_spend(outpoint, fee_rate)
             .await
@@ -1492,7 +1798,7 @@ impl RpcServer for RpcServerImpl {
         &self,
         wallet: &str,
     ) -> Result<ListSpacesResponse, ErrorObjectOwned> {
-        self.wallet(wallet)
+        self.wallet(&wallet)
             .await?
             .send_list_spaces()
             .await
@@ -1505,7 +1811,7 @@ impl RpcServer for RpcServerImpl {
         kind: Option<String>,
     ) -> Result<ListNumsResponse, ErrorObjectOwned> {
         let external = kind.as_deref() == Some("external");
-        self.wallet(wallet)
+        self.wallet(&wallet)
             .await?
             .send_list_nums(external)
             .await
@@ -1516,7 +1822,7 @@ impl RpcServer for RpcServerImpl {
         &self,
         wallet: &str,
     ) -> Result<Vec<WalletOutput>, ErrorObjectOwned> {
-        self.wallet(wallet)
+        self.wallet(&wallet)
             .await?
             .send_list_unspent()
             .await
@@ -1524,7 +1830,7 @@ impl RpcServer for RpcServerImpl {
     }
 
     async fn wallet_list_bidouts(&self, wallet: &str) -> Result<Vec<DoubleUtxo>, ErrorObjectOwned> {
-        self.wallet(wallet)
+        self.wallet(&wallet)
             .await?
             .send_list_bidouts()
             .await
@@ -1532,80 +1838,149 @@ impl RpcServer for RpcServerImpl {
     }
 
     async fn wallet_get_balance(&self, wallet: &str) -> Result<Balance, ErrorObjectOwned> {
-        self.wallet(wallet)
+        self.wallet(&wallet)
             .await?
             .send_get_balance()
             .await
             .map_err(|error| ErrorObjectOwned::owned(-1, error.to_string(), None::<String>))
     }
 
-    async fn get_fallback(
-        &self,
-        subject: Subject,
-    ) -> Result<Option<FallbackResponse>, ErrorObjectOwned> {
-        let data =
-            match &subject {
-                Subject::Label(label) if !label.is_numeric() => {
-                    let space_hash = SpaceKey::from(Sha256::hash(label.as_ref()));
-                    let fso =
-                        self.store.get_space(space_hash).await.map_err(|e| {
-                            ErrorObjectOwned::owned(-1, e.to_string(), None::<String>)
-                        })?;
-                    fso.and_then(|fso| {
-                        if let Some(space) = &fso.spaceout.space
-                            && let Covenant::Transfer { data, .. } = &space.covenant
-                        {
+    async fn get_fallback(&self, subject: Subject) -> Result<serde_json::Value, ErrorObjectOwned> {
+        if let Subject::HandlePattern(ref pattern) = subject {
+            let results = self.store
+                .search_fallback_by_pattern(pattern)
+                .await
+                .map_err(|e| ErrorObjectOwned::owned(-1, e.to_string(), None::<String>))?;
+
+            let map: BTreeMap<String, FallbackResponse> = results
+                .into_iter()
+                .map(|(name, raw)| {
+                    use base64::Engine;
+                    let encoded = base64::engine::general_purpose::STANDARD.encode(&raw);
+                    let rs = sip7::RecordSet::new(raw);
+                    let records = if rs.unpack().is_ok() { Some(rs) } else { None };
+                    (name, FallbackResponse { data: encoded, records })
+                })
+                .collect();
+
+            return serde_json::to_value(&map)
+                .map_err(|e| ErrorObjectOwned::owned(-1, e.to_string(), None::<String>));
+        }
+
+        let data = match &subject {
+            Subject::Handle(name) => {
+                let needle = name.to_string();
+                self.store
+                    .find_fallback_by_handle(&needle)
+                    .await
+                    .map_err(|e| ErrorObjectOwned::owned(-1, e.to_string(), None::<String>))?
+            }
+            Subject::Label(label) if !label.is_numeric() => {
+                let space_hash = SpaceKey::from(Sha256::hash(label.as_ref()));
+                let fso = self.store.get_space(space_hash).await
+                    .map_err(|e| ErrorObjectOwned::owned(-1, e.to_string(), None::<String>))?;
+                fso.and_then(|fso| {
+                    if let Some(space) = &fso.spaceout.space {
+                        if let Covenant::Transfer { data, .. } = &space.covenant {
                             return data.as_ref().map(|b| b.clone().to_vec());
                         }
-                        None
-                    })
-                }
-                _ => {
-                    let fpt =
-                        self.store.get_ptr(subject).await.map_err(|e| {
-                            ErrorObjectOwned::owned(-1, e.to_string(), None::<String>)
-                        })?;
-                    fpt.and_then(|fpt| fpt.numout.num.data.map(|b| b.to_vec()))
-                }
-            };
+                    }
+                    None
+                })
+            }
+            _ => {
+                let fpt = self.store.get_ptr(subject.clone()).await
+                    .map_err(|e| ErrorObjectOwned::owned(-1, e.to_string(), None::<String>))?;
+                fpt.and_then(|fpt| fpt.numout.num.data.map(|b| b.to_vec()))
+            }
+        };
 
-        match data {
-            None => Ok(None),
+        let response = match data {
+            None => None,
             Some(raw) => {
                 use base64::Engine;
                 let encoded = base64::engine::general_purpose::STANDARD.encode(&raw);
                 let rs = sip7::RecordSet::new(raw);
                 let records = if rs.unpack().is_ok() { Some(rs) } else { None };
-                Ok(Some(FallbackResponse {
+                Some(FallbackResponse {
                     data: encoded,
                     records,
-                }))
+                })
+            }
+        };
+
+        serde_json::to_value(&response)
+            .map_err(|e| ErrorObjectOwned::owned(-1, e.to_string(), None::<String>))
+    }
+
+    async fn estimate_fee(
+        &self,
+        conf_target: u32,
+        estimate_mode: Option<String>,
+    ) -> Result<FeeEstimateResponse, ErrorObjectOwned> {
+        let mode = estimate_mode.unwrap_or_else(|| "unset".to_string());
+        info!("estimatefee: request conf_target={} mode={}", conf_target, mode);
+        let params = serde_json::json!([conf_target, mode]);
+        let rpc = self.wallet_manager.rpc.clone();
+
+        let estimate_req = rpc.make_request("estimatesmartfee", params);
+
+        let result = tokio::task::spawn_blocking(move || {
+            let blocking_client = reqwest::blocking::Client::new();
+            rpc.send_json_blocking::<serde_json::Value>(&blocking_client, &estimate_req)
+        })
+        .await
+        .map_err(|e| ErrorObjectOwned::owned(-1, format!("Task join error: {}", e), None::<String>))?;
+
+        match result {
+            Ok(res) => {
+                if let Some(fee_rate) = res["feerate"].as_f64() {
+                    let fee_rate_sat_vb = (fee_rate * 100_000.0).ceil() as u64;
+                    let blocks = res["blocks"].as_u64().unwrap_or(conf_target as u64);
+                    info!(
+                        "estimatefee: ok feerate_sat_vb={} blocks={}",
+                        fee_rate_sat_vb, blocks
+                    );
+                    Ok(FeeEstimateResponse {
+                        feerate_sat_vb: fee_rate_sat_vb,
+                        blocks,
+                    })
+                } else {
+                    warn!(
+                        "estimatefee: no feerate in bitcoind response (conf_target={} mode={})",
+                        conf_target, mode
+                    );
+                    Err(ErrorObjectOwned::owned(
+                        -1,
+                        "Fee estimation unavailable: no feerate in response".to_string(),
+                        None::<String>,
+                    ))
+                }
+            }
+            Err(e) => {
+                warn!(
+                    "estimatefee: estimatesmartfee failed conf_target={} mode={} error={}",
+                    conf_target, mode, e
+                );
+                Err(ErrorObjectOwned::owned(
+                    -1,
+                    format!("RPC error: {}", e),
+                    None::<String>,
+                ))
             }
         }
     }
 
-    async fn debug_set_expire_height(
-        &self,
-        space: &str,
-        expire_height: u32,
-    ) -> Result<(), ErrorObjectOwned> {
+    async fn debug_set_expire_height(&self, space: &str, expire_height: u32) -> Result<(), ErrorObjectOwned> {
         // Only allow on regtest
-        let info = self
-            .store
-            .get_server_info()
-            .await
+        let info = self.store.get_server_info().await
             .map_err(|e| ErrorObjectOwned::owned(-1, e.to_string(), None::<String>))?;
         if info.network != ExtendedNetwork::Regtest {
-            return Err(ErrorObjectOwned::owned(
-                -1,
-                "debug_set_expire_height is only available on regtest",
-                None::<String>,
-            ));
+            return Err(ErrorObjectOwned::owned(-1, "debug_set_expire_height is only available on regtest", None::<String>));
         }
 
-        let space_label = SLabel::from_str(space).map_err(|e| {
-            ErrorObjectOwned::owned(-1, format!("Invalid space name: {}", e), None::<String>)
-        })?;
+        let space_label = SLabel::from_str(space)
+            .map_err(|e| ErrorObjectOwned::owned(-1, format!("Invalid space name: {}", e), None::<String>))?;
 
         self.store
             .debug_set_expire_height(space_label, expire_height)
@@ -1684,7 +2059,7 @@ impl AsyncChainState {
         rpc: &BitcoinRpc,
     ) -> Result<Option<TxEntry>, anyhow::Error> {
         let info: serde_json::Value = rpc
-            .send_json(client, &rpc.get_raw_transaction(txid, true))
+            .send_json(client, &rpc.get_raw_transaction(&txid, true))
             .await
             .map_err(|e| anyhow!("Could not retrieve tx ({})", e))?;
 
@@ -1692,8 +2067,13 @@ impl AsyncChainState {
             BlockHash::from_str(info.get("blockhash").and_then(|t| t.as_str()).ok_or_else(
                 || anyhow!("Could not retrieve block hash for tx (is it in the mempool?)"),
             )?)?;
-        let block =
-            Self::get_indexed_block(state, HeightOrHash::Hash(block_hash), client, rpc).await?;
+        let block = Self::get_indexed_block(
+            state,
+            HeightOrHash::Hash(block_hash),
+            client,
+            rpc,
+        )
+            .await?;
 
         Ok(block
             .block_meta
@@ -1829,6 +2209,14 @@ impl AsyncChainState {
                 let result = state.get_space_info(&hash);
                 let _ = resp.send(result);
             }
+            ChainStateCommand::GetAllSpaces { resp } => {
+                let result = state.get_all_spaces();
+                let _ = resp.send(result);
+            }
+            ChainStateCommand::GetAllNums { resp } => {
+                let result = state.get_all_nums().map(list_nums_response_from_rows);
+                let _ = resp.send(result);
+            }
             ChainStateCommand::GetSpaceout { outpoint, resp } => {
                 let result = state
                     .get_spaceout(&outpoint)
@@ -1842,22 +2230,16 @@ impl AsyncChainState {
                 let _ = resp.send(result);
             }
             ChainStateCommand::GetNum { subject, resp } => {
-                let result = resolve_num_id(state, &subject).and_then(|id| state.get_num_info(&id));
+                let result = resolve_num_id(state, &subject)
+                    .and_then(|id| state.get_num_info(&id));
                 let _ = resp.send(result);
             }
             ChainStateCommand::GetNumOutpoint { subject, resp } => {
-                let result = resolve_num_id(state, &subject).and_then(|id| {
-                    state
-                        .get_num_outpoint_by_id(&id)
-                        .context("could not fetch numout")
-                });
+                let result = resolve_num_id(state, &subject)
+                    .and_then(|id| state.get_num_outpoint_by_id(&id).context("could not fetch numout"));
                 let _ = resp.send(result);
             }
-            ChainStateCommand::GetCommitment {
-                subject,
-                root,
-                resp,
-            } => {
+            ChainStateCommand::GetCommitment { subject, root, resp } => {
                 let result = get_commitment(state, &subject, root);
                 let _ = resp.send(result);
             }
@@ -1866,11 +2248,9 @@ impl AsyncChainState {
                 let _ = resp.send(result);
             }
             ChainStateCommand::GetDelegator { subject, resp } => {
-                let result = resolve_num_id(state, &subject).and_then(|id| {
-                    state
-                        .get_delegator(&DelegatorKey::from_id::<Sha256>(id))
-                        .map_err(|e| anyhow!("could not get delegator: {}", e))
-                });
+                let result = resolve_num_id(state, &subject)
+                    .and_then(|id| state.get_delegator(&DelegatorKey::from_id::<Sha256>(id))
+                        .map_err(|e| anyhow!("could not get delegator: {}", e)));
                 let _ = resp.send(result);
             }
             ChainStateCommand::GetRebind {
@@ -1888,22 +2268,43 @@ impl AsyncChainState {
                     .context("could not fetch numouts");
                 let _ = resp.send(result);
             }
+            ChainStateCommand::ListNumsBySpk {
+                script_pubkey,
+                resp,
+            } => {
+                let result = state
+                    .list_live_nums_with_script_pubkey(script_pubkey.as_bytes())
+                    .map(list_nums_response_from_rows);
+                let _ = resp.send(result);
+            }
             ChainStateCommand::GetBlockMeta {
                 height_or_hash,
                 resp,
             } => {
-                let res = Self::get_indexed_block(state, height_or_hash, client, rpc).await;
+                let res =
+                    Self::get_indexed_block(state, height_or_hash, client, rpc)
+                        .await;
                 let _ = resp.send(res);
             }
             ChainStateCommand::GetNumBlockMeta {
                 height_or_hash,
                 resp,
             } => {
-                let res = Self::get_indexed_ptr_block(state, height_or_hash, client, rpc).await;
+                let res =
+                    Self::get_indexed_ptr_block(state, height_or_hash, client, rpc)
+                        .await;
                 let _ = resp.send(res);
             }
             ChainStateCommand::GetTxMeta { txid, resp } => {
                 let res = Self::get_indexed_tx(state, &txid, client, rpc).await;
+                let _ = resp.send(res);
+            }
+            ChainStateCommand::FindFallbackByHandle { needle, resp } => {
+                let res = state.find_fallback_payload_by_handle(&needle);
+                let _ = resp.send(res);
+            }
+            ChainStateCommand::SearchFallbackByPattern { pattern, resp } => {
+                let res = state.search_fallback_by_pattern(&pattern);
                 let _ = resp.send(res);
             }
             ChainStateCommand::EstimateBid { target, resp } => {
@@ -1915,20 +2316,20 @@ impl AsyncChainState {
                 _ = resp.send(rollouts);
             }
             ChainStateCommand::VerifyListing { listing, resp } => {
-                _ = resp.send(SpacesWallet::verify_listing::<Sha256>(state, &listing).map(|_| ()));
+                _ = resp.send(
+                    SpacesWallet::verify_listing::<Sha256>(state, &listing).map(|_| ()),
+                );
             }
-            ChainStateCommand::VerifySchnorr {
-                subject,
-                message,
-                signature,
-                resp,
-            } => {
+            ChainStateCommand::VerifySchnorr { subject, message, signature, resp } => {
                 let result = (|| {
                     let sig = schnorr::Signature::from_slice(&signature)
                         .map_err(|_| anyhow!("Invalid signature format"))?;
                     SpacesWallet::verify_schnorr::<Sha256, _>(state, subject, &message, &sig)
                 })();
                 _ = resp.send(result);
+            }
+            ChainStateCommand::VerifyEvent { subject, event, resp } => {
+                _ = resp.send(SpacesWallet::verify_event::<Sha256, _>(state, subject, event));
             }
             ChainStateCommand::BuildChainProof {
                 request,
@@ -1946,16 +2347,8 @@ impl AsyncChainState {
             ChainStateCommand::GetRootAnchors { resp } => {
                 _ = resp.send(Self::handle_get_anchor(anchors_path, state));
             }
-            ChainStateCommand::DebugSetExpireHeight {
-                space,
-                expire_height,
-                resp,
-            } => {
-                _ = resp.send(Self::handle_debug_set_expire_height(
-                    state,
-                    space,
-                    expire_height,
-                ));
+            ChainStateCommand::DebugSetExpireHeight { space, expire_height, resp } => {
+                _ = resp.send(Self::handle_debug_set_expire_height(state, space, expire_height));
             }
         }
     }
@@ -1966,26 +2359,18 @@ impl AsyncChainState {
         expire_height: u32,
     ) -> anyhow::Result<()> {
         let space_key = SpaceKey::from(Sha256::hash(space.as_ref()));
-        let outpoint = state
-            .get_space_outpoint(&space_key)?
+        let outpoint = state.get_space_outpoint(&space_key)?
             .ok_or_else(|| anyhow::anyhow!("Space not found: {}", space))?;
-        let mut spaceout = state
-            .get_spaceout(&outpoint)?
+        let mut spaceout = state.get_spaceout(&outpoint)?
             .ok_or_else(|| anyhow::anyhow!("Spaceout not found for outpoint"))?;
 
         // Update expire_height in the covenant
         if let Some(ref mut space_data) = spaceout.space {
             match &mut space_data.covenant {
-                Covenant::Transfer {
-                    expire_height: eh, ..
-                } => {
+                Covenant::Transfer { expire_height: eh, .. } => {
                     *eh = expire_height;
                 }
-                _ => {
-                    return Err(anyhow::anyhow!(
-                        "Space is not in Transfer covenant (not owned)"
-                    ));
-                }
+                _ => return Err(anyhow::anyhow!("Space is not in Transfer covenant (not owned)")),
             }
         } else {
             return Err(anyhow::anyhow!("SpaceOut has no space data"));
@@ -2004,9 +2389,9 @@ impl AsyncChainState {
         if let Some(anchors_path) = anchors_path {
             let anchors: Vec<RootAnchor> = serde_json::from_reader(
                 File::open(anchors_path)
-                    .map_err(|e| anyhow!("Could not open anchors file: {}", e))?,
+                    .or_else(|e| Err(anyhow!("Could not open anchors file: {}", e)))?,
             )
-            .map_err(|e| anyhow!("Could not read anchors file: {}", e))?;
+                .or_else(|e| Err(anyhow!("Could not read anchors file: {}", e)))?;
             return Ok(anchors);
         }
 
@@ -2016,10 +2401,7 @@ impl AsyncChainState {
 
         // Try to compute PTR root if we're past PTR genesis
         let ptrs_root = if state.can_scan_nums(meta.height) {
-            state
-                .nums_mut()
-                .state
-                .inner()
+            state.nums_mut().state.inner()
                 .ok()
                 .and_then(|s| s.compute_root().ok())
         } else {
@@ -2079,12 +2461,12 @@ impl AsyncChainState {
 
             let outpoint_key = OutpointKey::from_outpoint::<Sha256>(fso.outpoint());
             space_tree_keys.insert(outpoint_key.into());
-            if let Some(space) = &fso.spaceout.space
-                && let Covenant::Transfer { expire_height, .. } = &space.covenant
-            {
-                let last_update =
-                    expire_height.saturating_sub(spaces_protocol::constants::RENEWAL_INTERVAL);
-                most_recent_update = std::cmp::max(most_recent_update, last_update);
+            if let Some(space) = &fso.spaceout.space {
+                if let Covenant::Transfer { expire_height, .. } = &space.covenant {
+                    let last_update = expire_height
+                        .saturating_sub(spaces_protocol::constants::RENEWAL_INTERVAL);
+                    most_recent_update = std::cmp::max(most_recent_update, last_update);
+                }
             }
 
             let id = NumId::from_spk::<Sha256>(fso.spaceout.script_pubkey);
@@ -2171,25 +2553,23 @@ impl AsyncChainState {
             let blocks_remaining = next_commit - tip.height;
             return Err(anyhow!(
                 "Cannot prove: data updated at block {} is not yet committed. Try again in {} block(s)",
-                most_recent_update,
-                blocks_remaining
+                most_recent_update, blocks_remaining
             ));
         }
 
-        let num_tree_keys: Vec<_> = num_tree_keys.into_iter().collect();
-        let space_tree_keys: Vec<_> = space_tree_keys.into_iter().collect();
+        let num_tree_keys : Vec<_> = num_tree_keys.into_iter().collect();
+        let space_tree_keys : Vec<_> = space_tree_keys.into_iter().collect();
 
         let cached_height = Self::cached_snapshot_height(tip.height);
-        let use_cached = !prefer_recent && cached_height.is_some_and(|h| most_recent_update <= h);
+        let use_cached = !prefer_recent
+            && cached_height.is_some_and(|h| most_recent_update <= h);
 
         let (spaces_proof, spaces_root, block_anchor, ptrs_proof, ptrs_root) = if use_cached {
             let height = cached_height.unwrap();
             let snapshot = state.snapshot_at(height)?;
 
             let spaces_anchor: ChainAnchor = snapshot.spaces.metadata().try_into()?;
-            let spaces_proof = snapshot
-                .spaces
-                .prove(&space_tree_keys, ProofType::Standard)?;
+            let spaces_proof = snapshot.spaces.prove(&space_tree_keys, ProofType::Standard)?;
             let spaces_root = spaces_proof.compute_root()?;
 
             let ptrs_anchor: ChainAnchor = snapshot.nums.metadata().try_into()?;
@@ -2202,13 +2582,7 @@ impl AsyncChainState {
             let ptrs_proof = snapshot.nums.prove(&num_tree_keys, ProofType::Standard)?;
             let ptrs_root = ptrs_proof.compute_root()?;
 
-            (
-                spaces_proof,
-                spaces_root,
-                spaces_anchor,
-                ptrs_proof,
-                ptrs_root,
-            )
+            (spaces_proof, spaces_root, spaces_anchor, ptrs_proof, ptrs_root)
         } else {
             let spaces_snapshot = state.spaces_inner()?;
             let spaces_root = spaces_snapshot.compute_root()?;
@@ -2227,13 +2601,7 @@ impl AsyncChainState {
             let ptrs_proof = ptrs_snapshot.prove(&num_tree_keys, ProofType::Standard)?;
             let ptrs_root = ptrs_proof.compute_root()?;
 
-            (
-                spaces_proof,
-                spaces_root,
-                spaces_anchor,
-                ptrs_proof,
-                ptrs_root,
-            )
+            (spaces_proof, spaces_root, spaces_anchor, ptrs_proof, ptrs_root)
         };
 
         let spaces_buf = spaces_proof.to_vec()?;
@@ -2305,6 +2673,14 @@ impl AsyncChainState {
         resp_rx.await?
     }
 
+    pub async fn verify_event(&self, subject: Subject, event: NostrEvent) -> anyhow::Result<NostrEvent> {
+        let (resp, resp_rx) = oneshot::channel();
+        self.sender
+            .send(ChainStateCommand::VerifyEvent { subject, event, resp })
+            .await?;
+        resp_rx.await?
+    }
+
     pub async fn build_chain_proof(
         &self,
         request: ChainProofRequest,
@@ -2331,18 +2707,10 @@ impl AsyncChainState {
         resp_rx.await?
     }
 
-    pub async fn debug_set_expire_height(
-        &self,
-        space: SLabel,
-        expire_height: u32,
-    ) -> anyhow::Result<()> {
+    pub async fn debug_set_expire_height(&self, space: SLabel, expire_height: u32) -> anyhow::Result<()> {
         let (resp, resp_rx) = oneshot::channel();
         self.sender
-            .send(ChainStateCommand::DebugSetExpireHeight {
-                space,
-                expire_height,
-                resp,
-            })
+            .send(ChainStateCommand::DebugSetExpireHeight { space, expire_height, resp })
             .await?;
         resp_rx.await?
     }
@@ -2359,6 +2727,22 @@ impl AsyncChainState {
         let (resp, resp_rx) = oneshot::channel();
         self.sender
             .send(ChainStateCommand::GetSpace { hash, resp })
+            .await?;
+        resp_rx.await?
+    }
+
+    pub async fn get_all_spaces(&self) -> anyhow::Result<Vec<FullSpaceOut>> {
+        let (resp, resp_rx) = oneshot::channel();
+        self.sender
+            .send(ChainStateCommand::GetAllSpaces { resp })
+            .await?;
+        resp_rx.await?
+    }
+
+    pub async fn get_all_nums(&self) -> anyhow::Result<ListNumsResponse> {
+        let (resp, resp_rx) = oneshot::channel();
+        self.sender
+            .send(ChainStateCommand::GetAllNums { resp })
             .await?;
         resp_rx.await?
     }
@@ -2422,18 +2806,21 @@ impl AsyncChainState {
         resp_rx.await?
     }
 
-    pub async fn get_commitment(
-        &self,
-        subject: Subject,
-        root: Option<Hash>,
-    ) -> anyhow::Result<Option<Commitment>> {
+    pub async fn list_nums_by_spk(&self, script_pubkey: Vec<u8>) -> anyhow::Result<ListNumsResponse> {
         let (resp, resp_rx) = oneshot::channel();
         self.sender
-            .send(ChainStateCommand::GetCommitment {
-                subject,
-                root,
+            .send(ChainStateCommand::ListNumsBySpk {
+                script_pubkey: ScriptBuf::from(script_pubkey),
                 resp,
             })
+            .await?;
+        resp_rx.await?
+    }
+
+    pub async fn get_commitment(&self, subject: Subject, root: Option<Hash>) -> anyhow::Result<Option<Commitment>> {
+        let (resp, resp_rx) = oneshot::channel();
+        self.sender
+            .send(ChainStateCommand::GetCommitment { subject, root, resp })
             .await?;
         resp_rx.await?
     }
@@ -2500,6 +2887,50 @@ impl AsyncChainState {
             .await?;
         resp_rx.await?
     }
+
+    pub async fn find_fallback_by_handle(&self, needle: &str) -> anyhow::Result<Option<Vec<u8>>> {
+        let (resp, resp_rx) = oneshot::channel();
+        self.sender
+            .send(ChainStateCommand::FindFallbackByHandle {
+                needle: needle.to_string(),
+                resp,
+            })
+            .await?;
+        resp_rx.await?
+    }
+
+    pub async fn search_fallback_by_pattern(
+        &self,
+        pattern: &str,
+    ) -> anyhow::Result<BTreeMap<String, Vec<u8>>> {
+        let (resp, resp_rx) = oneshot::channel();
+        self.sender
+            .send(ChainStateCommand::SearchFallbackByPattern {
+                pattern: pattern.to_string(),
+                resp,
+            })
+            .await?;
+        resp_rx.await?
+    }
+}
+
+fn list_nums_response_from_rows(
+    rows: Vec<(Txid, NumOut, Option<SLabel>)>,
+) -> ListNumsResponse {
+    ListNumsResponse {
+        nums: rows
+            .into_iter()
+            .map(|(txid, numout, delegating_for)| {
+                let records = sip7_records_for_num_data(&numout.num.data);
+                NumEntry {
+                    txid,
+                    numout,
+                    delegating_for,
+                    records,
+                }
+            })
+            .collect(),
+    }
 }
 
 fn resolve_num_id(state: &mut Chain, subject: &Subject) -> anyhow::Result<NumId> {
@@ -2507,11 +2938,12 @@ fn resolve_num_id(state: &mut Chain, subject: &Subject) -> anyhow::Result<NumId>
         Subject::NumId(id) => Ok(*id),
         Subject::Label(label) if label.is_numeric() => {
             let numeric: SNumeric = label.clone().try_into().unwrap();
-            state
-                .get_num_id(&numeric)?
+            state.get_num_id(&numeric)?
                 .ok_or_else(|| anyhow!("numeric '{}' not found", numeric))
         }
         Subject::Label(_) => Err(anyhow!("expected a num id or numeric, not a space")),
+        Subject::Handle(h) => Err(anyhow!("expected a num id or numeric, not a handle: {}", h)),
+        Subject::HandlePattern(p) => Err(anyhow!("expected a num id or numeric, not a pattern: {}", p)),
     }
 }
 
@@ -2574,15 +3006,17 @@ async fn get_server_info(
     })
 }
 
+
 fn resolve_label(state: &mut Chain, subject: &Subject) -> anyhow::Result<SLabel> {
     match subject {
         Subject::Label(label) => Ok(label.clone()),
         Subject::NumId(id) => {
-            let info = state
-                .get_num_info(id)?
+            let info = state.get_num_info(id)?
                 .ok_or_else(|| anyhow!("num id '{}' not found", id))?;
             Ok(info.numout.num.name.to_slabel())
         }
+        Subject::Handle(h) => Err(anyhow!("expected a space or num, not a handle: {}", h)),
+        Subject::HandlePattern(p) => Err(anyhow!("expected a space or num, not a pattern: {}", p)),
     }
 }
 
@@ -2596,22 +3030,24 @@ fn get_delegation(state: &mut Chain, subject: &Subject) -> anyhow::Result<Option
             let Some(num_info) = state.get_num_info(&num_id)? else {
                 return Ok(None);
             };
-            (
-                NumId::from_spk::<Sha256>(num_info.numout.script_pubkey),
-                num.clone(),
-            )
-        }
+            (NumId::from_spk::<Sha256>(num_info.numout.script_pubkey), num.clone())
+        },
         Subject::Label(space) => {
-            let info = match state.get_space_info(&SpaceKey::from(Sha256::hash(space.as_ref())))? {
+            let info = match state.get_space_info(
+                &SpaceKey::from(Sha256::hash(space.as_ref()))
+            )? {
                 None => return Ok(None),
-                Some(info) => info,
+                Some(info) => info
             };
-            (
-                NumId::from_spk::<Sha256>(info.spaceout.script_pubkey),
-                space.clone(),
-            )
+            (NumId::from_spk::<Sha256>(info.spaceout.script_pubkey), space.clone())
         }
-        Subject::NumId(id) => return Ok(Some(*id)),
+        Subject::NumId(id) => return Ok(Some(id.clone())),
+        Subject::Handle(h) => {
+            return Err(anyhow!("expected a space, numeric, or num id, not a handle: {}", h));
+        }
+        Subject::HandlePattern(p) => {
+            return Err(anyhow!("expected a space, numeric, or num id, not a pattern: {}", p));
+        }
     };
 
     let delegate = state.get_delegator(&DelegatorKey::from_id::<Sha256>(id))?;
@@ -2623,18 +3059,13 @@ fn get_delegation(state: &mut Chain, subject: &Subject) -> anyhow::Result<Option
     }
 }
 
-fn get_commitment(
-    state: &mut Chain,
-    subject: &Subject,
-    root: Option<Hash>,
-) -> anyhow::Result<Option<Commitment>> {
+fn get_commitment(state: &mut Chain, subject: &Subject, root: Option<Hash>) -> anyhow::Result<Option<Commitment>> {
     let label = resolve_label(state, subject)?;
     let root = match root {
         None => {
             let rk = CommitmentTipKey::from_slabel::<Sha256>(&label);
-            let k = state
-                .get_commitments_tip(&rk)
-                .map_err(|e| anyhow!("could not fetch state root: {}", e))?;
+            let k = state.get_commitments_tip(&rk)
+                    .map_err(|e| anyhow!("could not fetch state root: {}", e))?;
             if let Some(k) = k {
                 k
             } else {
@@ -2645,11 +3076,8 @@ fn get_commitment(
     };
 
     let ck = CommitmentKey::new::<Sha256>(&label, root);
-    state.get_commitment(&ck).map_err(|e| {
-        anyhow!(
-            "could not fetch commitment with root: {}: {}",
-            hex::encode(root),
-            e
+    state.get_commitment(&ck)
+        .map_err(|e|
+            anyhow!("could not fetch commitment with root: {}: {}", hex::encode(root), e)
         )
-    })
 }

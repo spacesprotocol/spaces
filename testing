@@ -1,0 +1,1 @@
+curl -sS -u 'testuser:SomeRisk84' -H 'Content-Type: application/json' -d '{ "jsonrpc": "2.0", "id": 1, "method": "listnumsbyspk", "params": ["5120f21d32c4bed2d00f7193616e425a123d599005cefef4a6fa41daadd73e07d3e0"] }' 'http://127.0.0.1:7225/'

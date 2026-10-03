@@ -2,6 +2,7 @@ use clap::ValueEnum;
 use colored::{Color, Colorize};
 use jsonrpsee::core::Serialize;
 use serde::Deserialize;
+use spaces_nums::num_id::NumId;
 use spaces_protocol::{
     Covenant,
     bitcoin::{Amount, Network, OutPoint},
@@ -10,14 +11,15 @@ use spaces_wallet::{
     Balance, DoubleUtxo, WalletOutput,
     address::SpaceAddress,
     bdk_wallet::KeychainKind,
-    bitcoin::{Address, Txid},
+    bitcoin::{Address, ScriptBuf, Txid},
     tx_event::{
-        BidEventDetails, BidoutEventDetails, OpenEventDetails, SendEventDetails,
-        TransferEventDetails, TxEventKind,
+        BidEventDetails, BidoutEventDetails, CreateNumEventDetails, OpenEventDetails,
+        SendEventDetails, TransferEventDetails, TxEvent, TxEventKind,
     },
 };
 use tabled::{Table, Tabled};
 
+use crate::store::Sha256;
 use crate::wallets::{WalletInfoWithProgress, WalletStatus};
 use crate::{
     rpc::ServerInfo,
@@ -521,8 +523,49 @@ fn print_tx_response(network: Network, response: TxResponse) {
                         .expect("deserialize bidout event");
                 println!("   Count: {}", bidout.count);
             }
+            TxEventKind::CreateNum => {
+                let create: CreateNumEventDetails =
+                    serde_json::from_value(event.details.expect("details"))
+                        .expect("deserialize create-num event");
+                print_create_num_binding(network, &create.genesis_spk, "   ");
+            }
             _ => {}
         }
+    }
+}
+
+/// Print the created num id (`num1…`), binding script pubkey (P2TR hex, typically
+/// `5120…`), and taproot address.
+pub fn print_create_num_binding(network: Network, genesis_spk: &ScriptBuf, indent: &str) {
+    let num_id = NumId::from_spk::<Sha256>(genesis_spk.clone());
+    println!("{}num_id: {}", indent, num_id);
+    println!(
+        "{}script_pubkey: {}",
+        indent,
+        hex::encode(genesis_spk.as_bytes())
+    );
+    if let Ok(addr) = Address::from_script(genesis_spk.as_script(), network) {
+        println!("{}taproot_address: {}", indent, addr);
+    }
+}
+
+/// Print binding script pubkey and taproot address for each create-num event.
+pub fn print_create_num_bindings_from_events(
+    network: Network,
+    events: &[TxEvent],
+    indent: &str,
+) {
+    for event in events {
+        if event.kind != TxEventKind::CreateNum {
+            continue;
+        }
+        let Some(details) = event.details.clone() else {
+            continue;
+        };
+        let Ok(create) = serde_json::from_value::<CreateNumEventDetails>(details) else {
+            continue;
+        };
+        print_create_num_binding(network, &create.genesis_spk, indent);
     }
 }
 

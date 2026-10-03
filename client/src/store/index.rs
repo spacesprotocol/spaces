@@ -1,11 +1,12 @@
-use anyhow::{Result, anyhow};
-use borsh::BorshDeserialize;
-use rusqlite::{Connection, params};
-use spaces_nums::num_id::NumId;
-use spaces_nums::snumeric::SNumeric;
-use spaces_protocol::bitcoin::BlockHash;
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 use std::sync::{Mutex, RwLock};
+use anyhow::{anyhow, Result};
+use borsh::BorshDeserialize;
+use rusqlite::{params, Connection};
+use spaces_nums::num_id::NumId;
+use spaces_nums::snumeric::SNumeric;
+use spaces_protocol::bitcoin::{hashes::Hash as _, BlockHash};
 
 use crate::client::{BlockMeta, NumBlockMeta};
 
@@ -75,6 +76,70 @@ impl SqliteIndex {
             .push((hash, height, meta));
     }
 
+    /// All spaces block rows merged with uncommitted staged entries, ordered by height.
+    pub fn list_spaces_blocks_merged(&self) -> Result<Vec<(u32, BlockHash, BlockMeta)>> {
+        let mut by_height: BTreeMap<u32, (BlockHash, BlockMeta)> = BTreeMap::new();
+
+        {
+            let conn = self.conn.lock().unwrap();
+            let mut stmt = conn.prepare_cached(
+                "SELECT block_height, block_hash, data FROM spaces_blocks ORDER BY block_height ASC",
+            )?;
+            let mut rows = stmt.query([])?;
+            while let Some(row) = rows.next()? {
+                let height: u32 = row.get(0)?;
+                let hash_bytes: Vec<u8> = row.get(1)?;
+                let data: Vec<u8> = row.get(2)?;
+                let hash = BlockHash::from_slice(&hash_bytes)
+                    .map_err(|_| anyhow!("invalid block hash length in spaces_blocks"))?;
+                let meta = BlockMeta::try_from_slice(&data)
+                    .map_err(|e| anyhow!("deserialize BlockMeta: {}", e))?;
+                by_height.insert(height, (hash, meta));
+            }
+        }
+
+        {
+            let staged = self.staged.read().unwrap();
+            for (hash, height, meta) in &staged.spaces_blocks {
+                by_height.insert(*height, (*hash, meta.clone()));
+            }
+        }
+
+        Ok(by_height.into_iter().map(|(h, (bh, m))| (h, bh, m)).collect())
+    }
+
+    /// All nums block rows merged with uncommitted staged entries, ordered by height.
+    pub fn list_nums_blocks_merged(&self) -> Result<Vec<(u32, BlockHash, NumBlockMeta)>> {
+        let mut by_height: BTreeMap<u32, (BlockHash, NumBlockMeta)> = BTreeMap::new();
+
+        {
+            let conn = self.conn.lock().unwrap();
+            let mut stmt = conn.prepare_cached(
+                "SELECT block_height, block_hash, data FROM nums_blocks ORDER BY block_height ASC",
+            )?;
+            let mut rows = stmt.query([])?;
+            while let Some(row) = rows.next()? {
+                let height: u32 = row.get(0)?;
+                let hash_bytes: Vec<u8> = row.get(1)?;
+                let data: Vec<u8> = row.get(2)?;
+                let hash = BlockHash::from_slice(&hash_bytes)
+                    .map_err(|_| anyhow!("invalid block hash length in nums_blocks"))?;
+                let meta = NumBlockMeta::try_from_slice(&data)
+                    .map_err(|e| anyhow!("deserialize NumBlockMeta: {}", e))?;
+                by_height.insert(height, (hash, meta));
+            }
+        }
+
+        {
+            let staged = self.staged.read().unwrap();
+            for (hash, height, meta) in &staged.nums_blocks {
+                by_height.insert(*height, (*hash, meta.clone()));
+            }
+        }
+
+        Ok(by_height.into_iter().map(|(h, (bh, m))| (h, bh, m)).collect())
+    }
+
     pub fn get_spaces_block(&self, hash: &BlockHash) -> Result<Option<BlockMeta>> {
         // Check staged first
         {
@@ -89,7 +154,7 @@ impl SqliteIndex {
         let conn = self.conn.lock().unwrap();
         let mut stmt =
             conn.prepare_cached("SELECT data FROM spaces_blocks WHERE block_hash = ?1")?;
-        let result = stmt.query_row(params![<BlockHash as AsRef<[u8]>>::as_ref(hash)], |row| {
+        let result = stmt.query_row(params![<BlockHash as AsRef<[u8]>>::as_ref(&hash)], |row| {
             let data: Vec<u8> = row.get(0)?;
             Ok(data)
         });
@@ -125,8 +190,9 @@ impl SqliteIndex {
         }
         // Fall back to sqlite
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare_cached("SELECT data FROM nums_blocks WHERE block_hash = ?1")?;
-        let result = stmt.query_row(params![<BlockHash as AsRef<[u8]>>::as_ref(hash)], |row| {
+        let mut stmt =
+            conn.prepare_cached("SELECT data FROM nums_blocks WHERE block_hash = ?1")?;
+        let result = stmt.query_row(params![<BlockHash as AsRef<[u8]>>::as_ref(&hash)], |row| {
             let data: Vec<u8> = row.get(0)?;
             Ok(data)
         });
@@ -143,11 +209,36 @@ impl SqliteIndex {
     // --- SNumeric index ---
 
     pub fn insert_snumeric(&self, snum: &SNumeric, id: NumId) {
-        self.staged
-            .write()
-            .unwrap()
-            .snumeric
-            .push((snum.block(), snum.tx_pos(), snum.vout(), id));
+        self.staged.write().unwrap().snumeric.push((
+            snum.block(),
+            snum.tx_pos(),
+            snum.vout(),
+            id,
+        ));
+    }
+
+    /// All distinct num ids referenced by the snumeric index (committed + staged).
+    pub fn collect_distinct_num_ids(&self) -> Result<HashSet<NumId>> {
+        let mut ids = HashSet::new();
+        {
+            let staged = self.staged.read().unwrap();
+            for (_, _, _, id) in staged.snumeric.iter() {
+                ids.insert(*id);
+            }
+        }
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare_cached("SELECT DISTINCT num_id FROM snumeric")?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let data: Vec<u8> = row.get(0)?;
+            if data.len() != 32 {
+                return Err(anyhow!("invalid num_id length: {}", data.len()));
+            }
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&data);
+            ids.insert(NumId::from_bytes(arr));
+        }
+        Ok(ids)
     }
 
     pub fn get_snumeric(&self, snum: &SNumeric) -> Result<Option<NumId>> {
@@ -201,11 +292,7 @@ impl SqliteIndex {
             )?;
             for (hash, height, meta) in staged.spaces_blocks.drain(..) {
                 let data = borsh::to_vec(&meta)?;
-                stmt.execute(params![
-                    height,
-                    <BlockHash as AsRef<[u8]>>::as_ref(&hash),
-                    data
-                ])?;
+                stmt.execute(params![height, <BlockHash as AsRef<[u8]>>::as_ref(&hash), data])?;
             }
         }
 
@@ -215,11 +302,7 @@ impl SqliteIndex {
             )?;
             for (hash, height, meta) in staged.nums_blocks.drain(..) {
                 let data = borsh::to_vec(&meta)?;
-                stmt.execute(params![
-                    height,
-                    <BlockHash as AsRef<[u8]>>::as_ref(&hash),
-                    data
-                ])?;
+                stmt.execute(params![height, <BlockHash as AsRef<[u8]>>::as_ref(&hash), data])?;
             }
         }
 
@@ -228,12 +311,7 @@ impl SqliteIndex {
                 "INSERT OR REPLACE INTO snumeric (block_height, tx_pos, vout, num_id) VALUES (?1, ?2, ?3, ?4)",
             )?;
             for (block_height, tx_pos, vout, id) in staged.snumeric.drain(..) {
-                stmt.execute(params![
-                    block_height,
-                    tx_pos as u32,
-                    vout as u32,
-                    id.as_slice()
-                ])?;
+                stmt.execute(params![block_height, tx_pos as u32, vout as u32, id.as_slice()])?;
             }
         }
 

@@ -120,14 +120,14 @@ pub fn build_schema() -> Vec<MethodSchema> {
         // Num queries
         MethodSchema {
             name: "getnum",
-            description: "Get full num output by numeric id or num id",
+            description: "Get full num output by numeric id or num id, including parsed SIP-7 records when data is valid",
             params: vec![param(
                 "subject",
                 "Subject",
                 "#numeric or num1... id",
                 json!("#1-2-3"),
             )],
-            result_type: "Option<FullNumOut>",
+            result_type: "Option<GetNumResponse>",
             result_schema: None,
             extra_examples: vec![],
         },
@@ -169,6 +169,27 @@ pub fn build_schema() -> Vec<MethodSchema> {
             )],
             result_type: "Option<RebindData>",
             result_schema: None,
+            extra_examples: vec![],
+        },
+        MethodSchema {
+            name: "listnumsbyspk",
+            description: "List live num outputs on the indexed chain whose script_pubkey matches the hex-encoded script (same result shape as walletlistnums; no wallet)",
+            params: vec![param(
+                "spk_hex",
+                "string",
+                "Hex-encoded script_pubkey bytes",
+                json!("5120ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"),
+            )],
+            result_type: "ListNumsResponse",
+            result_schema: Some(serde_json::to_value(schema_for!(ListNumsResponse)).unwrap()),
+            extra_examples: vec![],
+        },
+        MethodSchema {
+            name: "getallnums",
+            description: "Get all live nums on the indexed chain (same result shape as walletlistnums; no wallet, no filter)",
+            params: vec![],
+            result_type: "ListNumsResponse",
+            result_schema: Some(serde_json::to_value(schema_for!(ListNumsResponse)).unwrap()),
             extra_examples: vec![],
         },
         // Commitment/delegation queries
@@ -596,6 +617,40 @@ pub fn build_schema() -> Vec<MethodSchema> {
                     }),
                 ),
             ],
+        },
+        MethodSchema {
+            name: "walletcreatenum",
+            description: "Create a num bound to a hex-encoded script_pubkey with a required fee rate (sat/vB); returns WalletResponse JSON",
+            params: vec![
+                param("wallet", "string", "Wallet name", json!("default")),
+                param(
+                    "fee_rate_sat_vb",
+                    "u64",
+                    "Fee rate in satoshis per virtual byte",
+                    json!(2),
+                ),
+                param(
+                    "spk_hex",
+                    "string",
+                    "Hex-encoded script_pubkey bytes for the num binding",
+                    json!("5120aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+                ),
+            ],
+            result_type: "WalletResponse",
+            result_schema: Some(serde_json::to_value(schema_for!(WalletResponse)).unwrap()),
+            extra_examples: vec![(
+                "Create num with binding script",
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "walletcreatenum",
+                    "params": [
+                        "default",
+                        2,
+                        "5120aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    ]
+                }),
+            )],
         },
         MethodSchema {
             name: "walletgetnewaddress",

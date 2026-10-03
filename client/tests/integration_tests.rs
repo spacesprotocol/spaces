@@ -256,6 +256,7 @@ async fn it_should_only_accept_forced_zero_value_bid_increments_and_revoke(
                     force: true,
                     confirmed_only: false,
                     skip_tx_check: false,
+                    dry_run: false,
                 },
             )
             .await
@@ -280,6 +281,7 @@ async fn it_should_only_accept_forced_zero_value_bid_increments_and_revoke(
                 force: true,
                 confirmed_only: false,
                 skip_tx_check: true,
+                dry_run: false,
             },
         )
         .await?;
@@ -569,6 +571,7 @@ async fn it_should_replace_mempool_bids(rig: &TestRig) -> anyhow::Result<()> {
                 force: false,
                 confirmed_only: false,
                 skip_tx_check: false,
+                dry_run: false,
             },
         )
         .await
@@ -585,6 +588,7 @@ async fn it_should_replace_mempool_bids(rig: &TestRig) -> anyhow::Result<()> {
                 force: false,
                 confirmed_only: false,
                 skip_tx_check: false,
+                dry_run: false,
             },
         )
         .await
@@ -649,6 +653,7 @@ async fn it_should_replace_mempool_bids(rig: &TestRig) -> anyhow::Result<()> {
                 force: false,
                 confirmed_only: false,
                 skip_tx_check: false,
+                dry_run: false,
             },
         )
         .await
@@ -683,6 +688,7 @@ async fn it_should_replace_mempool_bids(rig: &TestRig) -> anyhow::Result<()> {
                 force: false,
                 confirmed_only: false,
                 skip_tx_check: false,
+                dry_run: false,
             },
         )
         .await
@@ -790,6 +796,7 @@ async fn it_should_maintain_locktime_when_fee_bumping(rig: &TestRig) -> anyhow::
                 force: false,
                 confirmed_only: false,
                 skip_tx_check: false,
+                dry_run: false,
             },
         )
         .await?;
@@ -1698,6 +1705,7 @@ async fn wallet_do(
                 force,
                 confirmed_only: false,
                 skip_tx_check: false,
+                dry_run: false,
             },
         )
         .await?;
